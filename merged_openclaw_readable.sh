@@ -104,10 +104,6 @@ echo "source ~/.auto_proxy_sync.sh" >> ~/.bashrc
 source ~/.bashrc
 echo -e "✅ 代理配置已永久生效！\n"
 
-echo -e "==================== 一键执行 kejilion.sh 开发环境配置 ===================="
-echo -e "🔧 正在自动执行 kejilion.sh 脚本..."
-bash <(curl -sL https://kejilion.sh)
-
 echo -e "\n==================== 🎉 全部配置完成！ ===================="
 echo -e "📌 你的所有原始功能100%保留，使用习惯完全不变"
 echo -e "📌 已添加：V2RayN未开友好提示 + 自动防重复配置"
@@ -598,7 +594,7 @@ PY
 		git config --global url."${gh_proxy}github.com/".insteadOf git@github.com:
 
 		npm install -g openclaw@latest
-		OPENCLAW_ONBOARD_NO_UI=1 openclaw onboard --install-daemon >/dev/null 2>&1 || openclaw onboard --install-daemon
+		openclaw onboard --install-daemon
 		start_gateway
 		openclaw_memory_auto_setup_run "local" >/dev/null 2>&1 || true
 		add_app_id
@@ -5993,8 +5989,7 @@ run_openclaw() {
     err "未找到 install_moltbot 函数，无法按原脚本逻辑安装 openclaw"
   fi
 
-  # 二次兜底，确保不进入配置界面并启用 Local
-  OPENCLAW_ONBOARD_NO_UI=1 openclaw onboard --install-daemon >/dev/null 2>&1 || true
+  # 安装完成后自动启用 Local 记忆方案
   openclaw config set memory.backend builtin >/dev/null 2>&1 || true
   openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
 }
@@ -6112,7 +6107,7 @@ skpl_menu() {
     echo "==========================================="
     echo "SKPL 面板（集成 OpenClaw 原生能力）"
     echo "==========================================="
-    echo "1. OpenClaw 原生面板"
+    echo "1. OpenClaw 全功能面板（你的 SKPL 核心面板）"
     echo "2. EvoMap 安装"
     echo "3. EvoMap 卸载"
     echo "4. EvoMap 更新"
