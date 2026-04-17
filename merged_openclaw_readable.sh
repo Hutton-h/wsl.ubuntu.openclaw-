@@ -6029,6 +6029,13 @@ apt_update_safe() {
     return 0
   fi
 
+  if grep -q "Couldn't wait for subprocess - waitpid" "$update_log" 2>/dev/null; then
+    echo "检测到 apt 子进程异常，等待后台 apt 进程空闲后重试..."
+    if wait_for_apt_idle 45 && apt-get update -y >"$update_log" 2>&1; then
+      return 0
+    fi
+  fi
+
   echo "apt update 失败，日志如下："
   sed -n '1,120p' "$update_log" 2>/dev/null || true
 
@@ -6068,6 +6075,22 @@ apt_install_safe() {
   else
     apt-get install -y "$@"
   fi
+}
+
+wait_for_apt_idle() {
+  local timeout_sec="${1:-30}"
+  local i=0
+  while [ "$i" -lt "$timeout_sec" ]; do
+    if ! pgrep -x apt >/dev/null 2>&1 \
+      && ! pgrep -x apt-get >/dev/null 2>&1 \
+      && ! pgrep -x dpkg >/dev/null 2>&1 \
+      && ! pgrep -x apt-key >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
 }
 
 is_wsl() {
@@ -6160,9 +6183,12 @@ step1_wsl_proxy_sync() {
   echo "==================== Step 1/4: WSL/Windows 代理同步 ===================="
   local ubuntu_codename=""
 
-  killall apt apt-get dpkg 2>/dev/null || true
-  rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* 2>/dev/null || true
-  dpkg --configure -a 2>/dev/null || true
+  if wait_for_apt_idle 30; then
+    rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* 2>/dev/null || true
+    dpkg --configure -a 2>/dev/null || true
+  else
+    echo "检测到 apt/dpkg 正在运行，跳过锁清理，避免中断系统包管理进程。"
+  fi
 
   rm -f /etc/apt/apt.conf.d/*proxy* /etc/apt/apt.conf.d/99* 2>/dev/null || true
   echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
