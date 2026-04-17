@@ -187,6 +187,12 @@ PY
   fi
 }
 
+state_reset_for_full_rerun() {
+  : > "$SKPL_STATE_FILE"
+  state_set STEP 1
+  echo "已重置安装进度，将从第 1 步开始重新执行。"
+}
+
 run_step_guard() {
   local step="$1"
   shift
@@ -486,24 +492,30 @@ npm_query_openclaw_latest_version() {
 }
 
 install_openclaw_global() {
-  local package_spec
-  local -a package_specs=("openclaw@latest" "openclaw@2026.4.14")
+  local country="unknown"
+  local preferred_registry="https://registry.npmjs.org"
 
   refresh_runtime_proxy_env
 
   if resolve_active_proxy "${SKPL_PROXY_PORT:-10808}" >/dev/null 2>&1; then
-    npm config set registry https://registry.npmmirror.com >/dev/null 2>&1 || true
-    package_specs=("openclaw@2026.4.14" "openclaw@latest")
+    preferred_registry="https://registry.npmmirror.com"
+  else
+    country=$(detect_npm_country)
+    if [ "$country" = "CN" ] || [ "$country" = "HK" ]; then
+      preferred_registry="https://registry.npmmirror.com"
+    fi
   fi
 
-  for package_spec in "${package_specs[@]}"; do
-    echo "正在安装 ${package_spec} ..."
-    if npm_try_with_registries install -g "$package_spec" --no-fund --no-audit --loglevel=error --prefer-online --fetch-retries=2 --fetch-timeout=300000; then
-      return 0
-    fi
-  done
+  npm config set registry "$preferred_registry" >/dev/null 2>&1 || true
 
-  return 1
+  echo "正在按 kejilion 逻辑安装 OpenClaw CLI..."
+  echo "当前 npm 源: ${preferred_registry}"
+  if timeout "${SKPL_NPM_INSTALL_TIMEOUT:-180}" npm install -g openclaw@latest --no-fund --no-audit --loglevel=error --prefer-online --fetch-retries=2 --fetch-timeout=300000; then
+    return 0
+  fi
+
+  echo "单源直装失败，开始尝试备用 npm 源..."
+  npm_try_with_registries install -g openclaw@latest --no-fund --no-audit --loglevel=error --prefer-online --fetch-retries=2 --fetch-timeout=300000
 }
 
 install_evomap_dependencies() {
@@ -6614,7 +6626,7 @@ run_full_pipeline_once() {
   step=$(state_get STEP)
   [ -z "$step" ] && step=2
   if [ "$step" -le 2 ]; then
-    echo "[2/4] 安装 OpenClaw（原脚本逻辑）并自动启用 Local 记忆..."
+    echo "[2/4] 按 kejilion 逻辑安装 OpenClaw 并自动启用 Local 记忆..."
     if ! run_step_guard "step2_openclaw" run_openclaw_install_step; then
       print_failure_hint
       return 1
@@ -6648,9 +6660,49 @@ run_full_pipeline_once() {
   echo "全部步骤执行完成。可使用 skpl 打开面板。"
 }
 
+rerun_full_pipeline_from_start() {
+  state_reset_for_full_rerun
+  run_full_pipeline_once
+}
+
 skpl_update_panel() {
   save_self_to_skpl
   echo "SKPL 面板已更新。"
+}
+
+skpl_update_system() {
+  echo "开始更新系统软件包..."
+
+  if command -v apt >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt update -y >/dev/null 2>&1 || return 1
+    DEBIAN_FRONTEND=noninteractive apt upgrade -y >/dev/null 2>&1 || return 1
+    DEBIAN_FRONTEND=noninteractive apt autoremove -y >/dev/null 2>&1 || true
+    echo "APT 系统更新完成。"
+    return 0
+  fi
+
+  if command -v dnf >/dev/null 2>&1; then
+    dnf upgrade -y >/dev/null 2>&1 || return 1
+    echo "DNF 系统更新完成。"
+    return 0
+  fi
+
+  if command -v yum >/dev/null 2>&1; then
+    yum update -y >/dev/null 2>&1 || return 1
+    echo "YUM 系统更新完成。"
+    return 0
+  fi
+
+  echo "未识别的包管理器，无法自动更新系统。"
+  return 1
+}
+
+skpl_wslwin_and_update_system() {
+  if ! run_wslwin_proxy_sync; then
+    return 1
+  fi
+
+  skpl_update_system
 }
 
 skpl_main_panel() {
@@ -6666,17 +6718,19 @@ skpl_main_panel() {
     echo "5. SKPL 面板卸载"
     echo "6. 查看最近日志"
     echo "7. 从中断点继续安装"
+    echo "8. WSL代理同步并更新系统"
     echo "0. 退出"
     echo "---------------------------------------"
     read -r -p "请输入你的选择: " skpl_choice
     case "$skpl_choice" in
       1) moltbot_menu ;;
       2) openclaw_evomap_menu ;;
-      3) run_full_pipeline_once; break_end ;;
+      3) rerun_full_pipeline_from_start; break_end ;;
       4) skpl_update_panel; break_end ;;
       5) remove_skpl_panel_only; break_end ;;
       6) show_recent_log; break_end ;;
       7) run_full_pipeline_once; break_end ;;
+      8) skpl_wslwin_and_update_system; break_end ;;
       0) exit 0 ;;
       *) echo "无效的选择，请重试。"; sleep 1 ;;
     esac
