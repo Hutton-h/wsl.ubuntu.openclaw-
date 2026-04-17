@@ -5529,7 +5529,7 @@ success() { echo -e "${GREEN}[成功]${NC} $1"; }
 error() { echo -e "${RED}[错误]${NC} $1"; }
 
 user_systemd_ready() {
-  [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ] && systemctl --user show-environment >/dev/null 2>&1
+  [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ]
 }
 
 resolve_openclaw_entry() {
@@ -5652,7 +5652,7 @@ gateway_running() {
 }
 
 systemd_ready() {
-  [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ] && systemctl --user show-environment >/dev/null 2>&1
+  [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ]
 }
 
 ensure_gateway_ready() {
@@ -5926,11 +5926,12 @@ SCRIPT_FILE="/root/.skpl/merged_openclaw_readable.sh"
 
 if [ -f "$LOCK_FILE" ]; then
   old_pid=$(cat "$LOCK_FILE" 2>/dev/null || true)
-  if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
+  if [[ "$old_pid" =~ ^[0-9]+$ ]] && kill -0 "$old_pid" 2>/dev/null; then
     echo "时间: $(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG_FILE"
     echo "事件: 检测到已有续跑进程，跳过重复启动" >>"$LOG_FILE"
     exit 0
   fi
+  rm -f "$LOCK_FILE"
 fi
 
 printf '%s\n' "$$" > "$LOCK_FILE"
@@ -5950,6 +5951,9 @@ EOF
 
   cat > "$AUTO_RESUME_HOOK" <<'EOF'
 #!/bin/bash
+[ -n "${SKPL_AUTO_RESUME_HOOK_RAN:-}" ] && return 0 2>/dev/null || exit 0
+export SKPL_AUTO_RESUME_HOOK_RAN=1
+
 [ -t 1 ] || return 0 2>/dev/null || exit 0
 case "$-" in
   *i*) ;;
@@ -5974,11 +5978,12 @@ fi
 
 if [ -f /root/.skpl/auto-resume.running ]; then
   running_pid=$(cat /root/.skpl/auto-resume.running 2>/dev/null || true)
-  if [ -n "$running_pid" ] && kill -0 "$running_pid" 2>/dev/null; then
+  if [[ "$running_pid" =~ ^[0-9]+$ ]] && kill -0 "$running_pid" 2>/dev/null; then
     echo ""
     echo "[SKPL] 未完成安装程序已经在后台继续执行中。日志: /root/.skpl/auto-resume.log"
     return 0 2>/dev/null || exit 0
   fi
+  rm -f /root/.skpl/auto-resume.running
 fi
 
 echo ""
@@ -5987,6 +5992,13 @@ echo "[SKPL] 可查看日志: /root/.skpl/auto-resume.log"
 echo "[SKPL] 查看日志请执行: sed -n '1,200p' /root/.skpl/auto-resume.log"
 printf '%s\n' "pending" > /root/.skpl/auto-resume.running
 nohup /bin/bash /root/.skpl/resume_runner.sh >/dev/null 2>&1 &
+sleep 0.2
+if [ -f /root/.skpl/auto-resume.running ]; then
+  running_pid=$(cat /root/.skpl/auto-resume.running 2>/dev/null || true)
+  if ! [[ "$running_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$running_pid" 2>/dev/null; then
+    echo "[SKPL] 后台续跑未成功拉起，请手动执行: bash /root/.skpl/merged_openclaw_readable.sh --resume"
+  fi
+fi
 EOF
   chmod +x "$AUTO_RESUME_HOOK"
 
@@ -6033,7 +6045,7 @@ is_wsl() {
 }
 
 wsl_systemd_active() {
-  [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ] && systemctl --user show-environment >/dev/null 2>&1
+  [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ]
 }
 
 ensure_wsl_systemd_config() {
