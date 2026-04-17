@@ -6402,6 +6402,51 @@ run_with_retry() {
   return 1
 }
 
+npm_install_openclaw_resilient() {
+  local -a registries=(
+    "https://registry.npmjs.org"
+    "https://registry.npmmirror.com"
+  )
+  local reg
+  local rc=0
+
+  if command -v openclaw >/dev/null 2>&1; then
+    echo "openclaw 已存在，跳过安装。"
+    return 0
+  fi
+
+  if [ -n "${http_proxy:-}" ]; then
+    export npm_config_proxy="${http_proxy}"
+  fi
+  if [ -n "${https_proxy:-}" ]; then
+    export npm_config_https_proxy="${https_proxy}"
+  fi
+
+  for reg in "${registries[@]}"; do
+    echo "[执行] 使用 npm 源安装 openclaw: ${reg}"
+    timeout 1200 npm install -g openclaw@latest \
+      --registry="${reg}" \
+      --fetch-retries=5 \
+      --fetch-retry-mintimeout=20000 \
+      --fetch-retry-maxtimeout=120000 \
+      --no-fund \
+      --no-audit
+    rc=$?
+
+    if [ "$rc" -eq 0 ] && command -v openclaw >/dev/null 2>&1; then
+      return 0
+    fi
+
+    if [ "$rc" -eq 124 ]; then
+      echo "[提示] npm 安装超时（20 分钟），切换下一个源。"
+    else
+      echo "[提示] npm 安装失败（退出码: ${rc}），切换下一个源。"
+    fi
+  done
+
+  return 1
+}
+
 fetch_file() {
   local url="$1"
   local output="$2"
@@ -6531,9 +6576,9 @@ step2_install_openclaw_compatible() {
   echo "==================== Step 2/4: 安装 OpenClaw（不配置） ===================="
   install_node_and_tools_from_openclaw_logic
 
-  if ! run_with_retry "安装 OpenClaw npm 包(官方源)" 2 npm install -g openclaw@latest; then
-    echo "[提示] 官方源安装失败，切换 npm 镜像源重试..."
-    run_with_retry "安装 OpenClaw npm 包(镜像源)" 2 npm install -g openclaw@latest --registry=https://registry.npmmirror.com
+  if ! npm_install_openclaw_resilient; then
+    echo "OpenClaw 安装失败：npm 多源重试后仍未成功。"
+    exit 1
   fi
   if ! command -v openclaw >/dev/null 2>&1; then
     echo "OpenClaw 安装失败：未检测到 openclaw 命令。"
