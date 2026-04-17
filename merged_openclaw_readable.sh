@@ -570,6 +570,10 @@ openclaw_get_config_path_quick() {
   fi
 }
 
+openclaw_default_memory_model_path() {
+  echo "/root/.openclaw/models/embedding/embeddinggemma-300M-Q8_0.gguf"
+}
+
 install_node_and_tools() {
   ensure_node_runtime
 }
@@ -638,6 +642,14 @@ openclaw_memory_prepare() {
   printf '%s\n' "$model_path"
 }
 
+openclaw_memory_prepare_prefetch() {
+  local model_dir model_path
+  model_path="$(openclaw_default_memory_model_path)"
+  model_dir="$(dirname "$model_path")"
+  mkdir -p "$model_dir" /root/.openclaw/workspace/memory
+  printf '%s\n' "$model_path"
+}
+
 openclaw_memory_finalize() {
   openclaw memory index --force >/dev/null 2>&1 || true
   openclaw gateway restart >/dev/null 2>&1 || true
@@ -660,6 +672,44 @@ openclaw_memory_bootstrap() {
   ' _ "$model_path" >"$bootstrap_log" 2>&1 &
   disown 2>/dev/null || true
   echo "$bootstrap_log"
+}
+
+openclaw_memory_prefetch_bootstrap() {
+  local model_path="$1"
+  local bootstrap_log="/root/.skpl/openclaw-memory-bootstrap.log"
+
+  nohup bash -lc '
+    set -e
+    model_path="$1"
+    model_name="$(basename "$model_path")"
+    model_url="https://hf-mirror.com/ggml-org/embeddinggemma-300M-GGUF/resolve/main/${model_name}"
+    mkdir -p "$(dirname "$model_path")"
+    echo "开始后台预热记忆模型: ${model_url}"
+    if [ -f "$model_path" ]; then
+      echo "模型已存在，跳过下载: $model_path"
+      exit 0
+    fi
+    curl -L --retry 3 --connect-timeout 10 --max-time 1800 -C - -o "$model_path" "$model_url"
+    echo "模型预热完成: $model_path"
+  ' _ "$model_path" >"$bootstrap_log" 2>&1 &
+  disown 2>/dev/null || true
+  echo "$bootstrap_log"
+}
+
+openclaw_memory_show_bootstrap_log() {
+  local bootstrap_log="/root/.skpl/openclaw-memory-bootstrap.log"
+  if [ ! -f "$bootstrap_log" ]; then
+    echo "暂无记忆模型预热日志。"
+    return 0
+  fi
+  python3 - "$bootstrap_log" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+    lines = f.readlines()
+for line in lines[-80:]:
+    print(line.rstrip())
+PY
 }
 
 add_app_id() {
@@ -5121,6 +5171,7 @@ EOF
       echo "4. 记忆方案（QMD/Local/Auto）"
       echo "5. 搜索测试（验证索引是否工作）"
       echo "6. 深度状态探测（检查嵌入模型）"
+      echo "7. 查看后台预热日志"
       echo "0. 返回上一级"
       echo "---------------------------------------"
       read -e -p "请输入你的选择: " memory_choice
@@ -5173,6 +5224,10 @@ EOF
           ;;
         6)
           openclaw_memory_deep_status
+          break_end
+          ;;
+        7)
+          openclaw_memory_show_bootstrap_log
           break_end
           ;;
         0)
@@ -6441,15 +6496,16 @@ OPENCLAW_PANEL_EOF
 
 openclaw_enable_local_memory_auto() {
   local model_path bootstrap_log
-  model_path="$(openclaw_memory_prepare)"
+  model_path="$(openclaw_memory_prepare_prefetch)"
 
   if [ -f "${model_path}" ]; then
-    openclaw_memory_finalize
+    echo "记忆模型已存在，安装阶段跳过后台预热。"
     return 0
   fi
 
-  bootstrap_log="$(openclaw_memory_bootstrap "$model_path")"
-  echo "Local 记忆模型将在后台下载并建立索引，不阻塞安装流程。"
+  bootstrap_log="$(openclaw_memory_prefetch_bootstrap "$model_path")"
+  echo "记忆模型将在后台预热下载，不阻塞安装流程。"
+  echo "安装阶段不会提前切换到 Local 记忆方案。"
   echo "后台日志: ${bootstrap_log}"
 }
 
@@ -6689,7 +6745,7 @@ run_full_pipeline_once() {
   step=$(state_get STEP)
   [ -z "$step" ] && step=2
   if [ "$step" -le 2 ]; then
-    echo "[2/4] 按 kejilion 逻辑安装 OpenClaw 并自动启用 Local 记忆..."
+    echo "[2/4] 按 kejilion 逻辑安装 OpenClaw，并后台预热记忆模型资源..."
     if ! run_step_guard "step2_openclaw" run_openclaw_install_step; then
       print_failure_hint
       return 1
