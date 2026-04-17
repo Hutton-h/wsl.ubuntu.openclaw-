@@ -6400,6 +6400,30 @@ npm_install_openclaw_resilient() {
 
   prepare_openclaw_global_dir
 
+  ensure_openclaw_command() {
+    if command -v openclaw >/dev/null 2>&1; then
+      return 0
+    fi
+
+    local npm_root=""
+    local openclaw_entry=""
+    npm_root=$(npm root -g 2>/dev/null || true)
+    [ -n "$npm_root" ] || return 1
+
+    if [ -f "${npm_root}/openclaw/dist/index.js" ]; then
+      openclaw_entry="${npm_root}/openclaw/dist/index.js"
+      {
+        printf '%s\n' '#!/bin/bash'
+        printf 'exec /usr/local/bin/node "%s" "$$@"\n' "${openclaw_entry}"
+      } > /usr/local/bin/openclaw
+      chmod +x /usr/local/bin/openclaw
+      command -v openclaw >/dev/null 2>&1
+      return $?
+    fi
+
+    return 1
+  }
+
   for reg in "${registries[@]}"; do
     echo "[执行] 使用 npm 源安装 openclaw: ${reg}"
     timeout 1200 npm install -g openclaw@latest \
@@ -6411,7 +6435,7 @@ npm_install_openclaw_resilient() {
       --no-audit
     rc=$?
 
-    if [ "$rc" -eq 0 ] && command -v openclaw >/dev/null 2>&1; then
+    if [ "$rc" -eq 0 ] && ensure_openclaw_command; then
       return 0
     fi
 
@@ -6422,6 +6446,8 @@ npm_install_openclaw_resilient() {
       prepare_openclaw_global_dir
     fi
   done
+
+  ensure_openclaw_command && return 0
 
   return 1
 }
