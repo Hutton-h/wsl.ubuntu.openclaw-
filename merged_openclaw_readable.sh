@@ -10,6 +10,8 @@ SKPL_PROXY_PORT="10808"
 EVOMAP_DIR="/root/.openclaw/evolver"
 EVOMAP_MEMORY_DIR="/root/.openclaw/workspace/.learnings"
 EVOMAP_BACKUP_DIR="/root/.openclaw/evolver_backups"
+SKPL_STATE_FILE="/root/.skpl/install.state"
+SKPL_LOG_FILE="/root/.skpl/install.log"
 
 gl_bai='\033[0m'
 gl_lv='\033[32m'
@@ -18,6 +20,106 @@ gl_hong='\033[31m'
 gl_hui='\033[90m'
 gl_kjlan='\033[36m'
 gh_proxy=''
+
+if ! command -v sudo >/dev/null 2>&1; then
+  sudo() { "$@"; }
+fi
+
+init_skpl_runtime() {
+  mkdir -p "$SKPL_HOME"
+  touch "$SKPL_LOG_FILE"
+  touch "$SKPL_STATE_FILE"
+}
+
+log_msg() {
+  local msg="$1"
+  printf '[%s] %s\n' "$(date '+%F %T')" "$msg" >> "$SKPL_LOG_FILE"
+}
+
+state_get() {
+  local key="$1"
+  awk -F'=' -v k="$key" '$1==k {print $2; exit}' "$SKPL_STATE_FILE" 2>/dev/null
+}
+
+state_set() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=" "$SKPL_STATE_FILE" 2>/dev/null; then
+    python3 - "$SKPL_STATE_FILE" "$key" "$value" <<'PY'
+import sys
+path, key, value = sys.argv[1:4]
+rows = []
+with open(path, 'r', encoding='utf-8') as f:
+    rows = f.readlines()
+with open(path, 'w', encoding='utf-8') as f:
+    written = False
+    for row in rows:
+        if row.startswith(key + '='):
+            f.write(f"{key}={value}\n")
+            written = True
+        else:
+            f.write(row)
+    if not written:
+        f.write(f"{key}={value}\n")
+PY
+  else
+    echo "${key}=${value}" >> "$SKPL_STATE_FILE"
+  fi
+}
+
+run_step_guard() {
+  local step="$1"
+  shift
+  log_msg "开始: $step"
+  if "$@"; then
+    log_msg "完成: $step"
+    return 0
+  fi
+  log_msg "失败: $step"
+  return 1
+}
+
+print_failure_hint() {
+  echo "步骤执行失败，日志文件：$SKPL_LOG_FILE"
+  echo "可执行 skpl，选择继续安装或查看日志。"
+}
+
+show_recent_log() {
+  if [ ! -s "$SKPL_LOG_FILE" ]; then
+    echo "暂无日志。"
+    return 0
+  fi
+  python3 - "$SKPL_LOG_FILE" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+    lines = f.readlines()
+for line in lines[-80:]:
+    print(line.rstrip())
+PY
+}
+
+prewarm_openclaw_dependencies() {
+  export NPM_CONFIG_FUND=false
+  export NPM_CONFIG_AUDIT=false
+  export NPM_CONFIG_PROGRESS=false
+  export npm_config_loglevel=error
+
+  if command -v npm >/dev/null 2>&1; then
+    npm config set fund false >/dev/null 2>&1 || true
+    npm config set audit false >/dev/null 2>&1 || true
+    npm config set progress false >/dev/null 2>&1 || true
+  fi
+
+  if command -v apt >/dev/null 2>&1; then
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+      DEBIAN_FRONTEND=noninteractive apt update -y >/dev/null 2>&1 || true
+      DEBIAN_FRONTEND=noninteractive apt install -y curl ca-certificates gnupg >/dev/null 2>&1 || true
+      curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null 2>&1 || true
+      DEBIAN_FRONTEND=noninteractive apt install -y nodejs build-essential python3 libatomic1 >/dev/null 2>&1 || true
+    fi
+  fi
+}
 
 send_stats() { :; }
 
@@ -61,15 +163,23 @@ web_del() {
 }
 
 ensure_root() {
+  local args=("$@")
   if [ "$(id -u)" -ne 0 ]; then
-    echo "请使用 root 运行：sudo bash $0"
+    if command -v sudo >/dev/null 2>&1; then
+      echo "检测到当前不是 root，正在尝试自动提权..."
+      exec sudo bash "$0" "${args[@]}"
+    fi
+    echo "请使用 root 运行：su -c 'bash $0'"
     exit 1
   fi
 }
 
 save_self_to_skpl() {
+  init_skpl_runtime
   mkdir -p "${SKPL_HOME}"
-  cp -f "$0" "${SKPL_SCRIPT_PATH}"
+  if [ "$(readlink -f "$0" 2>/dev/null)" != "$(readlink -f "${SKPL_SCRIPT_PATH}" 2>/dev/null)" ]; then
+    cp -f "$0" "${SKPL_SCRIPT_PATH}"
+  fi
   chmod +x "${SKPL_SCRIPT_PATH}"
 
   cat > "${SKPL_CMD_PATH}" <<'EOF_SKPL_CMD'
@@ -82,6 +192,7 @@ fi
 exec bash /root/.skpl/merged_openclaw_readable.sh panel "$@"
 EOF_SKPL_CMD
   chmod +x "${SKPL_CMD_PATH}"
+  hash -r 2>/dev/null || true
 }
 
 remove_skpl_panel_only() {
@@ -95,19 +206,18 @@ remove_skpl_panel_only() {
 }
 
 run_wslwin_proxy_sync() {
-clear
-echo -e "====================  WSL 全能一键脚本 ===================="
+  set +e
+  clear
+  echo -e "====================  WSL 全能一键脚本 ===================="
 
-# 隐形优化：自动清理系统更新锁，防止卡住
-killall apt apt-get dpkg 2>/dev/null
-sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
-sudo dpkg --configure -a 2>/dev/null
+  killall apt apt-get dpkg 2>/dev/null
+  sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
+  sudo dpkg --configure -a 2>/dev/null
 
-# 隐形优化：强制apt永远直连阿里云源（和代理完全隔离）
-sudo rm -f /etc/apt/apt.conf.d/*proxy* /etc/apt/apt.conf.d/99*
-echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
-[ ! -f /etc/apt/sources.list.bak.original ] && sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak.original
-sudo tee /etc/apt/sources.list >/dev/null << 'EOF'
+  sudo rm -f /etc/apt/apt.conf.d/*proxy* /etc/apt/apt.conf.d/99*
+  echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
+  [ ! -f /etc/apt/sources.list.bak.original ] && sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak.original
+  sudo tee /etc/apt/sources.list >/dev/null <<'EOF'
 deb http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
 deb http://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
 deb http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
@@ -118,82 +228,75 @@ deb-src http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe
 deb-src http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse
 EOF
 
-# 以下是100%原始代码，仅做了两处微小优化
-echo -e "
+  if ! DEBIAN_FRONTEND=noninteractive apt update -y >/dev/null 2>&1; then
+    echo "检测到阿里源不可用，自动回退到原始 sources.list"
+    if [ -f /etc/apt/sources.list.bak.original ]; then
+      sudo cp /etc/apt/sources.list.bak.original /etc/apt/sources.list
+    fi
+  fi
+
+  echo -e "
 ==================== 配置向导：自定义代理端口 ===================="
-echo -e "📌 默认代理端口：10808"
-echo -e "📝 直接回车 = 使用默认端口 | 输入数字 = 使用自定义端口"
-read -p "请输入代理端口号：" CUSTOM_PORT
+  echo -e "默认代理端口：10808"
+  echo -e "直接回车 = 使用默认端口 | 输入数字 = 使用自定义端口"
+  if [ -t 0 ]; then
+    read -r -p "请输入代理端口号：" CUSTOM_PORT
+  else
+    CUSTOM_PORT=""
+  fi
 
-[ -z "$CUSTOM_PORT" ] && PROXY_PORT="10808" || PROXY_PORT="$CUSTOM_PORT"
-echo -e "✅ 已选择代理端口：$PROXY_PORT
+  [ -z "$CUSTOM_PORT" ] && PROXY_PORT="10808" || PROXY_PORT="$CUSTOM_PORT"
+  echo -e "已选择代理端口：$PROXY_PORT
 "
 
-echo -e "==================== 清理所有旧代理配置 ===================="
-sed -i '/proxy_/d;/auto_proxy/d;/http_proxy/d;/https_proxy/d;/all_proxy/d;/no_proxy/d;/NO_PROXY/d' ~/.bashrc
-source ~/.bashrc
-echo -e "✅ 旧代理配置清理完成！
-"
+  sed -i '/proxy_/d;/auto_proxy/d;/http_proxy/d;/https_proxy/d;/all_proxy/d;/no_proxy/d;/NO_PROXY/d' ~/.bashrc
+  source ~/.bashrc >/dev/null 2>&1 || true
 
-echo -e "==================== 创建全自动代理检测脚本 ===================="
-cat > ~/.auto_proxy_sync.sh << 'EOF'
+  cat > ~/.auto_proxy_sync.sh <<'EOF'
 #!/bin/bash
 PROXY_MIRRORED="127.0.0.1:__PORT__"
 PROXY_LEGACY="10.255.255.254:__PORT__"
 NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
 
 check_port() {
-    local ip_port=$1
-    local ip=$(echo $ip_port | cut -d: -f1)
-    local port=$(echo $ip_port | cut -d: -f2)
-    timeout 0.5 bash -c "echo > /dev/tcp/$ip/$port" 2>/dev/null
+  local ip_port=$1
+  local ip=$(echo "$ip_port" | cut -d: -f1)
+  local port=$(echo "$ip_port" | cut -d: -f2)
+  timeout 0.5 bash -c "echo > /dev/tcp/$ip/$port" 2>/dev/null
 }
 
-if check_port $PROXY_MIRRORED; then
-    ACTIVE_PROXY=$PROXY_MIRRORED
-elif check_port $PROXY_LEGACY; then
-    ACTIVE_PROXY=$PROXY_LEGACY
+if check_port "$PROXY_MIRRORED"; then
+  ACTIVE_PROXY=$PROXY_MIRRORED
+elif check_port "$PROXY_LEGACY"; then
+  ACTIVE_PROXY=$PROXY_LEGACY
 else
-    ACTIVE_PROXY=""
+  ACTIVE_PROXY=""
 fi
 
 if [ -n "$ACTIVE_PROXY" ]; then
-    export http_proxy="http://$ACTIVE_PROXY"
-    export https_proxy="http://$ACTIVE_PROXY"
-    export HTTP_PROXY="http://$ACTIVE_PROXY"
-    export HTTPS_PROXY="http://$ACTIVE_PROXY"
-    export all_proxy="socks5://$ACTIVE_PROXY"
-    export ALL_PROXY="socks5://$ACTIVE_PROXY"
-    export no_proxy="$NO_PROXY_RULE"
-    export NO_PROXY="$NO_PROXY_RULE"
-    echo "✅ 自动同步：V2RayN运行中，代理已开启 ($ACTIVE_PROXY)"
+  export http_proxy="http://$ACTIVE_PROXY"
+  export https_proxy="http://$ACTIVE_PROXY"
+  export HTTP_PROXY="http://$ACTIVE_PROXY"
+  export HTTPS_PROXY="http://$ACTIVE_PROXY"
+  export all_proxy="socks5://$ACTIVE_PROXY"
+  export ALL_PROXY="socks5://$ACTIVE_PROXY"
+  export no_proxy="$NO_PROXY_RULE"
+  export NO_PROXY="$NO_PROXY_RULE"
+  echo "自动同步：代理已开启 ($ACTIVE_PROXY)"
 else
-    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
-    # 优化1：更友好的提示
-    echo "❌ 自动同步：V2RayN未运行，请检查Windows上的V2RayN是否已开启并监听 $PROXY_PORT 端口"
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+  echo "自动同步：未检测到代理监听，请检查 Windows 代理是否已开启"
 fi
 EOF
 
-sed -i "s/__PORT__/$PROXY_PORT/g" ~/.auto_proxy_sync.sh
-chmod +x ~/.auto_proxy_sync.sh
-echo -e "✅ 全自动代理脚本创建完成！
-"
+  sed -i "s/__PORT__/$PROXY_PORT/g" ~/.auto_proxy_sync.sh
+  chmod +x ~/.auto_proxy_sync.sh
+  sed -i '/source ~\/\.auto_proxy_sync.sh/d' ~/.bashrc
+  echo "source ~/.auto_proxy_sync.sh" >> ~/.bashrc
+  source ~/.bashrc >/dev/null 2>&1 || true
 
-echo -e "==================== 配置代理自启 & 立即生效 ===================="
-# 优化2：自动去重，防止bashrc重复加载
-sed -i '/source ~\/.auto_proxy_sync.sh/d' ~/.bashrc
-echo "source ~/.auto_proxy_sync.sh" >> ~/.bashrc
-source ~/.bashrc
-echo -e "✅ 代理配置已永久生效！
-"
-
-echo -e "
-==================== 🎉 全部配置完成！ ===================="
-echo -e "📌 你的所有原始功能100%保留，使用习惯完全不变"
-echo -e "📌 已添加：V2RayN未开友好提示 + 自动防重复配置"
-echo -e "
-验证：sudo apt update"
   SKPL_PROXY_PORT="${PROXY_PORT:-10808}"
+  set -e
 }
 
 load_openclaw_panel() {
@@ -5753,6 +5856,7 @@ openclaw_enable_local_memory_auto() {
 }
 
 run_openclaw_install_step() {
+  prewarm_openclaw_dependencies
   if ! command -v openclaw >/dev/null 2>&1; then
     printf '1\n' | moltbot_menu || true
   else
@@ -5762,48 +5866,28 @@ run_openclaw_install_step() {
 }
 
 run_openclaw2_network_optimization() {
-:
+  set +e
+  echo "执行 openclaw2 网络优化（稳定模式）..."
 
+  local npm_global openclaw_js
+  npm_global=$(npm root -g 2>/dev/null)
+  openclaw_js="${npm_global}/openclaw/dist/index.js"
+  if [ ! -f "$openclaw_js" ] && [ -f "/usr/lib/node_modules/openclaw/dist/index.js" ]; then
+    openclaw_js="/usr/lib/node_modules/openclaw/dist/index.js"
+  fi
 
-# 颜色
-GREEN='[0;32m'
-NC='[0m'
+  if [ ! -f "$openclaw_js" ]; then
+    npm install -g openclaw@2026.4.14 >/dev/null 2>&1 || true
+    npm_global=$(npm root -g 2>/dev/null)
+    openclaw_js="${npm_global}/openclaw/dist/index.js"
+  fi
 
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}  全自动 OpenClaw 部署（无重启·零操作）${NC}"
-echo -e "${GREEN}========================================${NC}"
+  mkdir -p /root/.config/systemd/user
+  mkdir -p /root/.openclaw/credentials /root/.openclaw/logs /root/.openclaw/agents
+  chmod 700 /root/.openclaw 2>/dev/null || true
 
-# 1. 暴力清理
-echo "1/5 清理旧文件..."
-pkill -9 -f openclaw 2>/dev/null || true
-systemctl --user stop openclaw-gateway.service 2>/dev/null || true
-systemctl --user disable openclaw-gateway.service 2>/dev/null || true
-rm -rf /root/.config/systemd/user/openclaw-gateway.service
-rm -rf /root/.openclaw
-rm -rf /tmp/openclaw
-systemctl --user daemon-reload 2>/dev/null || true
-systemctl --user reset-failed 2>/dev/null || true
-
-# 2. 创建必须的目录
-echo "2/5 创建目录..."
-mkdir -p /root/.config/systemd/user
-mkdir -p /root/.openclaw/credentials /root/.openclaw/logs /root/.openclaw/agents
-chmod 700 /root/.openclaw
-
-# 3. 检测路径
-echo "3/5 检测程序路径..."
-NODE_PATH=$(which node)
-NPM_GLOBAL=$(npm root -g)
-OPENCLAW_PATH="${NPM_GLOBAL}/openclaw/dist/index.js"
-
-# 没安装就自动装
-if [ ! -f "$OPENCLAW_PATH" ]; then
-    npm install -g openclaw@2026.4.14
-fi
-
-# 4. 创建配置文件
-echo "4/5 生成配置..."
-cat > /root/.openclaw/openclaw.json << EOF2
+  if [ ! -s /root/.openclaw/openclaw.json ]; then
+    cat > /root/.openclaw/openclaw.json << EOF2
 {
   "gateway": {
     "mode": "local",
@@ -5815,23 +5899,20 @@ cat > /root/.openclaw/openclaw.json << EOF2
   "memory": {}
 }
 EOF2
+  fi
 
-# 5. 生成服务文件（完全保留你原来的正确配置）
-echo "5/5 生成服务并启动..."
-cat > /root/.config/systemd/user/openclaw-gateway.service << EOF3
+  cat > /root/.config/systemd/user/openclaw-gateway.service << EOF3
 [Unit]
 Description=OpenClaw Gateway
 After=network-online.target
 
 [Service]
-ExecStart=/usr/bin/node /usr/lib/node_modules/openclaw/dist/index.js gateway --port 18789
+ExecStart=/usr/bin/node ${openclaw_js} gateway --port 18789
 Restart=always
 RestartSec=5
-
 Environment=HOME=/root
 Environment=TMPDIR=/tmp
 Environment=PATH=/usr/bin:/usr/local/bin:/bin
-
 Environment=http_proxy=http://127.0.0.1:${SKPL_PROXY_PORT}
 Environment=https_proxy=http://127.0.0.1:${SKPL_PROXY_PORT}
 Environment=HTTP_PROXY=http://127.0.0.1:${SKPL_PROXY_PORT}
@@ -5840,24 +5921,17 @@ Environment=all_proxy=socks5://127.0.0.1:${SKPL_PROXY_PORT}
 Environment=ALL_PROXY=socks5://127.0.0.1:${SKPL_PROXY_PORT}
 Environment=no_proxy=localhost,127.0.0.1
 Environment=NO_PROXY=localhost,127.0.0.1
-
 Environment=OPENCLAW_GATEWAY_PORT=18789
 
 [Install]
 WantedBy=default.target
 EOF3
 
-# 启动服务
-systemctl --user daemon-reload 2>/dev/null
-systemctl --user start openclaw-gateway.service 2>/dev/null
-systemctl --user enable openclaw-gateway.service 2>/dev/null
-loginctl enable-linger root 2>/dev/null
-
-echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}🎉 部署完成！${NC}"
-echo -e "打开浏览器访问：http://127.0.0.1:18789 配对即可"
-echo -e "验证命令：openclaw gateway status"
-echo -e "${GREEN}========================================${NC}"
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  systemctl --user enable --now openclaw-gateway.service >/dev/null 2>&1 || true
+  loginctl enable-linger root >/dev/null 2>&1 || true
+  openclaw gateway restart >/dev/null 2>&1 || true
+  set -e
 }
 
 evomap_print_status() {
@@ -5886,16 +5960,22 @@ evomap_install() {
   install git curl
   mkdir -p /root/.openclaw
 
-  read -r -p "请输入 EvoMap Node ID: " node_id
+  node_id="${SKPL_EVM_NODE_ID:-$(state_get EVOMAP_NODE_ID)}"
+  if [ -z "$node_id" ] && [ -t 0 ]; then
+    read -r -p "请输入 EvoMap Node ID: " node_id
+  fi
   if [ -z "$node_id" ]; then
-    echo "Node ID 不能为空。"
+    echo "Node ID 不能为空。可先执行: export SKPL_EVM_NODE_ID=<你的NodeID>"
     return 1
   fi
-  read -r -p "确认 Node ID 为 [$node_id] 吗？(y/N): " confirm
-  if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-    echo "已取消安装。"
-    return 1
+  if [ -t 0 ]; then
+    read -r -p "确认 Node ID 为 [$node_id] 吗？(y/N): " confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+      echo "已取消安装。"
+      return 1
+    fi
   fi
+  state_set EVOMAP_NODE_ID "$node_id"
 
   evomap_backup_current
 
@@ -5903,7 +5983,7 @@ evomap_install() {
     mv "$EVOMAP_DIR" "${EVOMAP_DIR}.old.$(date +%Y%m%d%H%M%S)"
   fi
 
-  git clone https://github.com/EvoMap/evolver.git "$EVOMAP_DIR"
+  git clone --depth 1 https://github.com/EvoMap/evolver.git "$EVOMAP_DIR" >/dev/null 2>&1 || git clone https://github.com/EvoMap/evolver.git "$EVOMAP_DIR"
   cd "$EVOMAP_DIR"
   npm install --silent
   mkdir -p skills assets/gep memory
@@ -5983,21 +6063,56 @@ run_evomap_install_step() {
 }
 
 run_full_pipeline_once() {
-  echo "[1/4] 执行 wslwin 代理同步..."
-  run_wslwin_proxy_sync
-
-  echo "[2/4] 安装 OpenClaw（原脚本逻辑）并自动启用 Local 记忆..."
-  run_openclaw_install_step
-
-  echo "[3/4] 执行 openclaw2 网络优化..."
-  run_openclaw2_network_optimization
-
-  openclaw_enable_local_memory_auto
-
-  echo "[4/4] 安装 EvoMap..."
-  run_evomap_install_step
-
   save_self_to_skpl
+  init_skpl_runtime
+
+  local step
+  step=$(state_get STEP)
+  [ -z "$step" ] && step=1
+
+  if [ "$step" -le 1 ]; then
+    echo "[1/4] 执行 wslwin 代理同步..."
+    if ! run_step_guard "step1_wslwin" run_wslwin_proxy_sync; then
+      print_failure_hint
+      return 1
+    fi
+    state_set STEP 2
+  fi
+
+  step=$(state_get STEP)
+  [ -z "$step" ] && step=2
+  if [ "$step" -le 2 ]; then
+    echo "[2/4] 安装 OpenClaw（原脚本逻辑）并自动启用 Local 记忆..."
+    if ! run_step_guard "step2_openclaw" run_openclaw_install_step; then
+      print_failure_hint
+      return 1
+    fi
+    state_set STEP 3
+  fi
+
+  step=$(state_get STEP)
+  [ -z "$step" ] && step=3
+  if [ "$step" -le 3 ]; then
+    echo "[3/4] 执行 openclaw2 网络优化..."
+    if ! run_step_guard "step3_openclaw2" run_openclaw2_network_optimization; then
+      print_failure_hint
+      return 1
+    fi
+    run_step_guard "step3_memory_fix" openclaw_enable_local_memory_auto || true
+    state_set STEP 4
+  fi
+
+  step=$(state_get STEP)
+  [ -z "$step" ] && step=4
+  if [ "$step" -le 4 ]; then
+    echo "[4/4] 安装 EvoMap..."
+    if ! run_step_guard "step4_evomap" run_evomap_install_step; then
+      print_failure_hint
+      return 1
+    fi
+    state_set STEP 5
+  fi
+
   echo "全部步骤执行完成。可使用 skpl 打开面板。"
 }
 
@@ -6017,6 +6132,8 @@ skpl_main_panel() {
     echo "3. 重新执行完整安装流程"
     echo "4. SKPL 面板更新"
     echo "5. SKPL 面板卸载"
+    echo "6. 查看最近日志"
+    echo "7. 从中断点继续安装"
     echo "0. 退出"
     echo "---------------------------------------"
     read -r -p "请输入你的选择: " skpl_choice
@@ -6026,6 +6143,8 @@ skpl_main_panel() {
       3) run_full_pipeline_once; break_end ;;
       4) skpl_update_panel; break_end ;;
       5) remove_skpl_panel_only; break_end ;;
+      6) show_recent_log; break_end ;;
+      7) run_full_pipeline_once; break_end ;;
       0) exit 0 ;;
       *) echo "无效的选择，请重试。"; sleep 1 ;;
     esac
@@ -6033,7 +6152,9 @@ skpl_main_panel() {
 }
 
 main() {
-  ensure_root
+  ensure_root "$@"
+  init_skpl_runtime
+  save_self_to_skpl
   load_openclaw_panel
 
   case "${1:-install}" in
