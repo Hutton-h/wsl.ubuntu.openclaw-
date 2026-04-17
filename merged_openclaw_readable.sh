@@ -146,6 +146,52 @@ prewarm_openclaw_dependencies() {
   fi
 }
 
+optimize_openclaw_install_path() {
+  if ! declare -F install_node_and_tools >/dev/null 2>&1; then
+    return 0
+  fi
+
+  eval 'install_node_and_tools() {
+    if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+      local node_major
+      node_major=$(node -v 2>/dev/null | sed "s/^v//" | cut -d. -f1)
+      if [ -n "$node_major" ] && [ "$node_major" -ge 20 ]; then
+        return 0
+      fi
+    fi
+
+    if command -v apt >/dev/null 2>&1; then
+      DEBIAN_FRONTEND=noninteractive apt update -y >/dev/null 2>&1 || true
+      DEBIAN_FRONTEND=noninteractive apt install -y curl ca-certificates gnupg >/dev/null 2>&1 || true
+      curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null 2>&1 || true
+      DEBIAN_FRONTEND=noninteractive apt install -y nodejs build-essential python3 libatomic1 >/dev/null 2>&1 || true
+      return 0
+    fi
+
+    if command -v dnf >/dev/null 2>&1; then
+      curl -fsSL https://rpm.nodesource.com/setup_24.x | sudo bash - >/dev/null 2>&1 || true
+      dnf install -y cmake libatomic nodejs >/dev/null 2>&1 || true
+      return 0
+    fi
+  }'
+}
+
+install_openclaw_fast() {
+  prewarm_openclaw_dependencies
+
+  if ! command -v npm >/dev/null 2>&1; then
+    return 1
+  fi
+
+  if ! command -v openclaw >/dev/null 2>&1; then
+    npm install -g openclaw@latest --no-fund --no-audit --prefer-online >/dev/null 2>&1 || return 1
+  fi
+
+  openclaw onboard --install-daemon >/dev/null 2>&1 || true
+  openclaw gateway start >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
+  return 0
+}
+
 send_stats() { :; }
 
 break_end() {
@@ -280,9 +326,14 @@ EOF
   echo -e "默认代理端口：10808"
   echo -e "直接回车 = 使用默认端口 | 输入数字 = 使用自定义端口"
   if [ -t 0 ]; then
-    read -r -p "请输入代理端口号：" CUSTOM_PORT
+    read -r -p "请输入代理端口号（回车默认 10808）：" CUSTOM_PORT
   else
-    CUSTOM_PORT=""
+    CUSTOM_PORT="${SKPL_PROXY_PORT_INPUT:-}"
+    if [ -z "$CUSTOM_PORT" ]; then
+      echo "错误：当前为非交互模式，必须显式提供代理端口。"
+      echo "请使用：SKPL_PROXY_PORT_INPUT=10808 bash merged_openclaw_readable.sh install"
+      return 1
+    fi
   fi
 
   [ -z "$CUSTOM_PORT" ] && PROXY_PORT="10808" || PROXY_PORT="$CUSTOM_PORT"
@@ -5897,10 +5948,13 @@ openclaw_enable_local_memory_auto() {
 
 run_openclaw_install_step() {
   prewarm_openclaw_dependencies
+  optimize_openclaw_install_path
   printf '0\n' | moltbot_menu >/dev/null 2>&1 || true
 
   if ! command -v openclaw >/dev/null 2>&1; then
-    if declare -F install_moltbot >/dev/null 2>&1; then
+    if install_openclaw_fast; then
+      :
+    elif declare -F install_moltbot >/dev/null 2>&1; then
       install_moltbot || true
     else
       printf '1\n' | moltbot_menu || true
