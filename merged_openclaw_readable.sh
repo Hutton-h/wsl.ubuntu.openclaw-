@@ -5822,7 +5822,7 @@ persist_runtime_script() {
     log_resume_event "续跑脚本已落盘: $RUNTIME_SCRIPT (来源: $0)"
     return 0
   fi
-  if [ "${BASH_SOURCE[0]}" -ef "$RUNTIME_SCRIPT" ]; then return 0; fi
+
   if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
     cp -f "${BASH_SOURCE[0]}" "$RUNTIME_SCRIPT"
     chmod +x "$RUNTIME_SCRIPT"
