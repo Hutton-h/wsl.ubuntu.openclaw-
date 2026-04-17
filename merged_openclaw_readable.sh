@@ -20,6 +20,9 @@ gl_hong='\033[31m'
 gl_hui='\033[90m'
 gl_kjlan='\033[36m'
 gh_proxy=''
+if [ -n "${SKPL_GH_PROXY:-}" ]; then
+  gh_proxy="${SKPL_GH_PROXY}"
+fi
 
 if ! command -v sudo >/dev/null 2>&1; then
   sudo() { "$@"; }
@@ -109,6 +112,20 @@ prewarm_openclaw_dependencies() {
     npm config set fund false >/dev/null 2>&1 || true
     npm config set audit false >/dev/null 2>&1 || true
     npm config set progress false >/dev/null 2>&1 || true
+    npm config set maxsockets 32 >/dev/null 2>&1 || true
+    npm config set fetch-retries 2 >/dev/null 2>&1 || true
+    npm config set fetch-retry-mintimeout 10000 >/dev/null 2>&1 || true
+    npm config set fetch-retry-maxtimeout 30000 >/dev/null 2>&1 || true
+  fi
+
+  local country_code
+  country_code=$(curl -s --connect-timeout 2 --max-time 3 ipinfo.io/country 2>/dev/null | tr -d '\r\n')
+  if [ "$country_code" = "CN" ] || [ "$country_code" = "HK" ] || [ "$country_code" = "MO" ]; then
+    npm config set registry https://registry.npmmirror.com >/dev/null 2>&1 || true
+  fi
+
+  if command -v npm >/dev/null 2>&1; then
+    npm view openclaw version >/dev/null 2>&1 || true
   fi
 
   if command -v apt >/dev/null 2>&1; then
@@ -117,6 +134,14 @@ prewarm_openclaw_dependencies() {
       DEBIAN_FRONTEND=noninteractive apt install -y curl ca-certificates gnupg >/dev/null 2>&1 || true
       curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null 2>&1 || true
       DEBIAN_FRONTEND=noninteractive apt install -y nodejs build-essential python3 libatomic1 >/dev/null 2>&1 || true
+    fi
+  fi
+
+  if [ -z "$gh_proxy" ]; then
+    if ! curl -I --connect-timeout 3 --max-time 5 https://github.com >/dev/null 2>&1; then
+      if curl -I --connect-timeout 3 --max-time 5 https://ghproxy.com/https://github.com >/dev/null 2>&1; then
+        gh_proxy="https://ghproxy.com/"
+      fi
     fi
   fi
 }
@@ -177,8 +202,23 @@ ensure_root() {
 save_self_to_skpl() {
   init_skpl_runtime
   mkdir -p "${SKPL_HOME}"
-  if [ "$(readlink -f "$0" 2>/dev/null)" != "$(readlink -f "${SKPL_SCRIPT_PATH}" 2>/dev/null)" ]; then
-    cp -f "$0" "${SKPL_SCRIPT_PATH}"
+  local src_script
+  src_script=$(readlink -f "$0" 2>/dev/null || true)
+
+  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
+    if grep -q 'SKPL_NAME=' "${BASH_SOURCE[0]}" 2>/dev/null; then
+      src_script="${BASH_SOURCE[0]}"
+    fi
+  fi
+
+  if [ -z "$src_script" ] || [ ! -f "$src_script" ] || ! grep -q 'SKPL_NAME=' "$src_script" 2>/dev/null; then
+    echo "提示：当前不是从脚本文件运行，已跳过脚本自保存。"
+    echo "请先将脚本保存为文件后再运行，才能持久化 skpl 命令。"
+    return 0
+  fi
+
+  if [ "$(readlink -f "$src_script" 2>/dev/null)" != "$(readlink -f "${SKPL_SCRIPT_PATH}" 2>/dev/null)" ]; then
+    cp -f "$src_script" "${SKPL_SCRIPT_PATH}"
   fi
   chmod +x "${SKPL_SCRIPT_PATH}"
 
@@ -5857,8 +5897,14 @@ openclaw_enable_local_memory_auto() {
 
 run_openclaw_install_step() {
   prewarm_openclaw_dependencies
+  printf '0\n' | moltbot_menu >/dev/null 2>&1 || true
+
   if ! command -v openclaw >/dev/null 2>&1; then
-    printf '1\n' | moltbot_menu || true
+    if declare -F install_moltbot >/dev/null 2>&1; then
+      install_moltbot || true
+    else
+      printf '1\n' | moltbot_menu || true
+    fi
   else
     openclaw gateway status >/dev/null 2>&1 || true
   fi
@@ -6116,6 +6162,21 @@ run_full_pipeline_once() {
   echo "全部步骤执行完成。可使用 skpl 打开面板。"
 }
 
+reset_pipeline_state() {
+  init_skpl_runtime
+  state_set STEP 1
+  log_msg "安装流程已重置为 STEP=1"
+}
+
+resume_pipeline_state() {
+  init_skpl_runtime
+  local step
+  step=$(state_get STEP)
+  if [ -z "$step" ]; then
+    state_set STEP 1
+  fi
+}
+
 skpl_update_panel() {
   save_self_to_skpl
   echo "SKPL 面板已更新。"
@@ -6140,11 +6201,11 @@ skpl_main_panel() {
     case "$skpl_choice" in
       1) moltbot_menu ;;
       2) openclaw_evomap_menu ;;
-      3) run_full_pipeline_once; break_end ;;
+      3) reset_pipeline_state; run_full_pipeline_once; break_end ;;
       4) skpl_update_panel; break_end ;;
       5) remove_skpl_panel_only; break_end ;;
       6) show_recent_log; break_end ;;
-      7) run_full_pipeline_once; break_end ;;
+      7) resume_pipeline_state; run_full_pipeline_once; break_end ;;
       0) exit 0 ;;
       *) echo "无效的选择，请重试。"; sleep 1 ;;
     esac
@@ -6159,6 +6220,7 @@ main() {
 
   case "${1:-install}" in
     install)
+      reset_pipeline_state
       run_full_pipeline_once
       skpl_main_panel
       ;;
