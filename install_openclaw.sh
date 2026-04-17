@@ -1,6 +1,6 @@
+cat > install_openclaw_fixed.sh << 'EOF'
 #!/bin/bash
-# OpenClaw 一键安装脚本 (自动检测IP + 手动输入代理端口)
-# 用法: 保存后运行 bash 脚本名
+# OpenClaw 一键安装脚本 (已修复WSL2 IP问题)
 set -euo pipefail
 
 # ============================================
@@ -8,23 +8,21 @@ set -euo pipefail
 # ============================================
 SCRIPT_URL="https://raw.githubusercontent.com/Hutton-h/wsl.ubuntu.openclaw-/refs/heads/main/merged_openclaw_readable.sh"
 
-# 🔥 自动获取 Windows 主机IP (WSL 固定用法)
-WIN_IP=$(grep nameserver /etc/resolv.conf | awk '{print $2}' | head -n1)
+# ✅ 修复：WSL2 正确获取 Windows 主机IP
+WIN_IP=$(ip route show | grep default | awk '{print $3}')
 
-# 🔥 新增：手动输入代理端口（默认10808，直接回车即可）
+# 输入代理端口
 read -p "请输入代理端口 (默认: 10808): " INPUT_PORT
 PROXY_PORT=${INPUT_PORT:-10808}
 
-# 端口合法性校验
+# 端口校验
 if ! [[ "$PROXY_PORT" =~ ^[0-9]+$ ]] || [ "$PROXY_PORT" -lt 1 ] || [ "$PROXY_PORT" -gt 65535 ]; then
     echo -e "\033[31m错误：端口必须是 1-65535 之间的数字\033[0m"
     exit 1
 fi
 
-# 拼接代理地址
 LOCAL_PROXY="socks5://${WIN_IP}:${PROXY_PORT}"
 
-# 备用公共代理
 GITHUB_PROXY_LIST=(
     "https://mirror.ghproxy.com/"
     "https://gh-proxy.com/"
@@ -137,3 +135,6 @@ main() {
 }
 
 main
+EOF
+chmod +x install_openclaw_fixed.sh
+bash install_openclaw_fixed.sh
