@@ -5886,6 +5886,7 @@ save_state() {
 SKPL_NEXT_STEP="$1"
 SKPL_PROXY_PORT="${SKPL_PROXY_PORT:-10808}"
 SKPL_PAUSE_REASON="${2:-manual}"
+SKPL_ENABLE_MEMORY="${SKPL_ENABLE_MEMORY:-0}"
 SKPL_SAVED_BOOT_ID="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)"
 EOF
 }
@@ -6327,38 +6328,13 @@ install_node_and_tools_from_openclaw_logic() {
 
   if [ "$need_node_install" = "1" ]; then
     if ! install_node22_from_binary; then
-      echo "Node.js 二进制安装失败，尝试通过包管理器兜底。"
-      if command -v apt >/dev/null 2>&1; then
-        if apt_update_safe; then
-          apt_install_safe ca-certificates curl gnupg build-essential libatomic1 || true
-          if curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; then
-            apt_update_safe || true
-            apt_install_safe nodejs || true
-          fi
-        fi
-      elif command -v dnf >/dev/null 2>&1; then
-        curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
-        dnf install -y nodejs || true
-      fi
+      echo "Node.js 二进制安装失败。当前环境包管理器异常时不会再强依赖 apt/dnf。"
     fi
   fi
 
-  if command -v apt >/dev/null 2>&1; then
-    local -a optional_pkgs=()
-    command -v git >/dev/null 2>&1 || optional_pkgs+=(git)
-    command -v jq >/dev/null 2>&1 || optional_pkgs+=(jq)
-    command -v python3 >/dev/null 2>&1 || optional_pkgs+=(python3)
-
-    if [ "${#optional_pkgs[@]}" -gt 0 ]; then
-      if apt_update_safe; then
-        apt_install_safe "${optional_pkgs[@]}" || echo "可选依赖安装失败，继续安装主流程。"
-      else
-        echo "apt 当前不可用，跳过可选依赖安装：${optional_pkgs[*]}"
-      fi
-    fi
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y git jq python3 >/dev/null 2>&1 || true
-  fi
+  command -v git >/dev/null 2>&1 || echo "[提示] 未检测到 git，后续仅在需要 git 的步骤会受影响。"
+  command -v jq >/dev/null 2>&1 || echo "[提示] 未检测到 jq，脚本已避免将其作为强依赖。"
+  command -v python3 >/dev/null 2>&1 || echo "[提示] 未检测到 python3，部分兜底下载能力不可用。"
 
   if ! command -v node >/dev/null 2>&1; then
     echo "Node.js 安装后仍不可用。"
@@ -6461,6 +6437,21 @@ fetch_file() {
     return $?
   fi
 
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$url" "$output" <<'PY'
+import sys
+import urllib.request
+
+url = sys.argv[1]
+out = sys.argv[2]
+with urllib.request.urlopen(url, timeout=120) as resp:
+    data = resp.read()
+with open(out, 'wb') as f:
+    f.write(data)
+PY
+    return $?
+  fi
+
   return 127
 }
 
@@ -6517,6 +6508,11 @@ download_with_heartbeat() {
 }
 
 enable_memory_local_default() {
+  if [ "${SKPL_ENABLE_MEMORY:-0}" != "1" ]; then
+    echo "[信息] 已禁用记忆模型安装（SKPL_ENABLE_MEMORY!=1），跳过本地 Memory 初始化。"
+    return 0
+  fi
+
   local model_dir="/root/.openclaw/models/embedding"
   local model_file="${model_dir}/embeddinggemma-300M-Q8_0.gguf"
   local model_url_hf="https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf"
@@ -6674,6 +6670,33 @@ MEMEOF
   fi
 }
 
+show_install_state() {
+  if [ -f /root/.skpl/install.state ]; then
+    . /root/.skpl/install.state
+    echo "当前续跑步骤: ${SKPL_NEXT_STEP:-unknown}"
+    echo "续跑原因: ${SKPL_PAUSE_REASON:-unknown}"
+    echo "Memory 开关: ${SKPL_ENABLE_MEMORY:-0} (1=开启,0=关闭)"
+  else
+    echo "未检测到 install.state，安装可能已完成或尚未开始。"
+  fi
+}
+
+resume_install_foreground() {
+  echo "开始前台继续安装..."
+  bash /root/.skpl/merged_openclaw_readable.sh --resume
+}
+
+resume_install_background() {
+  echo "开始后台继续安装..."
+  nohup /bin/bash /root/.skpl/merged_openclaw_readable.sh --resume >/root/.skpl/auto-resume.log 2>&1 &
+  echo "后台已启动，日志: /root/.skpl/auto-resume.log"
+}
+
+resume_install_with_memory() {
+  echo "开始继续安装（启用 Memory）..."
+  SKPL_ENABLE_MEMORY=1 bash /root/.skpl/merged_openclaw_readable.sh --resume
+}
+
 evomap_install() {
   bash /root/.skpl/EvoMap.txt
 }
@@ -6743,22 +6766,30 @@ while true; do
   echo "======================================="
   echo "SKPL 操作面板"
   echo "======================================="
-  echo "1. OpenClaw 原始面板"
-  echo "2. EvoMap 安装"
-  echo "3. EvoMap 更新"
-  echo "4. EvoMap 卸载"
-  echo "5. EvoMap 备份"
-  echo "6. 卸载 SKPL 控制层"
+  echo "1. 查看安装续跑状态"
+  echo "2. 继续安装（前台）"
+  echo "3. 继续安装（后台）"
+  echo "4. 继续安装（启用Memory）"
+  echo "5. OpenClaw 原始面板"
+  echo "6. EvoMap 安装"
+  echo "7. EvoMap 更新"
+  echo "8. EvoMap 卸载"
+  echo "9. EvoMap 备份"
+  echo "10. 卸载 SKPL 控制层"
   echo "0. 退出"
   echo "---------------------------------------"
   read -r -p "请选择: " c
   case "$c" in
-    1) openclaw_panel ;;
-    2) evomap_install ; read -r -p "按回车返回..." _ ;;
-    3) evomap_update ; read -r -p "按回车返回..." _ ;;
-    4) evomap_uninstall ; read -r -p "按回车返回..." _ ;;
-    5) evomap_backup ; read -r -p "按回车返回..." _ ;;
-    6) skpl_uninstall ; read -r -p "按回车返回..." _ ;;
+    1) show_install_state ; read -r -p "按回车返回..." _ ;;
+    2) resume_install_foreground ; read -r -p "按回车返回..." _ ;;
+    3) resume_install_background ; read -r -p "按回车返回..." _ ;;
+    4) resume_install_with_memory ; read -r -p "按回车返回..." _ ;;
+    5) openclaw_panel ;;
+    6) evomap_install ; read -r -p "按回车返回..." _ ;;
+    7) evomap_update ; read -r -p "按回车返回..." _ ;;
+    8) evomap_uninstall ; read -r -p "按回车返回..." _ ;;
+    9) evomap_backup ; read -r -p "按回车返回..." _ ;;
+    10) skpl_uninstall ; read -r -p "按回车返回..." _ ;;
     0) exit 0 ;;
     *) echo "无效选项"; sleep 1 ;;
   esac
@@ -6785,6 +6816,12 @@ step4_run_evomap() {
   echo "Step 4 完成：EvoMap 已执行。"
 }
 
+ensure_skpl_panel_installed() {
+  if [ ! -x /usr/local/bin/skpl ] || [ ! -f /root/skpl ]; then
+    install_skpl_panel
+  fi
+}
+
 run_from_step() {
   case "$1" in
     step0_prepare_wsl_systemd)
@@ -6793,6 +6830,7 @@ run_from_step() {
       ;&
     step1_wsl_proxy_sync)
       step1_wsl_proxy_sync
+      ensure_skpl_panel_installed
       save_state step2_install_openclaw_compatible
       ;&
     step2_install_openclaw_compatible)
@@ -6803,7 +6841,7 @@ run_from_step() {
     step3_run_openclaw2)
       ensure_wsl_systemd_or_pause step3_run_openclaw2
       step3_run_openclaw2
-      install_skpl_panel
+      ensure_skpl_panel_installed
       save_state step4_run_evomap
       ;&
     step4_run_evomap)
@@ -6851,6 +6889,8 @@ report_exit() {
 
 main() {
   local start_step="step0_prepare_wsl_systemd"
+
+  export SKPL_ENABLE_MEMORY="${SKPL_ENABLE_MEMORY:-0}"
 
   trap 'report_error $? ${LINENO:-unknown} "${BASH_COMMAND:-unknown}"' ERR
   trap 'report_exit $?' EXIT
