@@ -39,18 +39,33 @@ try_download() {
     info "尝试下载: ${url}"
 
     if command -v curl >/dev/null 2>&1; then
-        if curl -fsSL --connect-timeout 10 --max-time 60 "$url" -o "$SAVE_FILE" 2>/dev/null; then
+        if curl -fsSL --connect-timeout 10 --max-time 90 "$url" -o "$SAVE_FILE" 2>/dev/null; then
             return 0
         fi
     fi
 
     if command -v wget >/dev/null 2>&1; then
-        if wget -q --timeout=60 -O "$SAVE_FILE" "$url" 2>/dev/null; then
+        if wget -q --timeout=90 -O "$SAVE_FILE" "$url" 2>/dev/null; then
             return 0
         fi
     fi
 
     return 1
+}
+
+has_real_tty() {
+    [ -r /dev/tty ] && [ -w /dev/tty ]
+}
+
+launch_installer() {
+    if has_real_tty; then
+        info "检测到真实终端，安装过程将保留交互输入。"
+        exec bash "$SAVE_FILE" </dev/tty
+    fi
+
+    error "当前没有可用的真实终端，无法继续运行需要手动输入代理端口和 Node ID 的安装流程。"
+    error "请在交互式终端中执行，或先下载脚本后直接运行: bash $SAVE_FILE"
+    exit 1
 }
 
 # ============================================
@@ -71,8 +86,10 @@ main() {
     else
         warn "直连失败，尝试使用代理..."
         local proxy_found=false
+        local proxy
+        local proxy_url
         for proxy in "${PROXY_LIST[@]}"; do
-            local proxy_url="${proxy}${SCRIPT_URL}"
+            proxy_url="${proxy}${SCRIPT_URL}"
             if try_download "$proxy_url"; then
                 info "代理下载成功: ${proxy}"
                 proxy_found=true
@@ -103,8 +120,7 @@ main() {
     echo -e "${GREEN}=======================================${NC}"
     echo ""
 
-    # ✅ 核心修复：支持所有交互命令
-    bash "$SAVE_FILE" </dev/tty
+    launch_installer
 }
 
 main
