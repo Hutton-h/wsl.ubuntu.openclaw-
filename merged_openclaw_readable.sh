@@ -424,6 +424,13 @@ https://registry.npmjs.org"
     return 0
   fi
 
+  if resolve_active_proxy "${SKPL_PROXY_PORT:-10808}" >/dev/null 2>&1; then
+    SKPL_NPM_REGISTRIES="https://registry.npmmirror.com
+https://registry.npmjs.org"
+    printf '%s\n' "$SKPL_NPM_REGISTRIES"
+    return 0
+  fi
+
   country=$(detect_npm_country)
   case "$country" in
     CN|HK)
@@ -441,19 +448,22 @@ https://registry.npmmirror.com"
 
 npm_try_with_registries() {
   local registry rc=1
+  local npm_timeout_seconds="${SKPL_NPM_INSTALL_TIMEOUT:-180}"
   local -a npm_args=("$@")
 
   while IFS= read -r registry; do
     [ -z "$registry" ] && continue
-    log_msg "npm 尝试 registry: $registry | args: ${npm_args[*]}"
+    log_msg "npm 尝试 registry: $registry | timeout: ${npm_timeout_seconds}s | args: ${npm_args[*]}"
+    echo "正在尝试 npm 源: ${registry}（超时 ${npm_timeout_seconds}s）..."
     set +e
-    npm "${npm_args[@]}" --registry "$registry"
+    timeout "${npm_timeout_seconds}" npm "${npm_args[@]}" --registry "$registry"
     rc=$?
     set -e
     if [ $rc -eq 0 ]; then
       log_msg "npm 执行成功，registry: $registry"
       return 0
     fi
+    log_msg "npm 执行失败，registry: $registry | 返回码: $rc"
     echo "npm 源 ${registry} 失败，正在尝试下一个..."
   done < <(get_npm_registry_candidates)
 
