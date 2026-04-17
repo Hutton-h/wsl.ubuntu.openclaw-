@@ -6234,6 +6234,14 @@ OPENCLAW_PANEL_EOF
 )"
 }
 
+ensure_openclaw_panel_loaded() {
+  if declare -F install_moltbot >/dev/null 2>&1; then
+    return 0
+  fi
+
+  load_openclaw_panel
+}
+
 openclaw_enable_local_memory_auto() {
   local model_path bootstrap_log
   model_path="$(openclaw_memory_prepare)"
@@ -6250,6 +6258,7 @@ openclaw_enable_local_memory_auto() {
 
 run_openclaw_install_step() {
   prewarm_openclaw_dependencies
+  ensure_openclaw_panel_loaded
   if ! command -v openclaw >/dev/null 2>&1; then
     install_moltbot
   else
