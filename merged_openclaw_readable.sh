@@ -5927,9 +5927,12 @@ SCRIPT_FILE="/root/.skpl/merged_openclaw_readable.sh"
 if [ -f "$LOCK_FILE" ]; then
   old_pid=$(cat "$LOCK_FILE" 2>/dev/null || true)
   if [[ "$old_pid" =~ ^[0-9]+$ ]] && kill -0 "$old_pid" 2>/dev/null; then
-    echo "时间: $(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG_FILE"
-    echo "事件: 检测到已有续跑进程，跳过重复启动" >>"$LOG_FILE"
-    exit 0
+    old_cmd=$(ps -p "$old_pid" -o args= 2>/dev/null || true)
+    if [[ "$old_cmd" == *"/root/.skpl/resume_runner.sh"* ]] || [[ "$old_cmd" == *"/root/.skpl/merged_openclaw_readable.sh --resume"* ]]; then
+      echo "时间: $(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG_FILE"
+      echo "事件: 检测到已有续跑进程，跳过重复启动" >>"$LOG_FILE"
+      exit 0
+    fi
   fi
   rm -f "$LOCK_FILE"
 fi
@@ -5981,9 +5984,12 @@ fi
 if [ -f /root/.skpl/auto-resume.running ]; then
   running_pid=$(cat /root/.skpl/auto-resume.running 2>/dev/null || true)
   if [[ "$running_pid" =~ ^[0-9]+$ ]] && kill -0 "$running_pid" 2>/dev/null; then
-    echo ""
-    echo "[SKPL] 未完成安装程序已经在后台继续执行中。日志: /root/.skpl/auto-resume.log"
-    return 0 2>/dev/null || exit 0
+    running_cmd=$(ps -p "$running_pid" -o args= 2>/dev/null || true)
+    if [[ "$running_cmd" == *"/root/.skpl/resume_runner.sh"* ]] || [[ "$running_cmd" == *"/root/.skpl/merged_openclaw_readable.sh --resume"* ]]; then
+      echo ""
+      echo "[SKPL] 未完成安装程序已经在后台继续执行中。日志: /root/.skpl/auto-resume.log"
+      return 0 2>/dev/null || exit 0
+    fi
   fi
   rm -f /root/.skpl/auto-resume.running
 fi
@@ -6272,11 +6278,54 @@ log_and_run() {
   "$@"
 }
 
+run_with_retry() {
+  local desc="$1"
+  local max_retry="$2"
+  shift 2
+
+  local attempt=1
+  while [ "$attempt" -le "$max_retry" ]; do
+    echo "[执行] ${desc} (第 ${attempt}/${max_retry} 次)"
+    if "$@"; then
+      return 0
+    fi
+    if [ "$attempt" -lt "$max_retry" ]; then
+      echo "[提示] ${desc} 失败，5 秒后重试..."
+      sleep 5
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  echo "[错误] ${desc} 连续 ${max_retry} 次失败"
+  return 1
+}
+
+download_with_heartbeat() {
+  local url="$1"
+  local output="$2"
+  shift 2
+
+  "$@" "$url" -o "$output" &
+  local pid=$!
+
+  while kill -0 "$pid" 2>/dev/null; do
+    echo "[信息] 正在下载模型，请稍候... ($(date '+%H:%M:%S'))"
+    sleep 15
+  done
+
+  wait "$pid"
+}
+
 enable_memory_local_default() {
   local model_dir="/root/.openclaw/models/embedding"
   local model_file="${model_dir}/embeddinggemma-300M-Q8_0.gguf"
   local model_url_hf="https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf"
   local model_url_mirror="https://hf-mirror.com/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf"
+  local model_url_ms="https://modelscope.cn/models/ggml-org/embeddinggemma-300M-GGUF/resolve/master/embeddinggemma-300M-Q8_0.gguf"
+  local min_size_bytes=10485760
+  local curl_cmd=(curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 15 --max-time 900 --continue-at -)
+  local size=0
+  local attempt_url
 
   mkdir -p /root/.openclaw/workspace/default/memory
   [ -f /root/.openclaw/workspace/default/MEMORY.md ] || cat > /root/.openclaw/workspace/default/MEMORY.md <<'EOF'
@@ -6289,10 +6338,30 @@ EOF
   openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
 
   mkdir -p "${model_dir}"
-  if [ ! -f "${model_file}" ]; then
-    curl -fL --retry 2 --connect-timeout 10 -o "${model_file}" "${model_url_hf}" \
-      || curl -fL --retry 2 --connect-timeout 10 -o "${model_file}" "${model_url_mirror}" \
-      || true
+  if [ -f "${model_file}" ]; then
+    size=$(stat -c '%s' "${model_file}" 2>/dev/null || echo 0)
+  fi
+
+  if [ "$size" -lt "$min_size_bytes" ]; then
+    echo "[信息] Memory 本地模型未就绪，开始下载（支持断点续传与重试）..."
+    for attempt_url in "$model_url_hf" "$model_url_mirror" "$model_url_ms"; do
+      echo "[信息] 尝试下载源: ${attempt_url}"
+      if run_with_retry "下载本地 embedding 模型" 2 download_with_heartbeat "$attempt_url" "$model_file" "${curl_cmd[@]}"; then
+        size=$(stat -c '%s' "${model_file}" 2>/dev/null || echo 0)
+        if [ "$size" -ge "$min_size_bytes" ]; then
+          echo "[成功] 模型下载完成，大小: ${size} bytes"
+          break
+        fi
+        echo "[提示] 下载文件大小异常 (${size} bytes)，切换下一个源重试。"
+      fi
+    done
+
+    size=$(stat -c '%s' "${model_file}" 2>/dev/null || echo 0)
+    if [ "$size" -lt "$min_size_bytes" ]; then
+      echo "[错误] Memory 本地模型下载失败，无法保证 Local 记忆功能。"
+      echo "[错误] 请检查代理后重试，或手动下载到: ${model_file}"
+      return 1
+    fi
   fi
 
   if [ -f "${model_file}" ]; then
@@ -6307,13 +6376,19 @@ step2_install_openclaw_compatible() {
   echo "==================== Step 2/4: 安装 OpenClaw（不配置） ===================="
   install_node_and_tools_from_openclaw_logic
 
-  log_and_run "安装 OpenClaw npm 包" npm install -g openclaw@latest
+  if ! run_with_retry "安装 OpenClaw npm 包(官方源)" 2 npm install -g openclaw@latest; then
+    echo "[提示] 官方源安装失败，切换 npm 镜像源重试..."
+    run_with_retry "安装 OpenClaw npm 包(镜像源)" 2 npm install -g openclaw@latest --registry=https://registry.npmmirror.com
+  fi
   if ! command -v openclaw >/dev/null 2>&1; then
     echo "OpenClaw 安装失败：未检测到 openclaw 命令。"
     exit 1
   fi
 
-  enable_memory_local_default
+  if ! enable_memory_local_default; then
+    echo "Step 2 失败：Local Memory 依赖模型未准备完成。"
+    exit 1
+  fi
 
   if ! is_wsl || wsl_systemd_active; then
     openclaw gateway install >/dev/null 2>&1 || true
