@@ -5829,6 +5829,7 @@ persist_runtime_script() {
     log_resume_event "续跑脚本已落盘: $RUNTIME_SCRIPT (来源: ${BASH_SOURCE[0]})"
     return 0
   fi
+  if [ "${BASH_SOURCE[0]}" -ef "$RUNTIME_SCRIPT" ]; then return 0; fi
 
   if [ -f "/workspace/merged_openclaw_readable .sh" ]; then
     cp -f "/workspace/merged_openclaw_readable .sh" "$RUNTIME_SCRIPT"
