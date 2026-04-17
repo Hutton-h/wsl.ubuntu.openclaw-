@@ -1,23 +1,100 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-SKPL_VERSION="1.2.0"
-if [ "$(id -u)" -eq 0 ]; then
-  WORK_ROOT="${SKPL_WORK_ROOT:-/root/.skpl}"
-else
-  WORK_ROOT="${SKPL_WORK_ROOT:-${HOME}/.skpl}"
-fi
-STAGE_DIR="${WORK_ROOT}/stage"
-INSTALL_MARKER="${WORK_ROOT}/.install-complete"
-
-log() { printf "[SKPL] %s\n" "$*"; }
-warn() { printf "[SKPL][WARN] %s\n" "$*"; }
-err() { printf "[SKPL][ERR] %s\n" "$*" >&2; exit 1; }
-
-write_sources() {
-  mkdir -p "$STAGE_DIR"
-  cat > "$STAGE_DIR/wslwin.sh" <<'WSLWIN_EOF'
 #!/bin/bash
+set -e
+
+SKPL_NAME="SKPL"
+SKPL_HOME="/root/.skpl"
+SKPL_SCRIPT_NAME="merged_openclaw_readable.sh"
+SKPL_SCRIPT_PATH="${SKPL_HOME}/${SKPL_SCRIPT_NAME}"
+SKPL_CMD_PATH="/usr/local/bin/skpl"
+SKPL_PROXY_PORT="10808"
+EVOMAP_DIR="/root/.openclaw/evolver"
+EVOMAP_MEMORY_DIR="/root/.openclaw/workspace/.learnings"
+EVOMAP_BACKUP_DIR="/root/.openclaw/evolver_backups"
+
+gl_bai='\033[0m'
+gl_lv='\033[32m'
+gl_huang='\033[33m'
+gl_hong='\033[31m'
+gl_hui='\033[90m'
+gl_kjlan='\033[36m'
+gh_proxy=''
+
+send_stats() { :; }
+
+break_end() {
+  if [ -t 0 ]; then
+    read -r -p "按回车继续..." _tmp
+  fi
+}
+
+install() {
+  if [ "$#" -eq 0 ]; then
+    return 0
+  fi
+  if command -v apt >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt update -y >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt install -y "$@" >/dev/null 2>&1 || true
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y "$@" >/dev/null 2>&1 || true
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y "$@" >/dev/null 2>&1 || true
+  fi
+}
+
+add_app_id() { :; }
+
+add_yuming() {
+  read -r -p "请输入域名（example.com）: " yuming
+}
+
+ldnmp_Proxy() {
+  local domain="$1"
+  local target_host="$2"
+  local target_port="$3"
+  echo "未检测到原生 ldnmp_Proxy 环境，已跳过自动反向代理配置。"
+  echo "请手动将 $domain 反向代理到 $target_host:$target_port"
+}
+
+web_del() {
+  read -r -p "请输入要移除的域名: " _remove_domain
+  echo "请按你的 Nginx/反向代理环境手动删除域名配置：$_remove_domain"
+}
+
+ensure_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    echo "请使用 root 运行：sudo bash $0"
+    exit 1
+  fi
+}
+
+save_self_to_skpl() {
+  mkdir -p "${SKPL_HOME}"
+  cp -f "$0" "${SKPL_SCRIPT_PATH}"
+  chmod +x "${SKPL_SCRIPT_PATH}"
+
+  cat > "${SKPL_CMD_PATH}" <<'EOF_SKPL_CMD'
+#!/bin/bash
+set -e
+if [ ! -f /root/.skpl/merged_openclaw_readable.sh ]; then
+  echo "未找到 /root/.skpl/merged_openclaw_readable.sh，请先运行安装脚本。"
+  exit 1
+fi
+exec bash /root/.skpl/merged_openclaw_readable.sh panel "$@"
+EOF_SKPL_CMD
+  chmod +x "${SKPL_CMD_PATH}"
+}
+
+remove_skpl_panel_only() {
+  if [ -f "${SKPL_CMD_PATH}" ]; then
+    rm -f "${SKPL_CMD_PATH}"
+  fi
+  if [ -f "${SKPL_SCRIPT_PATH}" ]; then
+    rm -f "${SKPL_SCRIPT_PATH}"
+  fi
+  echo "SKPL 面板已卸载。OpenClaw/EvoMap 与其他脚本不受影响。"
+}
+
+run_wslwin_proxy_sync() {
 clear
 echo -e "====================  WSL 全能一键脚本 ===================="
 
@@ -42,18 +119,21 @@ deb-src http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted univer
 EOF
 
 # 以下是100%原始代码，仅做了两处微小优化
-echo -e "\n==================== 配置向导：自定义代理端口 ===================="
+echo -e "
+==================== 配置向导：自定义代理端口 ===================="
 echo -e "📌 默认代理端口：10808"
 echo -e "📝 直接回车 = 使用默认端口 | 输入数字 = 使用自定义端口"
 read -p "请输入代理端口号：" CUSTOM_PORT
 
 [ -z "$CUSTOM_PORT" ] && PROXY_PORT="10808" || PROXY_PORT="$CUSTOM_PORT"
-echo -e "✅ 已选择代理端口：$PROXY_PORT\n"
+echo -e "✅ 已选择代理端口：$PROXY_PORT
+"
 
 echo -e "==================== 清理所有旧代理配置 ===================="
 sed -i '/proxy_/d;/auto_proxy/d;/http_proxy/d;/https_proxy/d;/all_proxy/d;/no_proxy/d;/NO_PROXY/d' ~/.bashrc
 source ~/.bashrc
-echo -e "✅ 旧代理配置清理完成！\n"
+echo -e "✅ 旧代理配置清理完成！
+"
 
 echo -e "==================== 创建全自动代理检测脚本 ===================="
 cat > ~/.auto_proxy_sync.sh << 'EOF'
@@ -96,22 +176,28 @@ EOF
 
 sed -i "s/__PORT__/$PROXY_PORT/g" ~/.auto_proxy_sync.sh
 chmod +x ~/.auto_proxy_sync.sh
-echo -e "✅ 全自动代理脚本创建完成！\n"
+echo -e "✅ 全自动代理脚本创建完成！
+"
 
 echo -e "==================== 配置代理自启 & 立即生效 ===================="
 # 优化2：自动去重，防止bashrc重复加载
 sed -i '/source ~\/.auto_proxy_sync.sh/d' ~/.bashrc
 echo "source ~/.auto_proxy_sync.sh" >> ~/.bashrc
 source ~/.bashrc
-echo -e "✅ 代理配置已永久生效！\n"
+echo -e "✅ 代理配置已永久生效！
+"
 
-echo -e "\n==================== 🎉 全部配置完成！ ===================="
+echo -e "
+==================== 🎉 全部配置完成！ ===================="
 echo -e "📌 你的所有原始功能100%保留，使用习惯完全不变"
 echo -e "📌 已添加：V2RayN未开友好提示 + 自动防重复配置"
-echo -e "\n验证：sudo apt update"
-WSLWIN_EOF
+echo -e "
+验证：sudo apt update"
+  SKPL_PROXY_PORT="${PROXY_PORT:-10808}"
+}
 
-  cat > "$STAGE_DIR/openclaw.sh" <<'OPENCLAW_EOF'
+load_openclaw_panel() {
+  eval "$(cat <<'OPENCLAW_PANEL_EOF'
 moltbot_menu() {
 	local app_id="114"
 
@@ -196,6 +282,7 @@ moltbot_menu() {
 		echo "18. 备份与还原"
 		echo "19. 更新"
 		echo "20. 卸载"
+		echo "21. EvoMap 管理"
 		echo "--------------------"
 		echo "0. 返回上一级选单"
 		echo "--------------------"
@@ -597,7 +684,6 @@ PY
 		npm install -g openclaw@latest
 		openclaw onboard --install-daemon
 		start_gateway
-		openclaw_memory_auto_setup_run "local" >/dev/null 2>&1 || true
 		add_app_id
 		break_end
 
@@ -2598,18 +2684,21 @@ openclaw_json_get_bool() {
 		feishu_status=$(openclaw_bot_status_text "$feishu_enabled" "$feishu_cfg" "$feishu_connected" "$feishu_abnormal")
 
 		local wa_enabled wa_cfg wa_connected wa_abnormal wa_status
-		wa_enabled=$(openclaw_json_get_bool '.plugins.entries.whatsapp.enabled // .plugins.entries["openclaw-whatsapp"].enabled // .channels.whatsapp.enabled // false')
+		wa_enabled=$(openclaw_json_get_bool '.plugins.entries.whatsapp.enabled // .channels.whatsapp.enabled // false')
 		wa_cfg=$(openclaw_channel_has_cfg "whatsapp")
 		wa_connected="false"
 		if openclaw_dir_has_files "${HOME}/.openclaw/whatsapp"; then
 			wa_connected="true"
 		fi
 		wa_abnormal="false"
-		if [ "$wa_enabled" = "true" ] && ! openclaw_plugin_local_installed "whatsapp"; then
+		if [ "$wa_enabled" = "true" ] && ! openclaw_plugin_local_installed "whatsapp" && ! openclaw_plugin_local_installed "openclaw-whatsapp"; then
 			wa_abnormal="true"
 		fi
 		if [ "$wa_enabled" = "true" ] && [ "$json_ok" != "true" ]; then
 			wa_abnormal="true"
+		fi
+		if [ "$wa_connected" != "true" ] && [ "$wa_enabled" = "true" ] && [ "$wa_cfg" = "true" ] && { openclaw_plugin_local_installed "whatsapp" || openclaw_plugin_local_installed "openclaw-whatsapp"; }; then
+			wa_connected="true"
 		fi
 		wa_status=$(openclaw_bot_status_text "$wa_enabled" "$wa_cfg" "$wa_connected" "$wa_abnormal")
 
@@ -3274,14 +3363,8 @@ if os.path.isdir(agents_root):
 	openclaw_memory_config_get() {
 		local key="$1"
 		local default_value="${2:-}"
-		local value config_file
+		local value
 		value=$(openclaw config get "$key" 2>/dev/null | head -n 1 | sed -e 's/^"//' -e 's/"$//')
-		if [ -z "$value" ] || [ "$value" = "null" ] || [ "$value" = "undefined" ]; then
-			config_file=$(openclaw_memory_config_file)
-			if [ -f "$config_file" ] && command -v jq >/dev/null 2>&1; then
-				value=$(jq -r --arg p "$key" 'getpath($p|split(".")) // empty' "$config_file" 2>/dev/null | head -n 1)
-			fi
-		fi
 		if [ -z "$value" ] || [ "$value" = "null" ] || [ "$value" = "undefined" ]; then
 			echo "$default_value"
 			return 0
@@ -4318,6 +4401,10 @@ EOF
 	}
 
 	openclaw_memory_menu() {
+		openclaw_memory_prepare_workspace_all >/dev/null 2>&1 || true
+		if [ "$(openclaw_memory_config_get "memory.qmd.includeDefaultMemory")" = "false" ]; then
+			openclaw_memory_config_set "memory.qmd.includeDefaultMemory" true >/dev/null 2>&1 || true
+		fi
 		send_stats "OpenClaw记忆管理"
 		while true; do
 			clear
@@ -5388,6 +5475,33 @@ openclaw_backup_restore_menu() {
 	}
 
 
+
+	openclaw_evomap_menu() {
+		while true; do
+			clear
+			echo "======================================="
+			echo "EvoMap 管理"
+			echo "======================================="
+			evomap_print_status
+			echo "---------------------------------------"
+			echo "1. 安装 EvoMap"
+			echo "2. 卸载 EvoMap"
+			echo "3. 更新 EvoMap"
+			echo "4. EvoMap 记忆管理"
+			echo "0. 返回上一级"
+			echo "---------------------------------------"
+			read -e -p "请输入你的选择: " evomap_choice
+			case "$evomap_choice" in
+				1) evomap_install; break_end ;;
+				2) evomap_uninstall; break_end ;;
+				3) evomap_update; break_end ;;
+				4) evomap_memory_menu ;;
+				0) return 0 ;;
+				*) echo "无效的选择，请重试。"; sleep 1 ;;
+			esac
+		done
+	}
+
 	update_moltbot() {
 		echo "更新 OpenClaw..."
 		send_stats "更新 OpenClaw..."
@@ -5604,35 +5718,56 @@ openclaw_backup_restore_menu() {
 			18) openclaw_backup_restore_menu ;;
 			19) update_moltbot ;;
 			20) uninstall_moltbot ;;
+			21) openclaw_evomap_menu ;;
 			*) break ;;
 		esac
 	done
 
 }
 
-OPENCLAW_EOF
+OPENCLAW_PANEL_EOF
+)"
+}
 
-  cat > "$STAGE_DIR/openclaw2.sh" <<'OPENCLAW2_EOF'
-#!/bin/bash
-set -e
+openclaw_enable_local_memory_auto() {
+  local model_name model_dir model_path model_url
+  model_name="embeddinggemma-300M-Q8_0.gguf"
+  model_dir="/root/.openclaw/models/embedding"
+  model_path="${model_dir}/${model_name}"
+  model_url="https://hf-mirror.com/ggml-org/embeddinggemma-300M-GGUF/resolve/main/${model_name}"
 
-# ====================== 你要求新增的功能 开始 ======================
-# 1. 重启确认：默认=没重启，脚本退出；输入Y=重启过，继续执行
-read -p "是否已经在PowerShell执行过 wsl --shutdown 重启？(y/N，默认N)：" REBOOT
-REBOOT=${REBOOT:-N}
-if [[ "$REBOOT" != "y" && "$REBOOT" != "Y" ]]; then
-    echo "未重启，脚本退出！请先重启后再运行本脚本~"
-    exit 0
-fi
+  mkdir -p "${model_dir}"
+  openclaw config set memory.backend builtin >/dev/null 2>&1 || true
+  openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
+  openclaw config set memory.qmd.includeDefaultMemory true --json >/dev/null 2>&1 || true
+  openclaw config set agents.defaults.memorySearch.local.modelPath "${model_path}" >/dev/null 2>&1 || true
 
-# 2. 代理端口：默认10808，手动输入可修改
-read -p "请输入代理端口(默认10808，直接回车使用默认)：" PROXY_PORT
-PROXY_PORT=${PROXY_PORT:-10808}
-# ====================== 你要求新增的功能 结束 ======================
+  if [ ! -f "${model_path}" ]; then
+    echo "下载 Local 记忆模型（首次仅执行一次）..."
+    curl -L --retry 3 --connect-timeout 10 -o "${model_path}" "${model_url}" || true
+  fi
+
+  mkdir -p /root/.openclaw/workspace/memory
+  openclaw memory index --force >/dev/null 2>&1 || true
+  openclaw gateway restart >/dev/null 2>&1 || true
+}
+
+run_openclaw_install_step() {
+  if ! command -v openclaw >/dev/null 2>&1; then
+    printf '1\n' | moltbot_menu || true
+  else
+    openclaw gateway status >/dev/null 2>&1 || true
+  fi
+  openclaw_enable_local_memory_auto
+}
+
+run_openclaw2_network_optimization() {
+:
+
 
 # 颜色
-GREEN='\033[0;32m'
-NC='\033[0m'
+GREEN='[0;32m'
+NC='[0m'
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  全自动 OpenClaw 部署（无重启·零操作）${NC}"
@@ -5697,12 +5832,12 @@ Environment=HOME=/root
 Environment=TMPDIR=/tmp
 Environment=PATH=/usr/bin:/usr/local/bin:/bin
 
-Environment=http_proxy=http://127.0.0.1:${PROXY_PORT}
-Environment=https_proxy=http://127.0.0.1:${PROXY_PORT}
-Environment=HTTP_PROXY=http://127.0.0.1:${PROXY_PORT}
-Environment=HTTPS_PROXY=http://127.0.0.1:${PROXY_PORT}
-Environment=all_proxy=socks5://127.0.0.1:${PROXY_PORT}
-Environment=ALL_PROXY=socks5://127.0.0.1:${PROXY_PORT}
+Environment=http_proxy=http://127.0.0.1:${SKPL_PROXY_PORT}
+Environment=https_proxy=http://127.0.0.1:${SKPL_PROXY_PORT}
+Environment=HTTP_PROXY=http://127.0.0.1:${SKPL_PROXY_PORT}
+Environment=HTTPS_PROXY=http://127.0.0.1:${SKPL_PROXY_PORT}
+Environment=all_proxy=socks5://127.0.0.1:${SKPL_PROXY_PORT}
+Environment=ALL_PROXY=socks5://127.0.0.1:${SKPL_PROXY_PORT}
 Environment=no_proxy=localhost,127.0.0.1
 Environment=NO_PROXY=localhost,127.0.0.1
 
@@ -5723,455 +5858,204 @@ echo -e "${GREEN}🎉 部署完成！${NC}"
 echo -e "打开浏览器访问：http://127.0.0.1:18789 配对即可"
 echo -e "验证命令：openclaw gateway status"
 echo -e "${GREEN}========================================${NC}"
-OPENCLAW2_EOF
-
-  cat > "$STAGE_DIR/evomap.sh" <<'EVOMAP_EOF'
-# 这段代码会自动把完整脚本写入文件、加权限、并自动运行，你只需要后续输入Node ID
-cat > /root/super_easy_install.sh << 'EOF'
-#!/bin/bash
-set +euo pipefail
-
-# 颜色输出定义
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-info() { echo -e "${YELLOW}[信息]${NC} $1"; }
-success() { echo -e "${GREEN}[成功]${NC} $1"; }
-error() { echo -e "${RED}[错误]${NC} $1"; }
-prompt() { echo -e "${CYAN}[请输入]${NC} $1"; }
-
-# ==================== 第一步：运行后手动输入Node ID（唯一需要你做的） ====================
-clear
-echo "=============================================="
-echo "  OpenClaw + Evolver 一键全自动安装"
-echo "=============================================="
-echo ""
-
-# 清空输入缓存，避免干扰
-read -r -t 0.1 -n 10000 discard < /dev/tty || true
-
-# 循环提示输入，直到你输入正确并确认为止
-while true; do
-    echo ""
-    prompt "1/2 请粘贴你的 EvoMap Node ID，粘贴完按回车："
-    read -r A2A_NODE_ID < /dev/tty
-    
-    if [ -n "$A2A_NODE_ID" ] && [ ${#A2A_NODE_ID} -ge 10 ]; then
-        echo ""
-        prompt "2/2 你输入的是：$A2A_NODE_ID"
-        prompt "确认无误请输入 y 按回车；输错了输入 n 重新来："
-        read -r confirm < /dev/tty
-        
-        if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-            success "✅ 好的！接下来全程自动，你不用管了，去喝杯水吧～"
-            break
-        else
-            error "❌ 好的，重新输入..."
-        fi
-    else
-        error "❌ 不行哦，请粘贴完整的Node ID（不要直接按回车）"
-    fi
-done
-
-echo ""
-info "安装开始，预计3-5分钟，请耐心等待..."
-sleep 3
-
-# ==================== 下面全是自动处理，你不用看 ====================
-set -euo pipefail
-EVOLVE_STRATEGY="balanced"
-OPENCLAW_ROOT="/root/.openclaw"
-REQUIRED_NODE_MAJOR=22
-
-# 1. 环境检查
-info "===== 1/9 环境检查 ====="
-if [ "$(id -u)" != "0" ]; then error "请先运行 sudo su 切换到root"; fi
-success "root权限通过"
-
-# 2. 基础依赖
-info "===== 2/9 基础依赖 ====="
-install_if_missing() {
-    if ! command -v "$1" &> /dev/null; then
-        info "正在安装 $1..."
-        apt update -qq && apt install -y -qq "$1"
-    else success "$1 已安装"; fi
-}
-install_if_missing git
-install_if_missing curl
-install_if_missing nano
-
-# 3. Node.js
-info "===== 3/9 Node.js环境 ====="
-if command -v node &> /dev/null; then
-    CURRENT_NODE_MAJOR=$(node -v | sed 's/v//' | cut -d. -f1)
-    if [ "$CURRENT_NODE_MAJOR" -ge "$REQUIRED_NODE_MAJOR" ]; then success "Node.js 版本符合要求"; else NEED_INSTALL_NODE=true; fi
-else NEED_INSTALL_NODE=true; fi
-
-if [ "${NEED_INSTALL_NODE:-false}" = true ]; then
-    info "正在安装 Node.js v$REQUIRED_NODE_MAJOR..."
-    curl -s -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-    export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-    nvm install -s "$REQUIRED_NODE_MAJOR" > /dev/null
-    nvm use "$REQUIRED_NODE_MAJOR" > /dev/null
-    nvm alias default "$REQUIRED_NODE_MAJOR" > /dev/null
-    echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc
-    echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"' >> ~/.bashrc
-    success "Node.js 安装完成"
-fi
-
-# 4. OpenClaw
-info "===== 4/9 OpenClaw环境 ====="
-if ! command -v openclaw &> /dev/null; then
-    info "正在安装 OpenClaw..."
-    npm install -g --silent openclaw
-    openclaw gateway install > /dev/null
-else success "OpenClaw 已安装"; fi
-
-info "正在自动修复配置..."
-openclaw doctor --repair > /dev/null 2>&1 || true
-if ! openclaw gateway status | grep -q "running"; then openclaw gateway restart > /dev/null; sleep 2; fi
-success "OpenClaw 网关正常"
-
-# 5. Evolver（自动清理旧版本）
-info "===== 5/9 Evolver安装 ====="
-cd "$OPENCLAW_ROOT" || error "目录不存在"
-EVOLVER_DIR="${OPENCLAW_ROOT}/evolver"
-
-if [ -d "$EVOLVER_DIR" ]; then
-    BACKUP_DIR="${EVOLVER_DIR}.backup.$(date +%Y%m%d%H%M%S)"
-    info "备份旧版本到 $BACKUP_DIR"
-    mv "$EVOLVER_DIR" "$BACKUP_DIR"
-fi
-rm -rf "$EVOLVER_DIR"
-
-info "正在克隆最新版 Evolver..."
-git clone -q https://github.com/EvoMap/evolver.git "$EVOLVER_DIR"
-cd "$EVOLVER_DIR" || error "克隆失败"
-npm install --silent
-mkdir -p skills assets/gep memory
-success "Evolver 基础安装完成"
-
-# 6. 生成配置文件
-info "===== 6/9 生成配置文件 ====="
-cat > .env << ENV_EOF
-MEMORY_DIR=${OPENCLAW_ROOT}/workspace/.learnings
-A2A_HUB_URL=https://evomap.ai
-A2A_NODE_ID=${A2A_NODE_ID}
-EVOLVE_STRATEGY=${EVOLVE_STRATEGY}
-ENV_EOF
-success "配置文件生成完成"
-
-# 7. 注入适配基因
-info "===== 7/9 注入适配基因 ====="
-cat > assets/gep/openclaw-core-genes.json << GENE_EOF
-{"genes":[{"id":"openclaw-log-parser","name":"OpenClaw官方日志解析基因","version":"1.0.0","signals":["openclaw","gateway","session","learning","error","crash","timeout"],"directives":["优先解析${OPENCLAW_ROOT}/workspace/.learnings/目录下的OpenClaw运行日志","提取OpenClaw网关报错、会话执行失败、循环停滞的关键信号","过滤无效内容，仅保留智能体执行相关的结构化数据"],"validation":[],"priority":100}]}
-GENE_EOF
-
-cat > assets/gep/core-repair-capsules.json << CAPSULE_EOF
-{"capsules":[{"id":"core-repair-kit","name":"核心自修复胶囊库","version":"1.0.0","targets":["agent-loop","execution-failure","stagnation"],"steps":["识别到智能体循环停滞时，输出稳定性优化提示","识别到执行错误时，输出标准化修复方案","每次修复生成可审计的进化记录，避免重复修复"]}]}
-CAPSULE_EOF
-success "适配基因注入完成"
-
-# 8. 启动服务
-info "===== 8/9 启动服务 ====="
-pkill -f "node index.js --loop" 2>/dev/null || true
-> nohup.out
-nohup node index.js --loop &
-sleep 3
-if ps -p $! > /dev/null; then success "Evolver 启动成功 (PID: $!)"; else error "启动失败"; fi
-
-# 9. 最终验证
-info "===== 9/9 最终验证 ====="
-openclaw gateway restart > /dev/null
-sleep 2
-
-if ps aux | grep -q "node index.js --loop" && openclaw gateway status | grep -q "running"; then
-    echo ""
-    echo "=================================================="
-    success "🎉 恭喜！全部安装成功！"
-    echo "=================================================="
-    echo ""
-    echo "📋 常用命令（保存一下）："
-    echo "  查看日志: tail -f ${EVOLVER_DIR}/nohup.out"
-    echo "  重启服务: cd ${EVOLVER_DIR} && pkill -f 'node index.js --loop' && nohup node index.js --loop &"
-    echo ""
-else
-    error "安装验证失败"
-fi
-EOF
-
-# 自动给脚本加权限并运行
-chmod +x /root/super_easy_install.sh
-/root/super_easy_install.sh
-EVOMAP_EOF
-
-  chmod +x "$STAGE_DIR"/*.sh
 }
 
-choose_proxy_port() {
-  local input_port
-  echo "==========================================="
-  echo "代理端口设置"
-  echo "默认端口: 10808"
-  echo "可手动输入新端口"
-  echo "直接回车: 跳过修改并使用默认 10808"
-  echo "==========================================="
-  read -r -p "请输入代理端口: " input_port
-  if [ -z "$input_port" ]; then
-    input_port="10808"
-    log "已跳过手动输入，使用默认端口: 10808"
-  fi
-  case "$input_port" in
-    ''|*[!0-9]*) err "代理端口必须是数字" ;;
-  esac
-  SKPL_PROXY_PORT="$input_port"
-  log "当前代理端口: $SKPL_PROXY_PORT"
-}
-
-apply_proxy_port_to_stage() {
-  local port="$1"
-  python3 - "$STAGE_DIR/wslwin.sh" "$STAGE_DIR/openclaw2.sh" "$port" <<'PY'
-from pathlib import Path
-import sys
-
-wsl = Path(sys.argv[1])
-oc2 = Path(sys.argv[2])
-port = sys.argv[3]
-
-w = wsl.read_text(encoding='utf-8')
-w = w.replace(
-    'read -p "请输入代理端口号：" CUSTOM_PORT\n\n[ -z "$CUSTOM_PORT" ] && PROXY_PORT="10808" || PROXY_PORT="$CUSTOM_PORT"',
-    f'CUSTOM_PORT="${{SKPL_PROXY_PORT:-{port}}}"\n\nPROXY_PORT="$CUSTOM_PORT"'
-)
-wsl.write_text(w, encoding='utf-8')
-
-o = oc2.read_text(encoding='utf-8')
-o = o.replace(
-    'read -p "请输入代理端口(默认10808，直接回车使用默认)：" PROXY_PORT\nPROXY_PORT=${PROXY_PORT:-10808}',
-    f'PROXY_PORT="${{SKPL_PROXY_PORT:-{port}}}"\necho "已使用代理端口: $PROXY_PORT"'
-)
-oc2.write_text(o, encoding='utf-8')
-PY
-}
-
-install_openclaw_runtime_stub() {
-  gl_lv='\033[0;32m'
-  gl_hui='\033[0;37m'
-  gl_huang='\033[1;33m'
-  gl_hong='\033[0;31m'
-  gl_bai='\033[0m'
-  gl_kjlan='\033[0;36m'
-  gh_proxy=""
-  send_stats() { :; }
-  break_end() { :; }
-  add_app_id() { :; }
-  add_yuming() { read -r -p "请输入域名: " yuming; }
-  ldnmp_Proxy() { :; }
-  web_del() { :; }
-  openclaw_has_command() { command -v "$1" >/dev/null 2>&1; }
-  install() {
-    if command -v apt-get >/dev/null 2>&1; then
-      DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 || true
-      DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1 || true
-    fi
-  }
-}
-
-run_wslwin() {
-  log "执行步骤 1/4: wslwin"
-  SKPL_PROXY_PORT="${SKPL_PROXY_PORT:-10808}" bash "$STAGE_DIR/wslwin.sh"
-}
-
-run_openclaw() {
-  log "执行步骤 2/4: openclaw"
-  install_openclaw_runtime_stub
-  # shellcheck disable=SC1091
-  source "$STAGE_DIR/openclaw.sh"
-  if declare -F install_moltbot >/dev/null 2>&1; then
-    install_moltbot
+evomap_print_status() {
+  echo "EvoMap 目录: $EVOMAP_DIR"
+  if [ -d "$EVOMAP_DIR" ]; then
+    echo "状态: 已安装"
   else
-    err "未找到 install_moltbot 函数，无法按原脚本逻辑安装 openclaw"
+    echo "状态: 未安装"
   fi
-
-  # 安装完成后自动启用 Local 记忆方案
-  openclaw config set memory.backend builtin >/dev/null 2>&1 || true
-  openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
+  echo "记忆存储地址: $EVOMAP_MEMORY_DIR"
+  echo "备份存储地址: $EVOMAP_BACKUP_DIR"
 }
 
-run_openclaw2() {
-  log "执行步骤 3/4: openclaw2"
-  SKPL_PROXY_PORT="${SKPL_PROXY_PORT:-10808}" bash "$STAGE_DIR/openclaw2.sh"
-}
-
-run_evomap() {
-  log "执行步骤 4/4: EvoMap"
-  bash "$STAGE_DIR/evomap.sh"
-}
-
-run_all() {
-  ensure_proxy_port
-  run_wslwin
-  run_openclaw
-  run_openclaw2
-  run_evomap
-  install_skpl_command
-  touch "$INSTALL_MARKER"
-  log "四段脚本执行完成。"
-}
-
-ensure_proxy_port() {
-  if [ -z "${SKPL_PROXY_PORT:-}" ]; then
-    choose_proxy_port
-    apply_proxy_port_to_stage "$SKPL_PROXY_PORT"
+evomap_backup_current() {
+  mkdir -p "$EVOMAP_BACKUP_DIR"
+  if [ -d "$EVOMAP_DIR" ]; then
+    local backup_path
+    backup_path="$EVOMAP_BACKUP_DIR/evolver.$(date +%Y%m%d%H%M%S).tgz"
+    tar -czf "$backup_path" -C /root/.openclaw evolver
+    echo "已备份 EvoMap: $backup_path"
   fi
 }
 
-evomap_root() { echo "/root/.openclaw/evolver"; }
-evomap_memory_dir() { echo "/root/.openclaw/workspace/.learnings"; }
-evomap_backup_dir() { echo "/root/.openclaw/backups/evomap-memory"; }
+evomap_install() {
+  local node_id confirm
+  install git curl
+  mkdir -p /root/.openclaw
 
-evomap_install() { run_evomap; }
+  read -r -p "请输入 EvoMap Node ID: " node_id
+  if [ -z "$node_id" ]; then
+    echo "Node ID 不能为空。"
+    return 1
+  fi
+  read -r -p "确认 Node ID 为 [$node_id] 吗？(y/N): " confirm
+  if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+    echo "已取消安装。"
+    return 1
+  fi
+
+  evomap_backup_current
+
+  if [ -d "$EVOMAP_DIR" ]; then
+    mv "$EVOMAP_DIR" "${EVOMAP_DIR}.old.$(date +%Y%m%d%H%M%S)"
+  fi
+
+  git clone https://github.com/EvoMap/evolver.git "$EVOMAP_DIR"
+  cd "$EVOMAP_DIR"
+  npm install --silent
+  mkdir -p skills assets/gep memory
+
+  cat > .env <<EOF_ENV
+MEMORY_DIR=${EVOMAP_MEMORY_DIR}
+A2A_HUB_URL=https://evomap.ai
+A2A_NODE_ID=${node_id}
+EVOLVE_STRATEGY=balanced
+EOF_ENV
+
+  cat > assets/gep/openclaw-core-genes.json <<'EOF_GENE'
+{"genes":[{"id":"openclaw-log-parser","name":"OpenClaw日志解析基因","version":"1.0.0","signals":["openclaw","gateway","session","learning","error","crash","timeout"],"directives":["优先解析OpenClaw日志","提取网关和会话错误信号","过滤无效内容并保留结构化数据"],"validation":[],"priority":100}]}
+EOF_GENE
+
+  cat > assets/gep/core-repair-capsules.json <<'EOF_CAP'
+{"capsules":[{"id":"core-repair-kit","name":"核心修复胶囊","version":"1.0.0","targets":["agent-loop","execution-failure","stagnation"],"steps":["识别循环停滞并输出修复建议","识别执行错误并输出标准方案","生成可审计修复记录"]}]}
+EOF_CAP
+
+  pkill -f "node index.js --loop" >/dev/null 2>&1 || true
+  nohup node index.js --loop > "$EVOMAP_DIR/nohup.out" 2>&1 &
+  sleep 2
+  openclaw gateway restart >/dev/null 2>&1 || true
+
+  echo "EvoMap 安装完成。"
+}
 
 evomap_uninstall() {
-  local root
-  root="$(evomap_root)"
-  pkill -f "node index.js --loop" 2>/dev/null || true
-  if [ -d "$root" ]; then
-    mv "$root" "${root}.removed.$(date +%Y%m%d%H%M%S)"
-    log "EvoMap 已卸载（目录改名备份）"
-  else
-    warn "未检测到 EvoMap 目录"
+  pkill -f "node index.js --loop" >/dev/null 2>&1 || true
+  if [ -d "$EVOMAP_DIR" ]; then
+    evomap_backup_current
+    mv "$EVOMAP_DIR" "${EVOMAP_DIR}.removed.$(date +%Y%m%d%H%M%S)"
   fi
+  echo "EvoMap 已卸载（目录已改名保留备份）。"
 }
 
 evomap_update() {
-  local root
-  root="$(evomap_root)"
-  [ -d "$root/.git" ] || err "未检测到 EvoMap git 目录，请先安装"
-  git -C "$root" pull --rebase
-  npm --prefix "$root" install
-  pkill -f "node index.js --loop" 2>/dev/null || true
-  (cd "$root" && nohup node index.js --loop >/dev/null 2>&1 &)
-  log "EvoMap 已更新并重启"
-}
-
-evomap_memory_manage() {
-  local memory_dir backup_dir ts archive
-  memory_dir="$(evomap_memory_dir)"
-  backup_dir="$(evomap_backup_dir)"
-  mkdir -p "$backup_dir"
-  ts="$(date +%Y%m%d%H%M%S)"
-  archive="$backup_dir/memory-backup-$ts.tar.gz"
-
-  if [ -d "$memory_dir" ]; then
-    tar -czf "$archive" -C "$memory_dir" .
-    log "EvoMap 记忆备份完成: $archive"
-  else
-    warn "未找到记忆目录: $memory_dir"
+  if [ ! -d "$EVOMAP_DIR/.git" ]; then
+    echo "EvoMap 未安装，先执行安装。"
+    return 1
   fi
-
-  echo "记忆存储地址: $memory_dir"
-  echo "备份存储地址: $backup_dir"
+  evomap_backup_current
+  cd "$EVOMAP_DIR"
+  git pull --rebase
+  npm install --silent
+  pkill -f "node index.js --loop" >/dev/null 2>&1 || true
+  nohup node index.js --loop > "$EVOMAP_DIR/nohup.out" 2>&1 &
+  echo "EvoMap 更新完成。"
 }
 
-panel_update() {
-  log "面板更新：请使用新版本脚本覆盖当前文件"
-}
-
-panel_uninstall() {
-  local cmd="/usr/local/bin/skpl"
-  if [ -f "$cmd" ]; then
-    mv "$cmd" "${cmd}.removed.$(date +%Y%m%d%H%M%S)"
-    log "已卸载 skpl 快捷命令（不影响其他程序）"
-  else
-    warn "未发现 skpl 快捷命令"
-  fi
-}
-
-install_skpl_command() {
-  local self launcher_target
-  self="$(readlink -f "$0")"
-  launcher_target="${WORK_ROOT}/merged_openclaw_readable.sh"
-  if [ "$self" != "$launcher_target" ]; then
-    cp -f "$self" "$launcher_target"
-    chmod +x "$launcher_target"
-    self="$launcher_target"
-  fi
-  if [ -f "$launcher_target" ]; then
-    self="$launcher_target"
-  fi
-  cat > /usr/local/bin/skpl <<EOF
-#!/usr/bin/env bash
-exec bash "$self" --panel
-EOF
-  chmod +x /usr/local/bin/skpl
-}
-
-openclaw_panel() {
-  install_openclaw_runtime_stub
-  # shellcheck disable=SC1091
-  source "$STAGE_DIR/openclaw.sh"
-  moltbot_menu
-}
-
-skpl_menu() {
+evomap_memory_menu() {
   while true; do
     clear
-    echo "==========================================="
-    echo "SKPL 面板（集成 OpenClaw 原生能力）"
-    echo "==========================================="
-    echo "1. OpenClaw 全功能面板（你的 SKPL 核心面板）"
-    echo "2. EvoMap 安装"
-    echo "3. EvoMap 卸载"
-    echo "4. EvoMap 更新"
-    echo "5. EvoMap 记忆管理（含备份）"
-    echo "6. 面板更新"
-    echo "7. 面板卸载"
-    echo "8. 重新执行完整流程（wslwin->openclaw->openclaw2->EvoMap）"
-    echo "0. 退出"
-    read -r -p "请选择: " choice
-    case "$choice" in
-      1) openclaw_panel ;;
-      2) evomap_install ;;
-      3) evomap_uninstall ;;
-      4) evomap_update ;;
-      5) evomap_memory_manage ;;
-      6) panel_update ;;
-      7) panel_uninstall ;;
-      8) unset SKPL_PROXY_PORT; run_all ;;
-      0) break ;;
-      *) warn "无效选项" ;;
+    echo "======================================="
+    echo "EvoMap 记忆管理"
+    echo "======================================="
+    evomap_print_status
+    echo "---------------------------------------"
+    echo "1. 立即备份 EvoMap"
+    echo "2. 查看记忆目录"
+    echo "3. 查看备份目录"
+    echo "0. 返回上一级"
+    echo "---------------------------------------"
+    read -r -p "请输入你的选择: " evo_mem_choice
+    case "$evo_mem_choice" in
+      1) evomap_backup_current; break_end ;;
+      2) ls -la "$EVOMAP_MEMORY_DIR" 2>/dev/null || echo "记忆目录不存在。"; break_end ;;
+      3) ls -la "$EVOMAP_BACKUP_DIR" 2>/dev/null || echo "备份目录不存在。"; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
     esac
-    read -r -p "按回车继续..." _
+  done
+}
+
+run_evomap_install_step() {
+  evomap_install
+}
+
+run_full_pipeline_once() {
+  echo "[1/4] 执行 wslwin 代理同步..."
+  run_wslwin_proxy_sync
+
+  echo "[2/4] 安装 OpenClaw（原脚本逻辑）并自动启用 Local 记忆..."
+  run_openclaw_install_step
+
+  echo "[3/4] 执行 openclaw2 网络优化..."
+  run_openclaw2_network_optimization
+
+  openclaw_enable_local_memory_auto
+
+  echo "[4/4] 安装 EvoMap..."
+  run_evomap_install_step
+
+  save_self_to_skpl
+  echo "全部步骤执行完成。可使用 skpl 打开面板。"
+}
+
+skpl_update_panel() {
+  save_self_to_skpl
+  echo "SKPL 面板已更新。"
+}
+
+skpl_main_panel() {
+  while true; do
+    clear
+    echo "======================================="
+    echo "SKPL"
+    echo "======================================="
+    echo "1. OpenClaw 面板"
+    echo "2. EvoMap 管理"
+    echo "3. 重新执行完整安装流程"
+    echo "4. SKPL 面板更新"
+    echo "5. SKPL 面板卸载"
+    echo "0. 退出"
+    echo "---------------------------------------"
+    read -r -p "请输入你的选择: " skpl_choice
+    case "$skpl_choice" in
+      1) moltbot_menu ;;
+      2) openclaw_evomap_menu ;;
+      3) run_full_pipeline_once; break_end ;;
+      4) skpl_update_panel; break_end ;;
+      5) remove_skpl_panel_only; break_end ;;
+      0) exit 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
   done
 }
 
 main() {
-  mkdir -p "$WORK_ROOT"
+  ensure_root
+  load_openclaw_panel
 
-  write_sources
-  install_skpl_command
-  case "${1:-}" in
-    --panel)
-      if [ ! -f "$INSTALL_MARKER" ]; then
-        log "检测到尚未完成四合一安装流程，先执行完整安装。"
-        unset SKPL_PROXY_PORT
-        run_all
-      fi
-      skpl_menu
+  case "${1:-install}" in
+    install)
+      run_full_pipeline_once
+      skpl_main_panel
       ;;
-    --run-all)
-      choose_proxy_port
-      apply_proxy_port_to_stage "$SKPL_PROXY_PORT"
-      run_all
+    panel)
+      save_self_to_skpl
+      skpl_main_panel
+      ;;
+    openclaw)
+      save_self_to_skpl
+      moltbot_menu
+      ;;
+    evomap)
+      save_self_to_skpl
+      openclaw_evomap_menu
       ;;
     *)
-      choose_proxy_port
-      apply_proxy_port_to_stage "$SKPL_PROXY_PORT"
-      run_all
-      skpl_menu
+      echo "用法: bash $0 [install|panel|openclaw|evomap]"
+      exit 1
       ;;
   esac
 }
