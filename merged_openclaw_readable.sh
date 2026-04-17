@@ -190,13 +190,16 @@ PY
 run_step_guard() {
   local step="$1"
   shift
+  local rc=0
   log_msg "开始: $step"
+  log_msg "执行命令: $*"
   if "$@"; then
     log_msg "完成: $step"
     return 0
   fi
-  log_msg "失败: $step"
-  return 1
+  rc=$?
+  log_msg "失败: $step | 返回码: $rc | 命令: $*"
+  return $rc
 }
 
 print_failure_hint() {
