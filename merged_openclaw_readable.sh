@@ -5913,6 +5913,47 @@ EVOMAP_EOF
   chmod +x "$STAGE_DIR"/*.sh
 }
 
+choose_proxy_port() {
+  local input_port
+  echo "==========================================="
+  echo "代理端口设置"
+  echo "默认端口: 10808"
+  echo "==========================================="
+  read -r -p "请输入代理端口（直接回车使用默认）: " input_port
+  input_port="${input_port:-10808}"
+  case "$input_port" in
+    ''|*[!0-9]*) err "代理端口必须是数字" ;;
+  esac
+  SKPL_PROXY_PORT="$input_port"
+  log "当前代理端口: $SKPL_PROXY_PORT"
+}
+
+apply_proxy_port_to_stage() {
+  local port="$1"
+  python3 - "$STAGE_DIR/wslwin.sh" "$STAGE_DIR/openclaw2.sh" "$port" <<'PY'
+from pathlib import Path
+import sys
+
+wsl = Path(sys.argv[1])
+oc2 = Path(sys.argv[2])
+port = sys.argv[3]
+
+w = wsl.read_text(encoding='utf-8')
+w = w.replace(
+    'read -p "请输入代理端口号：" CUSTOM_PORT\n\n[ -z "$CUSTOM_PORT" ] && PROXY_PORT="10808" || PROXY_PORT="$CUSTOM_PORT"',
+    f'CUSTOM_PORT="${{SKPL_PROXY_PORT:-{port}}}"\n\nPROXY_PORT="$CUSTOM_PORT"'
+)
+wsl.write_text(w, encoding='utf-8')
+
+o = oc2.read_text(encoding='utf-8')
+o = o.replace(
+    'read -p "请输入代理端口(默认10808，直接回车使用默认)：" PROXY_PORT\nPROXY_PORT=${PROXY_PORT:-10808}',
+    f'PROXY_PORT="${{SKPL_PROXY_PORT:-{port}}}"\necho "已使用代理端口: $PROXY_PORT"'
+)
+oc2.write_text(o, encoding='utf-8')
+PY
+}
+
 install_openclaw_runtime_stub() {
   gl_lv='\033[0;32m'
   gl_hui='\033[0;37m'
@@ -5938,7 +5979,7 @@ install_openclaw_runtime_stub() {
 
 run_wslwin() {
   log "执行步骤 1/4: wslwin"
-  bash "$STAGE_DIR/wslwin.sh"
+  SKPL_PROXY_PORT="$SKPL_PROXY_PORT" bash "$STAGE_DIR/wslwin.sh"
 }
 
 run_openclaw() {
@@ -5946,8 +5987,11 @@ run_openclaw() {
   install_openclaw_runtime_stub
   # shellcheck disable=SC1091
   source "$STAGE_DIR/openclaw.sh"
-  # 通过菜单输入调用安装，保持原脚本安装逻辑
-  printf "1\n0\n" | moltbot_menu || true
+  if declare -F install_moltbot >/dev/null 2>&1; then
+    install_moltbot
+  else
+    err "未找到 install_moltbot 函数，无法按原脚本逻辑安装 openclaw"
+  fi
 
   # 二次兜底，确保不进入配置界面并启用 Local
   OPENCLAW_ONBOARD_NO_UI=1 openclaw onboard --install-daemon >/dev/null 2>&1 || true
@@ -5957,7 +6001,7 @@ run_openclaw() {
 
 run_openclaw2() {
   log "执行步骤 3/4: openclaw2"
-  bash "$STAGE_DIR/openclaw2.sh"
+  SKPL_PROXY_PORT="$SKPL_PROXY_PORT" bash "$STAGE_DIR/openclaw2.sh"
 }
 
 run_evomap() {
@@ -6066,16 +6110,16 @@ skpl_menu() {
   while true; do
     clear
     echo "==========================================="
-    echo "SKPL 面板"
+    echo "SKPL 面板（集成 OpenClaw 原生能力）"
     echo "==========================================="
-    echo "1. OpenClaw 面板"
+    echo "1. OpenClaw 原生面板"
     echo "2. EvoMap 安装"
     echo "3. EvoMap 卸载"
     echo "4. EvoMap 更新"
     echo "5. EvoMap 记忆管理（含备份）"
     echo "6. 面板更新"
     echo "7. 面板卸载"
-    echo "8. 重新执行完整流程"
+    echo "8. 重新执行完整流程（wslwin->openclaw->openclaw2->EvoMap）"
     echo "0. 退出"
     read -r -p "请选择: " choice
     case "$choice" in
@@ -6104,9 +6148,13 @@ main() {
       skpl_menu
       ;;
     --run-all)
+      choose_proxy_port
+      apply_proxy_port_to_stage "$SKPL_PROXY_PORT"
       run_all
       ;;
     *)
+      choose_proxy_port
+      apply_proxy_port_to_stage "$SKPL_PROXY_PORT"
       run_all
       skpl_menu
       ;;
