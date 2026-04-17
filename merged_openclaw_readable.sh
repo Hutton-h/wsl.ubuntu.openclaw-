@@ -323,6 +323,24 @@ prompt_proxy_port() {
   done
 }
 
+prompt_wsl_shutdown_confirmation() {
+  local reboot_confirm
+
+  ensure_interactive_terminal "WSL 重启确认" || return 1
+
+  while true; do
+    tty_prompt_line "是否已经在 PowerShell 执行过 wsl --shutdown 重启？(y/N): " reboot_confirm
+    reboot_confirm=${reboot_confirm:-N}
+
+    if [ "$reboot_confirm" = "y" ] || [ "$reboot_confirm" = "Y" ]; then
+      return 0
+    fi
+
+    echo "未确认已执行 wsl --shutdown，当前安装流程停止。请先在 PowerShell 执行重启，再重新运行脚本。"
+    return 1
+  done
+}
+
 prompt_evomap_node_id() {
   local node_id_input="$1"
   local last_saved_node_id="$2"
@@ -613,6 +631,11 @@ run_wslwin_proxy_sync() {
   set +e
   clear
   echo -e "====================  WSL 全能一键脚本 ===================="
+
+  prompt_wsl_shutdown_confirmation || {
+    set -e
+    return 1
+  }
 
   killall apt apt-get dpkg 2>/dev/null
   sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
@@ -1191,8 +1214,14 @@ PY
 
     echo "正在安装 OpenClaw CLI..."
     install_openclaw_global
+    if ! command -v openclaw >/dev/null 2>&1; then
+      echo "OpenClaw CLI 安装失败：未检测到 openclaw 命令。"
+      return 1
+    fi
+
     openclaw_onboard_if_needed
     start_gateway
+    openclaw gateway status >/dev/null 2>&1 || true
     add_app_id
     break_end
 
