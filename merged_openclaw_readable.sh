@@ -5816,24 +5816,42 @@ __EVOMAP_TXT_260417__
 
 persist_runtime_script() {
   mkdir -p "$WORK_ROOT"
+
+  same_path() {
+    [ -n "$1" ] && [ -n "$2" ] || return 1
+    [ "$(realpath "$1" 2>/dev/null)" = "$(realpath "$2" 2>/dev/null)" ]
+  }
+
   if [ "$0" != "$RUNTIME_SCRIPT" ] && [ -f "$0" ]; then
-    cp -f "$0" "$RUNTIME_SCRIPT"
-    chmod +x "$RUNTIME_SCRIPT"
-    log_resume_event "续跑脚本已落盘: $RUNTIME_SCRIPT (来源: $0)"
+    if same_path "$0" "$RUNTIME_SCRIPT"; then
+      log_resume_event "续跑脚本已就位: $RUNTIME_SCRIPT (来源: $0)"
+    else
+      cp -f "$0" "$RUNTIME_SCRIPT"
+      chmod +x "$RUNTIME_SCRIPT"
+      log_resume_event "续跑脚本已落盘: $RUNTIME_SCRIPT (来源: $0)"
+    fi
     return 0
   fi
 
   if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
-    cp -f "${BASH_SOURCE[0]}" "$RUNTIME_SCRIPT"
-    chmod +x "$RUNTIME_SCRIPT"
-    log_resume_event "续跑脚本已落盘: $RUNTIME_SCRIPT (来源: ${BASH_SOURCE[0]})"
+    if same_path "${BASH_SOURCE[0]}" "$RUNTIME_SCRIPT"; then
+      log_resume_event "续跑脚本已就位: $RUNTIME_SCRIPT (来源: ${BASH_SOURCE[0]})"
+    else
+      cp -f "${BASH_SOURCE[0]}" "$RUNTIME_SCRIPT"
+      chmod +x "$RUNTIME_SCRIPT"
+      log_resume_event "续跑脚本已落盘: $RUNTIME_SCRIPT (来源: ${BASH_SOURCE[0]})"
+    fi
     return 0
   fi
 
   if [ -f "/workspace/merged_openclaw_readable .sh" ]; then
-    cp -f "/workspace/merged_openclaw_readable .sh" "$RUNTIME_SCRIPT"
-    chmod +x "$RUNTIME_SCRIPT"
-    log_resume_event "续跑脚本已落盘: $RUNTIME_SCRIPT (来源: /workspace/merged_openclaw_readable .sh)"
+    if same_path "/workspace/merged_openclaw_readable .sh" "$RUNTIME_SCRIPT"; then
+      log_resume_event "续跑脚本已就位: $RUNTIME_SCRIPT (来源: /workspace/merged_openclaw_readable .sh)"
+    else
+      cp -f "/workspace/merged_openclaw_readable .sh" "$RUNTIME_SCRIPT"
+      chmod +x "$RUNTIME_SCRIPT"
+      log_resume_event "续跑脚本已落盘: $RUNTIME_SCRIPT (来源: /workspace/merged_openclaw_readable .sh)"
+    fi
     return 0
   fi
 
