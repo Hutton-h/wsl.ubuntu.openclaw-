@@ -12,6 +12,7 @@ EVOMAP_MEMORY_DIR="/root/.openclaw/workspace/.learnings"
 EVOMAP_BACKUP_DIR="/root/.openclaw/evolver_backups"
 SKPL_STATE_FILE="/root/.skpl/install.state"
 SKPL_LOG_FILE="/root/.skpl/install.log"
+SKPL_APT_UPDATED="0"
 
 gl_bai='\033[0m'
 gl_lv='\033[32m'
@@ -111,24 +112,10 @@ prewarm_openclaw_dependencies() {
     npm config set progress false >/dev/null 2>&1 || true
   fi
 
-  if command -v apt >/dev/null 2>&1; then
-    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
-      DEBIAN_FRONTEND=noninteractive apt update -y >/dev/null 2>&1 || true
-      DEBIAN_FRONTEND=noninteractive apt install -y curl ca-certificates gnupg >/dev/null 2>&1 || true
-      curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null 2>&1 || true
-      DEBIAN_FRONTEND=noninteractive apt install -y nodejs build-essential python3 libatomic1 >/dev/null 2>&1 || true
-    fi
-  fi
+  ensure_node_runtime
 }
 
-send_stats() {
-  local event="$1"
-  [ -z "$event" ] && return 0
-
-  init_skpl_runtime
-  log_msg "事件: $event"
-  printf '[%s] %s\n' "$(date '+%F %T')" "$event" >> "${SKPL_HOME}/events.log"
-}
+send_stats() { :; }
 
 break_end() {
   if [ -t 0 ]; then
@@ -140,48 +127,146 @@ install() {
   if [ "$#" -eq 0 ]; then
     return 0
   fi
+
+  local pkg missing_packages=()
   if command -v apt >/dev/null 2>&1; then
-    DEBIAN_FRONTEND=noninteractive apt update -y >/dev/null 2>&1 || true
-    DEBIAN_FRONTEND=noninteractive apt install -y "$@" >/dev/null 2>&1 || true
+    for pkg in "$@"; do
+      dpkg -s "$pkg" >/dev/null 2>&1 || missing_packages+=("$pkg")
+    done
+    if [ "${#missing_packages[@]}" -eq 0 ]; then
+      return 0
+    fi
+    if [ "$SKPL_APT_UPDATED" != "1" ]; then
+      DEBIAN_FRONTEND=noninteractive apt update -y >/dev/null 2>&1 || true
+      SKPL_APT_UPDATED="1"
+    fi
+    DEBIAN_FRONTEND=noninteractive apt install -y "${missing_packages[@]}" >/dev/null 2>&1 || true
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y "$@" >/dev/null 2>&1 || true
+    for pkg in "$@"; do
+      rpm -q "$pkg" >/dev/null 2>&1 || missing_packages+=("$pkg")
+    done
+    [ "${#missing_packages[@]}" -eq 0 ] || dnf install -y "${missing_packages[@]}" >/dev/null 2>&1 || true
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y "$@" >/dev/null 2>&1 || true
+    for pkg in "$@"; do
+      rpm -q "$pkg" >/dev/null 2>&1 || missing_packages+=("$pkg")
+    done
+    [ "${#missing_packages[@]}" -eq 0 ] || yum install -y "${missing_packages[@]}" >/dev/null 2>&1 || true
   fi
 }
 
-add_app_id() {
-  local launcher_path="/usr/local/bin/k"
-  local marker="# skpl-shortcut"
+ensure_interactive_terminal() {
+  local action_name="$1"
+  if [ -t 0 ]; then
+    return 0
+  fi
+  echo "${action_name}需要在界面中手动输入，当前不是交互终端，已停止。"
+  return 1
+}
 
-  if [ -f "$launcher_path" ] && ! grep -q "$marker" "$launcher_path" 2>/dev/null; then
-    log_msg "跳过写入快捷命令: $launcher_path 已存在且非 SKPL 管理"
+prompt_proxy_port() {
+  local custom_port
+
+  ensure_interactive_terminal "代理端口确认" || return 1
+
+  while true; do
+    echo -e "默认代理端口：10808"
+    echo -e "直接回车 = 使用默认端口 | 输入数字 = 使用自定义端口"
+    read -r -p "请输入代理端口号: " custom_port
+
+    if [ -z "$custom_port" ]; then
+      PROXY_PORT="10808"
+      return 0
+    fi
+
+    if [[ "$custom_port" =~ ^[0-9]+$ ]] && [ "$custom_port" -ge 1 ] && [ "$custom_port" -le 65535 ]; then
+      PROXY_PORT="$custom_port"
+      return 0
+    fi
+
+    echo "端口无效，请输入 1-65535 之间的数字，或直接回车使用 10808。"
+  done
+}
+
+prompt_evomap_node_id() {
+  local node_id_input="$1"
+  local last_saved_node_id="$2"
+  local confirm
+
+  ensure_interactive_terminal "EvoMap Node ID 输入" || return 1
+
+  if [ -n "$last_saved_node_id" ]; then
+    echo "已保存上次 Node ID: $last_saved_node_id"
+    echo "请手动输入或粘贴本次要使用的 Node ID。"
+  fi
+
+  while true; do
+    read -r -p "请输入 EvoMap Node ID: " node_id_input
+    if [ -z "$node_id_input" ]; then
+      echo "Node ID 不能为空，必须手动输入或粘贴。"
+      continue
+    fi
+
+    read -r -p "确认 Node ID 为 [$node_id_input] 吗？(y/N): " confirm
+    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+      printf '%s\n' "$node_id_input"
+      return 0
+    fi
+
+    echo "已取消本次输入，请重新手动输入。"
+  done
+}
+
+ensure_node_runtime() {
+  local current_major=""
+
+  if command -v node >/dev/null 2>&1; then
+    current_major=$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)
+  fi
+
+  if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && [[ "$current_major" =~ ^[0-9]+$ ]] && [ "$current_major" -ge 20 ]; then
     return 0
   fi
 
-  cat > "$launcher_path" <<'EOF_K_CMD'
-#!/bin/bash
-set -e
-# skpl-shortcut
+  if command -v dnf >/dev/null 2>&1; then
+    install curl ca-certificates gcc gcc-c++ make python3 cmake libatomic nodejs
+    return 0
+  fi
 
-if [ "$#" -eq 0 ]; then
-  exec skpl
-fi
-
-case "$1" in
-  claw|skpl)
-    shift
-    exec skpl "$@"
-    ;;
-  *)
-    exec "$@"
-    ;;
-esac
-EOF_K_CMD
-
-  chmod +x "$launcher_path"
-  log_msg "已更新快捷命令: $launcher_path"
+  if command -v apt >/dev/null 2>&1; then
+    install curl ca-certificates gnupg
+    curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null 2>&1 || true
+    SKPL_APT_UPDATED="0"
+    install build-essential python3 libatomic1 nodejs
+  fi
 }
+
+install_openclaw_global() {
+  local registry_url="${SKPL_NPM_REGISTRY:-}"
+  local npm_args=(install -g openclaw@latest --no-fund --no-audit --loglevel=error --prefer-online)
+
+  if [ -n "$registry_url" ]; then
+    npm_args+=(--registry "$registry_url")
+  fi
+
+  npm "${npm_args[@]}"
+}
+
+install_evomap_dependencies() {
+  local npm_args=(install --silent --no-fund --no-audit --prefer-offline)
+  local registry_url="${SKPL_NPM_REGISTRY:-}"
+
+  if [ -f package-lock.json ]; then
+    npm_args=(ci --silent --no-fund --no-audit --prefer-offline)
+  fi
+
+  if [ -n "$registry_url" ]; then
+    npm_args+=(--registry "$registry_url")
+  fi
+
+  npm "${npm_args[@]}"
+}
+
+add_app_id() { :; }
 
 add_yuming() {
   read -r -p "请输入域名（example.com）: " yuming
@@ -191,102 +276,13 @@ ldnmp_Proxy() {
   local domain="$1"
   local target_host="$2"
   local target_port="$3"
-
-  if [[ ! "$domain" =~ ^[A-Za-z0-9.-]+$ ]]; then
-    echo "域名格式无效：$domain"
-    return 1
-  fi
-
-  local conf_dir=""
-  if [ -d "/home/web/conf.d" ]; then
-    conf_dir="/home/web/conf.d"
-  elif [ -d "/etc/nginx/conf.d" ]; then
-    conf_dir="/etc/nginx/conf.d"
-  fi
-
-  if [ -z "$conf_dir" ]; then
-    echo "未检测到可写的 Nginx 配置目录（/home/web/conf.d 或 /etc/nginx/conf.d）。"
-    echo "请手动将 $domain 反向代理到 $target_host:$target_port"
-    return 1
-  fi
-
-  local conf_path="${conf_dir}/${domain}.conf"
-  cat > "$conf_path" <<EOF_NGINX
-server {
-  listen 80;
-  server_name ${domain};
-
-  location / {
-    proxy_pass http://${target_host}:${target_port};
-    proxy_http_version 1.1;
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header Upgrade \$http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_read_timeout 600s;
-    proxy_send_timeout 600s;
-  }
-}
-EOF_NGINX
-
-  if command -v nginx >/dev/null 2>&1; then
-    if nginx -t >/dev/null 2>&1; then
-      if command -v systemctl >/dev/null 2>&1; then
-        systemctl reload nginx >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1 || true
-      else
-        nginx -s reload >/dev/null 2>&1 || true
-      fi
-      echo "已配置反向代理：$domain -> $target_host:$target_port"
-    else
-      echo "Nginx 配置校验失败，请手动检查: $conf_path"
-      return 1
-    fi
-  else
-    echo "已写入配置文件：$conf_path"
-    echo "请手动重载 Nginx 使配置生效。"
-  fi
+  echo "未检测到原生 ldnmp_Proxy 环境，已跳过自动反向代理配置。"
+  echo "请手动将 $domain 反向代理到 $target_host:$target_port"
 }
 
 web_del() {
-  local _remove_domain
   read -r -p "请输入要移除的域名: " _remove_domain
-
-  if [[ ! "$_remove_domain" =~ ^[A-Za-z0-9.-]+$ ]]; then
-    echo "域名格式无效：$_remove_domain"
-    return 1
-  fi
-
-  local found_conf=""
-  for conf_dir in /home/web/conf.d /etc/nginx/conf.d; do
-    if [ -f "${conf_dir}/${_remove_domain}.conf" ]; then
-      found_conf="${conf_dir}/${_remove_domain}.conf"
-      break
-    fi
-  done
-
-  if [ -z "$found_conf" ]; then
-    echo "未找到域名配置：$_remove_domain"
-    return 1
-  fi
-
-  local backup_path="${found_conf}.disabled.$(date +%Y%m%d%H%M%S)"
-  mv "$found_conf" "$backup_path"
-  echo "已禁用配置并保留备份：$backup_path"
-
-  if command -v nginx >/dev/null 2>&1; then
-    if nginx -t >/dev/null 2>&1; then
-      if command -v systemctl >/dev/null 2>&1; then
-        systemctl reload nginx >/dev/null 2>&1 || nginx -s reload >/dev/null 2>&1 || true
-      else
-        nginx -s reload >/dev/null 2>&1 || true
-      fi
-    else
-      echo "Nginx 配置校验失败，请手动检查后重载。"
-      return 1
-    fi
-  fi
+  echo "请按你的 Nginx/反向代理环境手动删除域名配置：$_remove_domain"
 }
 
 ensure_root() {
@@ -364,15 +360,10 @@ EOF
 
   echo -e "
 ==================== 配置向导：自定义代理端口 ===================="
-  echo -e "默认代理端口：10808"
-  echo -e "直接回车 = 使用默认端口 | 输入数字 = 使用自定义端口"
-  if [ -t 0 ]; then
-    read -r -p "请输入代理端口号：" CUSTOM_PORT
-  else
-    CUSTOM_PORT=""
-  fi
-
-  [ -z "$CUSTOM_PORT" ] && PROXY_PORT="10808" || PROXY_PORT="$CUSTOM_PORT"
+  prompt_proxy_port || {
+    set -e
+    return 1
+  }
   echo -e "已选择代理端口：$PROXY_PORT
 "
 
@@ -528,18 +519,7 @@ moltbot_menu() {
 
 
   install_node_and_tools() {
-    if command -v dnf &>/dev/null; then
-      curl -fsSL https://rpm.nodesource.com/setup_24.x | sudo bash -
-      dnf update -y
-      dnf group install -y "Development Tools" "Development Libraries"
-      dnf install -y cmake libatomic nodejs
-    fi
-
-    if command -v apt &>/dev/null; then
-      curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
-      apt update -y
-      apt install build-essential python3 libatomic1 nodejs -y
-    fi
+    ensure_node_runtime
   }
 
   sync_openclaw_api_models() {
@@ -903,15 +883,7 @@ PY
 
     install_node_and_tools
 
-    country=$(curl -s ipinfo.io/country)
-    if [[ "$country" == "CN" || "$country" == "HK" ]]; then
-      npm config set registry https://registry.npmmirror.com
-    fi
-
-    git config --global url."${gh_proxy}github.com/".insteadOf ssh://git@github.com/
-    git config --global url."${gh_proxy}github.com/".insteadOf git@github.com:
-
-    npm install -g openclaw@latest
+    install_openclaw_global
     openclaw onboard --install-daemon
     start_gateway
     add_app_id
@@ -5736,9 +5708,7 @@ openclaw_backup_restore_menu() {
     echo "更新 OpenClaw..."
     send_stats "更新 OpenClaw..."
     install_node_and_tools
-    git config --global url."${gh_proxy}github.com/".insteadOf ssh://git@github.com/
-    git config --global url."${gh_proxy}github.com/".insteadOf git@github.com:
-    npm install -g openclaw@latest
+    install_openclaw_global
     crontab -l 2>/dev/null | grep -v "s gateway" | crontab -
     start_gateway
     hash -r
@@ -5775,13 +5745,10 @@ openclaw_backup_restore_menu() {
 
 
   openclaw_find_webui_domain() {
-    local domain_list
+    local conf domain_list
 
     domain_list=$(
-      for conf_dir in /home/web/conf.d /etc/nginx/conf.d; do
-        [ -d "$conf_dir" ] || continue
-        grep -R "18789" "$conf_dir"/*.conf 2>/dev/null
-      done \
+      grep -R "18789" /home/web/conf.d/*.conf 2>/dev/null \
       | awk -F: '{print $1}' \
       | sort -u \
       | while read conf; do
@@ -6086,24 +6053,13 @@ evomap_backup_current() {
 }
 
 evomap_install() {
-  local node_id confirm
+  local node_id last_saved_node_id
   install git curl
   mkdir -p /root/.openclaw
 
-  node_id="${SKPL_EVM_NODE_ID:-$(state_get EVOMAP_NODE_ID)}"
-  if [ -z "$node_id" ] && [ -t 0 ]; then
-    read -r -p "请输入 EvoMap Node ID: " node_id
-  fi
-  if [ -z "$node_id" ]; then
-    echo "Node ID 不能为空。可先执行: export SKPL_EVM_NODE_ID=<你的NodeID>"
+  last_saved_node_id="$(state_get EVOMAP_NODE_ID)"
+  if ! node_id="$(prompt_evomap_node_id "" "$last_saved_node_id")"; then
     return 1
-  fi
-  if [ -t 0 ]; then
-    read -r -p "确认 Node ID 为 [$node_id] 吗？(y/N): " confirm
-    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-      echo "已取消安装。"
-      return 1
-    fi
   fi
   state_set EVOMAP_NODE_ID "$node_id"
 
@@ -6115,7 +6071,7 @@ evomap_install() {
 
   git clone --depth 1 https://github.com/EvoMap/evolver.git "$EVOMAP_DIR" >/dev/null 2>&1 || git clone https://github.com/EvoMap/evolver.git "$EVOMAP_DIR"
   cd "$EVOMAP_DIR"
-  npm install --silent
+  install_evomap_dependencies
   mkdir -p skills assets/gep memory
 
   cat > .env <<EOF_ENV
@@ -6158,7 +6114,7 @@ evomap_update() {
   evomap_backup_current
   cd "$EVOMAP_DIR"
   git pull --rebase
-  npm install --silent
+  install_evomap_dependencies
   pkill -f "node index.js --loop" >/dev/null 2>&1 || true
   nohup node index.js --loop > "$EVOMAP_DIR/nohup.out" 2>&1 &
   echo "EvoMap 更新完成。"
