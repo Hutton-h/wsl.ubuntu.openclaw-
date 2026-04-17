@@ -306,24 +306,25 @@ remove_skpl_panel_only() {
 }
 
 run_wslwin_proxy_sync() {
-  set +e
   clear
   echo "==================== WSL 代理同步 ===================="
   echo "配置向导：请输入代理端口（回车默认 10808）"
 
   local CUSTOM_PORT
+  local read_ok="false"
   while true; do
+    read_ok="false"
     if [ -t 0 ]; then
       read -r -p "代理端口: " CUSTOM_PORT
-    elif [ -r /dev/tty ]; then
-      read -r -p "代理端口: " CUSTOM_PORT </dev/tty
+      read_ok="true"
     else
       CUSTOM_PORT="${SKPL_PROXY_PORT_INPUT:-}"
-      if [ -z "$CUSTOM_PORT" ]; then
-        echo "错误：非交互模式必须显式传入代理端口。"
-        echo "示例：SKPL_PROXY_PORT_INPUT=10808 bash merged_openclaw_readable.sh install"
-        return 1
-      fi
+    fi
+
+    if [ -z "$CUSTOM_PORT" ] && [ "$read_ok" != "true" ] && [ -z "${SKPL_PROXY_PORT_INPUT:-}" ]; then
+      echo "错误：非交互模式必须显式传入代理端口。"
+      echo "示例：SKPL_PROXY_PORT_INPUT=10808 bash merged_openclaw_readable.sh install"
+      return 1
     fi
 
     [ -z "$CUSTOM_PORT" ] && CUSTOM_PORT="10808"
@@ -384,7 +385,6 @@ EOF
   source ~/.bashrc >/dev/null 2>&1 || true
 
   SKPL_PROXY_PORT="${PROXY_PORT:-10808}"
-  set -e
 }
 
 load_openclaw_panel() {
@@ -5935,12 +5935,12 @@ openclaw_enable_local_memory_auto() {
 
   if [ ! -f "${model_path}" ]; then
     echo "下载 Local 记忆模型（首次仅执行一次）..."
-    timeout 900 curl -L --retry 3 --connect-timeout 10 --max-time 900 -o "${model_path}" "${model_url}" || true
+    timeout 300 curl -L --retry 2 --connect-timeout 10 --max-time 300 -o "${model_path}" "${model_url}" || true
   fi
 
   mkdir -p /root/.openclaw/workspace/memory
-  timeout 240 openclaw memory index --force >/dev/null 2>&1 || true
-  timeout 45 openclaw gateway restart >/dev/null 2>&1 || true
+  timeout 60 openclaw memory index --force >/dev/null 2>&1 || true
+  timeout 30 openclaw gateway restart >/dev/null 2>&1 || true
 }
 
 run_openclaw_install_step() {
@@ -6054,7 +6054,7 @@ evomap_backup_current() {
 }
 
 evomap_install() {
-  local node_id confirm
+  local node_id confirm backup_target
   install git curl
   mkdir -p /root/.openclaw
 
@@ -6078,12 +6078,32 @@ evomap_install() {
   evomap_backup_current
 
   if [ -d "$EVOMAP_DIR" ]; then
-    mv "$EVOMAP_DIR" "${EVOMAP_DIR}.old.$(date +%Y%m%d%H%M%S)"
+    backup_target="${EVOMAP_DIR}.old.$(date +%Y%m%d%H%M%S)"
+    while [ -e "$backup_target" ]; do
+      backup_target="${backup_target}.1"
+    done
+    if ! mv "$EVOMAP_DIR" "$backup_target"; then
+      echo "EvoMap 目录备份失败，停止安装。"
+      return 1
+    fi
   fi
 
-  git clone --depth 1 https://github.com/EvoMap/evolver.git "$EVOMAP_DIR" >/dev/null 2>&1 || git clone https://github.com/EvoMap/evolver.git "$EVOMAP_DIR"
-  cd "$EVOMAP_DIR"
-  npm install --silent
+  if ! timeout 180 git clone --depth 1 https://github.com/EvoMap/evolver.git "$EVOMAP_DIR" >/dev/null 2>&1; then
+    if ! timeout 300 git clone https://github.com/EvoMap/evolver.git "$EVOMAP_DIR" >/dev/null 2>&1; then
+      echo "EvoMap 仓库下载失败，请检查网络后重试。"
+      return 1
+    fi
+  fi
+
+  if ! cd "$EVOMAP_DIR"; then
+    echo "EvoMap 目录不存在，停止安装。"
+    return 1
+  fi
+
+  if ! timeout 900 npm install --silent; then
+    echo "EvoMap 依赖安装失败，请重试。"
+    return 1
+  fi
   mkdir -p skills assets/gep memory
 
   cat > .env <<EOF_ENV
@@ -6249,7 +6269,10 @@ skpl_main_panel() {
     echo "7. 从中断点继续安装"
     echo "0. 退出"
     echo "---------------------------------------"
-    read -r -p "请输入你的选择: " skpl_choice
+    if ! read -r -p "请输入你的选择: " skpl_choice; then
+      echo "检测到非交互输入，退出面板。"
+      return 1
+    fi
     case "$skpl_choice" in
       1) moltbot_menu ;;
       2) openclaw_evomap_menu ;;
@@ -6262,6 +6285,18 @@ skpl_main_panel() {
       *) echo "无效的选择，请重试。"; sleep 1 ;;
     esac
   done
+}
+
+has_interactive_tty() {
+  if [ -t 0 ] && [ -t 1 ]; then
+    return 0
+  fi
+
+  if [ -e /dev/tty ] && ( : <>/dev/tty ) 2>/dev/null; then
+    return 0
+  fi
+
+  return 1
 }
 
 main() {
@@ -6281,11 +6316,18 @@ main() {
     install)
       reset_pipeline_state
       run_full_pipeline_once
-      skpl_main_panel
+      if has_interactive_tty; then
+        skpl_main_panel
+      fi
       ;;
     panel)
       save_self_to_skpl
-      skpl_main_panel
+      if has_interactive_tty; then
+        skpl_main_panel
+      else
+        echo "当前无交互终端，无法进入面板。"
+        return 1
+      fi
       ;;
     openclaw)
       save_self_to_skpl
