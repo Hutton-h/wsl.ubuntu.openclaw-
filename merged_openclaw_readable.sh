@@ -6021,7 +6021,10 @@ EOF
 
 apt_update_safe() {
   local update_log="${WORK_ROOT}/apt-update.log"
+  local insecure_log="${WORK_ROOT}/apt-update-insecure.log"
   export DEBIAN_FRONTEND=noninteractive
+  SKPL_APT_INSECURE="0"
+
   if apt-get update -y >"$update_log" 2>&1; then
     return 0
   fi
@@ -6035,6 +6038,21 @@ apt_update_safe() {
     apt-get update -y >"$update_log" 2>&1 || {
       echo "回滚后 apt update 仍失败。"
       sed -n '1,120p' "$update_log" 2>/dev/null || true
+      if grep -q "Waited for apt-key but it wasn't there" "$update_log" 2>/dev/null; then
+        echo "检测到 apt-key 子进程异常，尝试使用非签名校验模式继续安装依赖。"
+        if apt-get update -y \
+          -o Acquire::AllowInsecureRepositories=true \
+          -o Acquire::AllowDowngradeToInsecureRepositories=true \
+          -o APT::Get::AllowUnauthenticated=true >"$insecure_log" 2>&1; then
+          SKPL_APT_INSECURE="1"
+          echo "已切换到非签名校验模式（仅用于本次安装流程）。"
+          return 0
+        fi
+
+        echo "非签名校验模式也失败，日志如下："
+        sed -n '1,120p' "$insecure_log" 2>/dev/null || true
+      fi
+
       return 1
     }
     return 0
@@ -6045,7 +6063,11 @@ apt_update_safe() {
 
 apt_install_safe() {
   export DEBIAN_FRONTEND=noninteractive
-  apt-get install -y "$@"
+  if [ "${SKPL_APT_INSECURE:-0}" = "1" ]; then
+    apt-get install -y --allow-unauthenticated "$@"
+  else
+    apt-get install -y "$@"
+  fi
 }
 
 is_wsl() {
@@ -6242,17 +6264,94 @@ step0_prepare_wsl_systemd() {
 }
 
 install_node_and_tools_from_openclaw_logic() {
+  local node_major=""
+  local need_node_install="1"
+
+  if command -v node >/dev/null 2>&1; then
+    node_major=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)
+    if [ -n "$node_major" ] && [ "$node_major" -ge 22 ] && [ "$node_major" -lt 23 ]; then
+      need_node_install="0"
+    fi
+  fi
+
   if command -v dnf >/dev/null 2>&1; then
-    curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
-    dnf update -y
-    dnf group install -y "Development Tools" "Development Libraries"
-    dnf install -y cmake libatomic nodejs git jq python3
+    local -a dnf_pkgs=(cmake libatomic git jq python3)
+    if [ "$need_node_install" = "1" ]; then
+      curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
+      dnf update -y
+      dnf group install -y "Development Tools" "Development Libraries"
+      dnf_pkgs+=(nodejs)
+    fi
+    dnf install -y "${dnf_pkgs[@]}"
   elif command -v apt >/dev/null 2>&1; then
-    apt_update_safe
-    apt_install_safe curl git jq python3 build-essential libatomic1 ca-certificates gnupg
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-    apt_update_safe
-    apt_install_safe nodejs
+    local -a apt_pkgs=()
+    local -a core_tools=(curl git jq python3)
+    local tool
+
+    for tool in "${core_tools[@]}"; do
+      if ! command -v "$tool" >/dev/null 2>&1; then
+        apt_pkgs+=("$tool")
+      fi
+    done
+
+    if ! command -v gpg >/dev/null 2>&1; then
+      apt_pkgs+=(gnupg)
+    fi
+
+    if [ "$need_node_install" = "1" ]; then
+      apt_pkgs+=(build-essential libatomic1 ca-certificates)
+    fi
+
+    if [ "${#apt_pkgs[@]}" -gt 0 ]; then
+      apt_update_safe
+      apt_install_safe "${apt_pkgs[@]}"
+    else
+      echo "基础依赖已满足，跳过 apt 依赖安装。"
+    fi
+
+    if [ "$need_node_install" = "1" ]; then
+      if curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; then
+        if apt_update_safe; then
+          apt_install_safe nodejs
+        fi
+      fi
+
+      if ! command -v node >/dev/null 2>&1; then
+        local node_version="v22.15.1"
+        local arch=""
+        local node_arch=""
+        local node_dir=""
+        local node_tar=""
+        local node_tmp="/tmp/node-${node_version}.tar.xz"
+        local node_url_primary=""
+        local node_url_mirror=""
+
+        arch=$(uname -m)
+        case "$arch" in
+          x86_64) node_arch="x64" ;;
+          aarch64|arm64) node_arch="arm64" ;;
+          *)
+            echo "不支持的 CPU 架构: ${arch}，无法自动安装 Node.js 22"
+            exit 1
+            ;;
+        esac
+
+        node_tar="node-${node_version}-linux-${node_arch}.tar.xz"
+        node_dir="/usr/local/lib/nodejs/node-${node_version}-linux-${node_arch}"
+        node_url_primary="https://nodejs.org/dist/${node_version}/${node_tar}"
+        node_url_mirror="https://npmmirror.com/mirrors/node/${node_version}/${node_tar}"
+
+        mkdir -p /usr/local/lib/nodejs
+        if ! curl --fail --location --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 "$node_url_primary" -o "$node_tmp"; then
+          curl --fail --location --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 "$node_url_mirror" -o "$node_tmp"
+        fi
+
+        tar -xJf "$node_tmp" -C /usr/local/lib/nodejs
+        ln -sfn "${node_dir}/bin/node" /usr/local/bin/node
+        ln -sfn "${node_dir}/bin/npm" /usr/local/bin/npm
+        ln -sfn "${node_dir}/bin/npx" /usr/local/bin/npx
+      fi
+    fi
   else
     echo "不支持的系统包管理器，无法自动安装依赖。"
     exit 1
