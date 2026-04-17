@@ -5959,6 +5959,16 @@ if [ -n "${SKPL_AUTO_RESUME_HOOK_RAN:-}" ]; then
 fi
 export SKPL_AUTO_RESUME_HOOK_RAN=1
 
+LAUNCH_LOCK_DIR="/root/.skpl/auto-resume.launch.lock"
+
+acquire_launch_lock() {
+  mkdir "$LAUNCH_LOCK_DIR" 2>/dev/null
+}
+
+release_launch_lock() {
+  rmdir "$LAUNCH_LOCK_DIR" 2>/dev/null || true
+}
+
 [ -t 1 ] || return 0 2>/dev/null || exit 0
 case "$-" in
   *i*) ;;
@@ -5980,6 +5990,11 @@ if [ "$CURRENT_BOOT_ID" = "${SKPL_SAVED_BOOT_ID:-}" ]; then
   echo "[SKPL] 执行后重新进入 WSL，脚本会自动继续。"
   return 0 2>/dev/null || exit 0
 fi
+
+if ! acquire_launch_lock; then
+  return 0 2>/dev/null || exit 0
+fi
+trap 'release_launch_lock' EXIT
 
 if [ -f /root/.skpl/auto-resume.running ]; then
   running_pid=$(cat /root/.skpl/auto-resume.running 2>/dev/null || true)
@@ -6007,6 +6022,9 @@ if [ -f /root/.skpl/auto-resume.running ]; then
     echo "[SKPL] 后台续跑未成功拉起，请手动执行: bash /root/.skpl/merged_openclaw_readable.sh --resume"
   fi
 fi
+
+trap - EXIT
+release_launch_lock
 EOF
   chmod +x "$AUTO_RESUME_HOOK"
 
@@ -6027,6 +6045,13 @@ apt_update_safe() {
 
   if apt-get update -y >"$update_log" 2>&1; then
     return 0
+  fi
+
+  if grep -q "Could not get lock" "$update_log" 2>/dev/null; then
+    echo "检测到 apt 锁被占用，等待包管理进程结束后重试..."
+    if wait_for_apt_idle 120 && apt-get update -y >"$update_log" 2>&1; then
+      return 0
+    fi
   fi
 
   if grep -q "Couldn't wait for subprocess - waitpid" "$update_log" 2>/dev/null; then
