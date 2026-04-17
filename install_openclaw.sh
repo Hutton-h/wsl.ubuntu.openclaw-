@@ -1,4 +1,3 @@
-cat > install_openclaw_fixed.sh << 'EOF'
 #!/bin/bash
 # OpenClaw 一键安装脚本 (已修复WSL2 IP问题)
 set -euo pipefail
@@ -135,6 +134,3 @@ main() {
 }
 
 main
-EOF
-chmod +x install_openclaw_fixed.sh
-bash install_openclaw_fixed.sh
