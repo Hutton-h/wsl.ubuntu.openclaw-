@@ -5951,7 +5951,9 @@ EOF
 
   cat > "$AUTO_RESUME_HOOK" <<'EOF'
 #!/bin/bash
-[ -n "${SKPL_AUTO_RESUME_HOOK_RAN:-}" ] && return 0 2>/dev/null || exit 0
+if [ -n "${SKPL_AUTO_RESUME_HOOK_RAN:-}" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 export SKPL_AUTO_RESUME_HOOK_RAN=1
 
 [ -t 1 ] || return 0 2>/dev/null || exit 0
@@ -6126,7 +6128,7 @@ ensure_wsl_systemd_or_pause() {
 }
 
 step1_wsl_proxy_sync() {
-  clear
+  clear >/dev/null 2>&1 || true
   echo "==================== Step 1/4: WSL/Windows 代理同步 ===================="
   local ubuntu_codename=""
 
@@ -6154,8 +6156,18 @@ EOF
   echo "软件源已写入，实际安装前会自动校验；若镜像不可用，会自动回滚原始源。"
 
   echo "默认代理端口是 10808。直接回车使用默认。"
-  read -r -p "请输入代理端口号: " CUSTOM_PORT
-  [ -z "${CUSTOM_PORT}" ] && PROXY_PORT="10808" || PROXY_PORT="${CUSTOM_PORT}"
+  if [ -t 0 ] && [ -t 1 ]; then
+    read -r -p "请输入代理端口号: " CUSTOM_PORT || CUSTOM_PORT=""
+  else
+    CUSTOM_PORT="${SKPL_PROXY_PORT:-10808}"
+    echo "检测到后台/非交互续跑，自动使用代理端口: ${CUSTOM_PORT}"
+  fi
+
+  [ -z "${CUSTOM_PORT}" ] && PROXY_PORT="${SKPL_PROXY_PORT:-10808}" || PROXY_PORT="${CUSTOM_PORT}"
+  if ! [[ "$PROXY_PORT" =~ ^[0-9]+$ ]] || [ "$PROXY_PORT" -lt 1 ] || [ "$PROXY_PORT" -gt 65535 ]; then
+    echo "端口输入无效，已回退默认端口 10808"
+    PROXY_PORT="10808"
+  fi
   SKPL_PROXY_PORT="${PROXY_PORT}"
 
   sed -i '/proxy_/d;/auto_proxy/d;/http_proxy/d;/https_proxy/d;/all_proxy/d;/no_proxy/d;/NO_PROXY/d' /root/.bashrc || true
