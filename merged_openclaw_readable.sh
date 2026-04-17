@@ -1,27 +1,120 @@
-#!/bin/bash
-(
-set -Eeuo pipefail
+#!/usr/bin/env bash
+set -euo pipefail
 
-if [ "$(id -u)" -ne 0 ]; then
-  echo "请先切换到 root 后运行：sudo su"
-  exit 1
+SKPL_VERSION="1.2.0"
+if [ "$(id -u)" -eq 0 ]; then
+  WORK_ROOT="${SKPL_WORK_ROOT:-/root/.skpl}"
+else
+  WORK_ROOT="${SKPL_WORK_ROOT:-${HOME}/.skpl}"
+fi
+STAGE_DIR="${WORK_ROOT}/stage"
+
+log() { printf "[SKPL] %s\n" "$*"; }
+warn() { printf "[SKPL][WARN] %s\n" "$*"; }
+err() { printf "[SKPL][ERR] %s\n" "$*" >&2; exit 1; }
+
+write_sources() {
+  mkdir -p "$STAGE_DIR"
+  cat > "$STAGE_DIR/wslwin.sh" <<'WSLWIN_EOF'
+#!/bin/bash
+clear
+echo -e "====================  WSL 全能一键脚本 ===================="
+
+# 隐形优化：自动清理系统更新锁，防止卡住
+killall apt apt-get dpkg 2>/dev/null
+sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
+sudo dpkg --configure -a 2>/dev/null
+
+# 隐形优化：强制apt永远直连阿里云源（和代理完全隔离）
+sudo rm -f /etc/apt/apt.conf.d/*proxy* /etc/apt/apt.conf.d/99*
+echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
+[ ! -f /etc/apt/sources.list.bak.original ] && sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak.original
+sudo tee /etc/apt/sources.list >/dev/null << 'EOF'
+deb http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
+deb http://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
+deb http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
+deb http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse
+deb-src http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
+deb-src http://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
+deb-src http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
+deb-src http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse
+EOF
+
+# 以下是100%原始代码，仅做了两处微小优化
+echo -e "\n==================== 配置向导：自定义代理端口 ===================="
+echo -e "📌 默认代理端口：10808"
+echo -e "📝 直接回车 = 使用默认端口 | 输入数字 = 使用自定义端口"
+read -p "请输入代理端口号：" CUSTOM_PORT
+
+[ -z "$CUSTOM_PORT" ] && PROXY_PORT="10808" || PROXY_PORT="$CUSTOM_PORT"
+echo -e "✅ 已选择代理端口：$PROXY_PORT\n"
+
+echo -e "==================== 清理所有旧代理配置 ===================="
+sed -i '/proxy_/d;/auto_proxy/d;/http_proxy/d;/https_proxy/d;/all_proxy/d;/no_proxy/d;/NO_PROXY/d' ~/.bashrc
+source ~/.bashrc
+echo -e "✅ 旧代理配置清理完成！\n"
+
+echo -e "==================== 创建全自动代理检测脚本 ===================="
+cat > ~/.auto_proxy_sync.sh << 'EOF'
+#!/bin/bash
+PROXY_MIRRORED="127.0.0.1:__PORT__"
+PROXY_LEGACY="10.255.255.254:__PORT__"
+NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
+
+check_port() {
+    local ip_port=$1
+    local ip=$(echo $ip_port | cut -d: -f1)
+    local port=$(echo $ip_port | cut -d: -f2)
+    timeout 0.5 bash -c "echo > /dev/tcp/$ip/$port" 2>/dev/null
+}
+
+if check_port $PROXY_MIRRORED; then
+    ACTIVE_PROXY=$PROXY_MIRRORED
+elif check_port $PROXY_LEGACY; then
+    ACTIVE_PROXY=$PROXY_LEGACY
+else
+    ACTIVE_PROXY=""
 fi
 
-WORK_ROOT="/root/.skpl"
-OPENCLAW_SRC="${WORK_ROOT}/openclaw.txt"
-OPENCLAW2_SRC="${WORK_ROOT}/openclaw2.txt"
-EVOMAP_SRC="${WORK_ROOT}/EvoMap.txt"
-STATE_FILE="${WORK_ROOT}/install.state"
-RUNTIME_SCRIPT="${WORK_ROOT}/merged_openclaw_readable.sh"
-RESUME_RUNNER="${WORK_ROOT}/resume_runner.sh"
-AUTO_RESUME_HOOK="/etc/profile.d/skpl-auto-resume.sh"
-BASHRC_HOOK_FILE="/etc/bash.bashrc"
-AUTO_RESUME_LOG="${WORK_ROOT}/auto-resume.log"
+if [ -n "$ACTIVE_PROXY" ]; then
+    export http_proxy="http://$ACTIVE_PROXY"
+    export https_proxy="http://$ACTIVE_PROXY"
+    export HTTP_PROXY="http://$ACTIVE_PROXY"
+    export HTTPS_PROXY="http://$ACTIVE_PROXY"
+    export all_proxy="socks5://$ACTIVE_PROXY"
+    export ALL_PROXY="socks5://$ACTIVE_PROXY"
+    export no_proxy="$NO_PROXY_RULE"
+    export NO_PROXY="$NO_PROXY_RULE"
+    echo "✅ 自动同步：V2RayN运行中，代理已开启 ($ACTIVE_PROXY)"
+else
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+    # 优化1：更友好的提示
+    echo "❌ 自动同步：V2RayN未运行，请检查Windows上的V2RayN是否已开启并监听 $PROXY_PORT 端口"
+fi
+EOF
 
-prepare_embedded_sources() {
-  mkdir -p "$WORK_ROOT"
+sed -i "s/__PORT__/$PROXY_PORT/g" ~/.auto_proxy_sync.sh
+chmod +x ~/.auto_proxy_sync.sh
+echo -e "✅ 全自动代理脚本创建完成！\n"
 
-  cat > "$OPENCLAW_SRC" <<'__OPENCLAW_TXT_260416__'
+echo -e "==================== 配置代理自启 & 立即生效 ===================="
+# 优化2：自动去重，防止bashrc重复加载
+sed -i '/source ~\/.auto_proxy_sync.sh/d' ~/.bashrc
+echo "source ~/.auto_proxy_sync.sh" >> ~/.bashrc
+source ~/.bashrc
+echo -e "✅ 代理配置已永久生效！\n"
+
+echo -e "==================== 一键执行 kejilion.sh 开发环境配置 ===================="
+echo -e "🔧 正在自动执行 kejilion.sh 脚本..."
+bash <(curl -sL https://kejilion.sh)
+
+echo -e "\n==================== 🎉 全部配置完成！ ===================="
+echo -e "📌 你的所有原始功能100%保留，使用习惯完全不变"
+echo -e "📌 已添加：V2RayN未开友好提示 + 自动防重复配置"
+echo -e "\n验证：sudo apt update"
+WSLWIN_EOF
+
+  cat > "$STAGE_DIR/openclaw.sh" <<'OPENCLAW_EOF'
 moltbot_menu() {
 	local app_id="114"
 
@@ -505,8 +598,9 @@ PY
 		git config --global url."${gh_proxy}github.com/".insteadOf git@github.com:
 
 		npm install -g openclaw@latest
-		openclaw onboard --install-daemon
+		OPENCLAW_ONBOARD_NO_UI=1 openclaw onboard --install-daemon >/dev/null 2>&1 || openclaw onboard --install-daemon
 		start_gateway
+		openclaw_memory_auto_setup_run "local" >/dev/null 2>&1 || true
 		add_app_id
 		break_end
 
@@ -2507,7 +2601,7 @@ openclaw_json_get_bool() {
 		feishu_status=$(openclaw_bot_status_text "$feishu_enabled" "$feishu_cfg" "$feishu_connected" "$feishu_abnormal")
 
 		local wa_enabled wa_cfg wa_connected wa_abnormal wa_status
-		wa_enabled=$(openclaw_json_get_bool '.plugins.entries.whatsapp.enabled // .channels.whatsapp.enabled // false')
+		wa_enabled=$(openclaw_json_get_bool '.plugins.entries.whatsapp.enabled // .plugins.entries["openclaw-whatsapp"].enabled // .channels.whatsapp.enabled // false')
 		wa_cfg=$(openclaw_channel_has_cfg "whatsapp")
 		wa_connected="false"
 		if openclaw_dir_has_files "${HOME}/.openclaw/whatsapp"; then
@@ -3183,8 +3277,14 @@ if os.path.isdir(agents_root):
 	openclaw_memory_config_get() {
 		local key="$1"
 		local default_value="${2:-}"
-		local value
+		local value config_file
 		value=$(openclaw config get "$key" 2>/dev/null | head -n 1 | sed -e 's/^"//' -e 's/"$//')
+		if [ -z "$value" ] || [ "$value" = "null" ] || [ "$value" = "undefined" ]; then
+			config_file=$(openclaw_memory_config_file)
+			if [ -f "$config_file" ] && command -v jq >/dev/null 2>&1; then
+				value=$(jq -r --arg p "$key" 'getpath($p|split(".")) // empty' "$config_file" 2>/dev/null | head -n 1)
+			fi
+		fi
 		if [ -z "$value" ] || [ "$value" = "null" ] || [ "$value" = "undefined" ]; then
 			echo "$default_value"
 			return 0
@@ -5512,63 +5612,66 @@ openclaw_backup_restore_menu() {
 	done
 
 }
-__OPENCLAW_TXT_260416__
 
-  cat > "$OPENCLAW2_SRC" <<'__OPENCLAW2_TXT_260417__'
+OPENCLAW_EOF
+
+  cat > "$STAGE_DIR/openclaw2.sh" <<'OPENCLAW2_EOF'
 #!/bin/bash
-set +e
+set -e
 
-PROXY_PORT="${1:-${PROXY_PORT:-10808}}"
+# ====================== 你要求新增的功能 开始 ======================
+# 1. 重启确认：默认=没重启，脚本退出；输入Y=重启过，继续执行
+read -p "是否已经在PowerShell执行过 wsl --shutdown 重启？(y/N，默认N)：" REBOOT
+REBOOT=${REBOOT:-N}
+if [[ "$REBOOT" != "y" && "$REBOOT" != "Y" ]]; then
+    echo "未重启，脚本退出！请先重启后再运行本脚本~"
+    exit 0
+fi
+
+# 2. 代理端口：默认10808，手动输入可修改
+read -p "请输入代理端口(默认10808，直接回车使用默认)：" PROXY_PORT
+PROXY_PORT=${PROXY_PORT:-10808}
+# ====================== 你要求新增的功能 结束 ======================
+
+# 颜色
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
 NC='\033[0m'
 
-info() { echo -e "${YELLOW}[信息]${NC} $1"; }
-success() { echo -e "${GREEN}[成功]${NC} $1"; }
-error() { echo -e "${RED}[错误]${NC} $1"; }
-
-user_systemd_ready() {
-  [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ]
-}
-
-resolve_openclaw_entry() {
-  local npm_root
-  npm_root=$(npm root -g 2>/dev/null)
-  if [ -n "$npm_root" ] && [ -f "$npm_root/openclaw/dist/index.js" ]; then
-    printf '%s\n' "$npm_root/openclaw/dist/index.js"
-    return 0
-  fi
-  return 1
-}
-
 echo -e "${GREEN}========================================${NC}"
-echo -e "${GREEN}  OpenClaw WSL 适配部署${NC}"
+echo -e "${GREEN}  全自动 OpenClaw 部署（无重启·零操作）${NC}"
 echo -e "${GREEN}========================================${NC}"
 
-if ! user_systemd_ready; then
-  error "当前 WSL 尚未在 systemd 模式下启动，无法继续 openclaw2 适配。"
-  error "请现在到 Windows PowerShell 执行: wsl --shutdown"
-  error "重新打开当前发行版后，整合脚本会自动继续未完成安装。"
-  exit 2
-fi
+# 1. 暴力清理
+echo "1/5 清理旧文件..."
+pkill -9 -f openclaw 2>/dev/null || true
+systemctl --user stop openclaw-gateway.service 2>/dev/null || true
+systemctl --user disable openclaw-gateway.service 2>/dev/null || true
+rm -rf /root/.config/systemd/user/openclaw-gateway.service
+rm -rf /root/.openclaw
+rm -rf /tmp/openclaw
+systemctl --user daemon-reload 2>/dev/null || true
+systemctl --user reset-failed 2>/dev/null || true
 
-NODE_BIN=$(command -v node)
-OPENCLAW_ENTRY=$(resolve_openclaw_entry)
-
-if [ -z "$NODE_BIN" ] || [ -z "$OPENCLAW_ENTRY" ]; then
-  error "未检测到可用的 Node.js 或 openclaw 程序入口。"
-  exit 1
-fi
-
-info "1/4 准备目录"
+# 2. 创建必须的目录
+echo "2/5 创建目录..."
 mkdir -p /root/.config/systemd/user
-mkdir -p /root/.openclaw/credentials /root/.openclaw/logs /root/.openclaw/agents /root/.openclaw/workspace/default/memory
-chmod 700 /root/.openclaw 2>/dev/null || true
+mkdir -p /root/.openclaw/credentials /root/.openclaw/logs /root/.openclaw/agents
+chmod 700 /root/.openclaw
 
-info "2/4 校验配置文件"
-if [ ! -f /root/.openclaw/openclaw.json ]; then
-  cat > /root/.openclaw/openclaw.json << EOF2
+# 3. 检测路径
+echo "3/5 检测程序路径..."
+NODE_PATH=$(which node)
+NPM_GLOBAL=$(npm root -g)
+OPENCLAW_PATH="${NPM_GLOBAL}/openclaw/dist/index.js"
+
+# 没安装就自动装
+if [ ! -f "$OPENCLAW_PATH" ]; then
+    npm install -g openclaw@2026.4.14
+fi
+
+# 4. 创建配置文件
+echo "4/5 生成配置..."
+cat > /root/.openclaw/openclaw.json << EOF2
 {
   "gateway": {
     "mode": "local",
@@ -5580,22 +5683,23 @@ if [ ! -f /root/.openclaw/openclaw.json ]; then
   "memory": {}
 }
 EOF2
-fi
 
-info "3/4 写入 systemd 用户服务"
+# 5. 生成服务文件（完全保留你原来的正确配置）
+echo "5/5 生成服务并启动..."
 cat > /root/.config/systemd/user/openclaw-gateway.service << EOF3
 [Unit]
 Description=OpenClaw Gateway
 After=network-online.target
 
 [Service]
-ExecStart=${NODE_BIN} ${OPENCLAW_ENTRY} gateway --port 18789
+ExecStart=/usr/bin/node /usr/lib/node_modules/openclaw/dist/index.js gateway --port 18789
 Restart=always
 RestartSec=5
 
 Environment=HOME=/root
 Environment=TMPDIR=/tmp
-Environment=PATH=$(dirname "$NODE_BIN"):/usr/bin:/usr/local/bin:/bin
+Environment=PATH=/usr/bin:/usr/local/bin:/bin
+
 Environment=http_proxy=http://127.0.0.1:${PROXY_PORT}
 Environment=https_proxy=http://127.0.0.1:${PROXY_PORT}
 Environment=HTTP_PROXY=http://127.0.0.1:${PROXY_PORT}
@@ -5604,37 +5708,33 @@ Environment=all_proxy=socks5://127.0.0.1:${PROXY_PORT}
 Environment=ALL_PROXY=socks5://127.0.0.1:${PROXY_PORT}
 Environment=no_proxy=localhost,127.0.0.1
 Environment=NO_PROXY=localhost,127.0.0.1
+
 Environment=OPENCLAW_GATEWAY_PORT=18789
 
 [Install]
 WantedBy=default.target
 EOF3
 
-info "4/4 重载并启动服务"
-systemctl --user daemon-reload
-systemctl --user enable openclaw-gateway.service >/dev/null 2>&1 || true
-systemctl --user restart openclaw-gateway.service
-loginctl enable-linger root >/dev/null 2>&1 || true
-sleep 2
+# 启动服务
+systemctl --user daemon-reload 2>/dev/null
+systemctl --user start openclaw-gateway.service 2>/dev/null
+systemctl --user enable openclaw-gateway.service 2>/dev/null
+loginctl enable-linger root 2>/dev/null
 
-STATUS_OUTPUT=$(openclaw gateway status 2>&1 || true)
-if printf '%s' "$STATUS_OUTPUT" | grep -qi "running"; then
-  success "OpenClaw 网关已正常运行"
-  printf '%s\n' "$STATUS_OUTPUT"
-  exit 0
-fi
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}🎉 部署完成！${NC}"
+echo -e "打开浏览器访问：http://127.0.0.1:18789 配对即可"
+echo -e "验证命令：openclaw gateway status"
+echo -e "${GREEN}========================================${NC}"
+OPENCLAW2_EOF
 
-error "OpenClaw 网关状态异常"
-printf '%s\n' "$STATUS_OUTPUT"
-systemctl --user status openclaw-gateway.service --no-pager 2>/dev/null || true
-exit 1
-__OPENCLAW2_TXT_260417__
-
-  cat > "$EVOMAP_SRC" <<'__EVOMAP_TXT_260417__'
+  cat > "$STAGE_DIR/evomap.sh" <<'EVOMAP_EOF'
+# 这段代码会自动把完整脚本写入文件、加权限、并自动运行，你只需要后续输入Node ID
 cat > /root/super_easy_install.sh << 'EOF'
 #!/bin/bash
-set +e
+set +euo pipefail
 
+# 颜色输出定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -5645,127 +5745,118 @@ success() { echo -e "${GREEN}[成功]${NC} $1"; }
 error() { echo -e "${RED}[错误]${NC} $1"; }
 prompt() { echo -e "${CYAN}[请输入]${NC} $1"; }
 
-gateway_running() {
-  local status_output
-  status_output=$(openclaw gateway status 2>&1 || true)
-  printf '%s' "$status_output" | grep -qi "running"
-}
-
-systemd_ready() {
-  [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ]
-}
-
-ensure_gateway_ready() {
-  if gateway_running; then
-    return 0
-  fi
-  if ! systemd_ready; then
-    error "systemd 用户服务不可用，当前无法启动 OpenClaw 网关。"
-    return 1
-  fi
-  openclaw gateway install >/dev/null 2>&1 || true
-  openclaw gateway restart >/dev/null 2>&1 || openclaw gateway start >/dev/null 2>&1 || true
-  sleep 2
-  gateway_running
-}
-
+# ==================== 第一步：运行后手动输入Node ID（唯一需要你做的） ====================
 clear
 echo "=============================================="
 echo "  OpenClaw + Evolver 一键全自动安装"
 echo "=============================================="
 echo ""
 
+# 清空输入缓存，避免干扰
 read -r -t 0.1 -n 10000 discard < /dev/tty || true
 
+# 循环提示输入，直到你输入正确并确认为止
 while true; do
-  echo ""
-  prompt "1/2 请粘贴你的 EvoMap Node ID, 粘贴完按回车:"
-  read -r A2A_NODE_ID < /dev/tty
-  if [ -n "$A2A_NODE_ID" ] && [ ${#A2A_NODE_ID} -ge 10 ]; then
     echo ""
-    prompt "2/2 你输入的是: $A2A_NODE_ID"
-    prompt "确认无误请输入 y 按回车; 输错了输入 n 重新来:"
-    read -r confirm < /dev/tty
-    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-      success "好的! 接下来全程自动, 你不用管了。"
-      break
+    prompt "1/2 请粘贴你的 EvoMap Node ID，粘贴完按回车："
+    read -r A2A_NODE_ID < /dev/tty
+    
+    if [ -n "$A2A_NODE_ID" ] && [ ${#A2A_NODE_ID} -ge 10 ]; then
+        echo ""
+        prompt "2/2 你输入的是：$A2A_NODE_ID"
+        prompt "确认无误请输入 y 按回车；输错了输入 n 重新来："
+        read -r confirm < /dev/tty
+        
+        if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+            success "✅ 好的！接下来全程自动，你不用管了，去喝杯水吧～"
+            break
+        else
+            error "❌ 好的，重新输入..."
+        fi
+    else
+        error "❌ 不行哦，请粘贴完整的Node ID（不要直接按回车）"
     fi
-    error "好的, 重新输入..."
-  else
-    error "请粘贴完整的 Node ID。"
-  fi
 done
 
 echo ""
-info "安装开始, 预计3-5分钟, 请耐心等待..."
-sleep 1
+info "安装开始，预计3-5分钟，请耐心等待..."
+sleep 3
 
+# ==================== 下面全是自动处理，你不用看 ====================
 set -euo pipefail
 EVOLVE_STRATEGY="balanced"
 OPENCLAW_ROOT="/root/.openclaw"
-EVOLVER_DIR="${OPENCLAW_ROOT}/evolver"
 REQUIRED_NODE_MAJOR=22
 
+# 1. 环境检查
 info "===== 1/9 环境检查 ====="
-if [ "$(id -u)" != "0" ]; then
-  error "请先运行 sudo su 切换到 root"
-  exit 1
-fi
+if [ "$(id -u)" != "0" ]; then error "请先运行 sudo su 切换到root"; fi
 success "root权限通过"
 
+# 2. 基础依赖
 info "===== 2/9 基础依赖 ====="
 install_if_missing() {
-  if command -v "$1" >/dev/null 2>&1; then
-    success "$1 已安装"
-    return 0
-  fi
-  export DEBIAN_FRONTEND=noninteractive
-  apt update -qq && apt install -y -qq "$1"
+    if ! command -v "$1" &> /dev/null; then
+        info "正在安装 $1..."
+        apt update -qq && apt install -y -qq "$1"
+    else success "$1 已安装"; fi
 }
 install_if_missing git
 install_if_missing curl
 install_if_missing nano
 
+# 3. Node.js
 info "===== 3/9 Node.js环境 ====="
-if command -v node >/dev/null 2>&1; then
-  CURRENT_NODE_MAJOR=$(node -v | sed 's/v//' | cut -d. -f1)
-  if [ "$CURRENT_NODE_MAJOR" -ge "$REQUIRED_NODE_MAJOR" ]; then
-    success "Node.js 版本符合要求"
-  else
-    error "Node.js 版本过低, 需要 >= ${REQUIRED_NODE_MAJOR}"
-    exit 1
-  fi
-else
-  error "未检测到 Node.js"
-  exit 1
+if command -v node &> /dev/null; then
+    CURRENT_NODE_MAJOR=$(node -v | sed 's/v//' | cut -d. -f1)
+    if [ "$CURRENT_NODE_MAJOR" -ge "$REQUIRED_NODE_MAJOR" ]; then success "Node.js 版本符合要求"; else NEED_INSTALL_NODE=true; fi
+else NEED_INSTALL_NODE=true; fi
+
+if [ "${NEED_INSTALL_NODE:-false}" = true ]; then
+    info "正在安装 Node.js v$REQUIRED_NODE_MAJOR..."
+    curl -s -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+    export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+    nvm install -s "$REQUIRED_NODE_MAJOR" > /dev/null
+    nvm use "$REQUIRED_NODE_MAJOR" > /dev/null
+    nvm alias default "$REQUIRED_NODE_MAJOR" > /dev/null
+    echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc
+    echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"' >> ~/.bashrc
+    success "Node.js 安装完成"
 fi
 
+# 4. OpenClaw
 info "===== 4/9 OpenClaw环境 ====="
-if ! command -v openclaw >/dev/null 2>&1; then
-  info "正在安装 OpenClaw..."
-  npm install -g --silent openclaw
-fi
-if ensure_gateway_ready; then
-  success "OpenClaw 网关正常"
-else
-  error "OpenClaw 网关不可用, 请先完成 merged 脚本中的 WSL systemd 重启接力。"
-  exit 1
-fi
+if ! command -v openclaw &> /dev/null; then
+    info "正在安装 OpenClaw..."
+    npm install -g --silent openclaw
+    openclaw gateway install > /dev/null
+else success "OpenClaw 已安装"; fi
 
+info "正在自动修复配置..."
+openclaw doctor --repair > /dev/null 2>&1 || true
+if ! openclaw gateway status | grep -q "running"; then openclaw gateway restart > /dev/null; sleep 2; fi
+success "OpenClaw 网关正常"
+
+# 5. Evolver（自动清理旧版本）
 info "===== 5/9 Evolver安装 ====="
-mkdir -p "$OPENCLAW_ROOT"
+cd "$OPENCLAW_ROOT" || error "目录不存在"
+EVOLVER_DIR="${OPENCLAW_ROOT}/evolver"
+
 if [ -d "$EVOLVER_DIR" ]; then
-  BACKUP_DIR="${EVOLVER_DIR}.backup.$(date +%Y%m%d%H%M%S)"
-  info "备份旧版本到 $BACKUP_DIR"
-  mv "$EVOLVER_DIR" "$BACKUP_DIR"
+    BACKUP_DIR="${EVOLVER_DIR}.backup.$(date +%Y%m%d%H%M%S)"
+    info "备份旧版本到 $BACKUP_DIR"
+    mv "$EVOLVER_DIR" "$BACKUP_DIR"
 fi
+rm -rf "$EVOLVER_DIR"
+
 info "正在克隆最新版 Evolver..."
 git clone -q https://github.com/EvoMap/evolver.git "$EVOLVER_DIR"
-cd "$EVOLVER_DIR"
+cd "$EVOLVER_DIR" || error "克隆失败"
 npm install --silent
 mkdir -p skills assets/gep memory
 success "Evolver 基础安装完成"
 
+# 6. 生成配置文件
 info "===== 6/9 生成配置文件 ====="
 cat > .env << ENV_EOF
 MEMORY_DIR=${OPENCLAW_ROOT}/workspace/.learnings
@@ -5775,1182 +5866,251 @@ EVOLVE_STRATEGY=${EVOLVE_STRATEGY}
 ENV_EOF
 success "配置文件生成完成"
 
+# 7. 注入适配基因
 info "===== 7/9 注入适配基因 ====="
 cat > assets/gep/openclaw-core-genes.json << GENE_EOF
 {"genes":[{"id":"openclaw-log-parser","name":"OpenClaw官方日志解析基因","version":"1.0.0","signals":["openclaw","gateway","session","learning","error","crash","timeout"],"directives":["优先解析${OPENCLAW_ROOT}/workspace/.learnings/目录下的OpenClaw运行日志","提取OpenClaw网关报错、会话执行失败、循环停滞的关键信号","过滤无效内容，仅保留智能体执行相关的结构化数据"],"validation":[],"priority":100}]}
 GENE_EOF
+
 cat > assets/gep/core-repair-capsules.json << CAPSULE_EOF
 {"capsules":[{"id":"core-repair-kit","name":"核心自修复胶囊库","version":"1.0.0","targets":["agent-loop","execution-failure","stagnation"],"steps":["识别到智能体循环停滞时，输出稳定性优化提示","识别到执行错误时，输出标准化修复方案","每次修复生成可审计的进化记录，避免重复修复"]}]}
 CAPSULE_EOF
 success "适配基因注入完成"
 
+# 8. 启动服务
 info "===== 8/9 启动服务 ====="
 pkill -f "node index.js --loop" 2>/dev/null || true
-: > nohup.out
-nohup node index.js --loop >/dev/null 2>&1 &
+> nohup.out
+nohup node index.js --loop &
 sleep 3
-if pgrep -f "node index.js --loop" >/dev/null 2>&1; then
-  success "Evolver 启动成功"
-else
-  error "Evolver 启动失败"
-  exit 1
-fi
+if ps -p $! > /dev/null; then success "Evolver 启动成功 (PID: $!)"; else error "启动失败"; fi
 
+# 9. 最终验证
 info "===== 9/9 最终验证 ====="
-if ensure_gateway_ready && pgrep -f "node index.js --loop" >/dev/null 2>&1; then
-  echo "=================================================="
-  success "全部安装成功"
-  echo "查看日志: ${EVOLVER_DIR}/nohup.out"
-  echo "重启服务: cd ${EVOLVER_DIR} && pkill -f 'node index.js --loop' && nohup node index.js --loop >/dev/null 2>&1 &"
-  echo "=================================================="
+openclaw gateway restart > /dev/null
+sleep 2
+
+if ps aux | grep -q "node index.js --loop" && openclaw gateway status | grep -q "running"; then
+    echo ""
+    echo "=================================================="
+    success "🎉 恭喜！全部安装成功！"
+    echo "=================================================="
+    echo ""
+    echo "📋 常用命令（保存一下）："
+    echo "  查看日志: tail -f ${EVOLVER_DIR}/nohup.out"
+    echo "  重启服务: cd ${EVOLVER_DIR} && pkill -f 'node index.js --loop' && nohup node index.js --loop &"
+    echo ""
 else
-  error "安装验证失败"
-  exit 1
+    error "安装验证失败"
 fi
 EOF
 
+# 自动给脚本加权限并运行
 chmod +x /root/super_easy_install.sh
 /root/super_easy_install.sh
-__EVOMAP_TXT_260417__
+EVOMAP_EOF
+
+  chmod +x "$STAGE_DIR"/*.sh
 }
 
-persist_runtime_script() {
-  mkdir -p "$WORK_ROOT"
-
-  same_path() {
-    [ -n "$1" ] && [ -n "$2" ] || return 1
-    [ "$(realpath "$1" 2>/dev/null)" = "$(realpath "$2" 2>/dev/null)" ]
+install_openclaw_runtime_stub() {
+  gl_lv='\033[0;32m'
+  gl_hui='\033[0;37m'
+  gl_huang='\033[1;33m'
+  gl_hong='\033[0;31m'
+  gl_bai='\033[0m'
+  gl_kjlan='\033[0;36m'
+  gh_proxy=""
+  send_stats() { :; }
+  break_end() { :; }
+  add_app_id() { :; }
+  add_yuming() { read -r -p "请输入域名: " yuming; }
+  ldnmp_Proxy() { :; }
+  web_del() { :; }
+  openclaw_has_command() { command -v "$1" >/dev/null 2>&1; }
+  install() {
+    if command -v apt-get >/dev/null 2>&1; then
+      DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 || true
+      DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null 2>&1 || true
+    fi
   }
-
-  if [ "$0" != "$RUNTIME_SCRIPT" ] && [ -f "$0" ]; then
-    if same_path "$0" "$RUNTIME_SCRIPT"; then
-      log_resume_event "续跑脚本已就位: $RUNTIME_SCRIPT (来源: $0)"
-    else
-      cp -f "$0" "$RUNTIME_SCRIPT"
-      chmod +x "$RUNTIME_SCRIPT"
-      log_resume_event "续跑脚本已落盘: $RUNTIME_SCRIPT (来源: $0)"
-    fi
-    return 0
-  fi
-
-  if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
-    if same_path "${BASH_SOURCE[0]}" "$RUNTIME_SCRIPT"; then
-      log_resume_event "续跑脚本已就位: $RUNTIME_SCRIPT (来源: ${BASH_SOURCE[0]})"
-    else
-      cp -f "${BASH_SOURCE[0]}" "$RUNTIME_SCRIPT"
-      chmod +x "$RUNTIME_SCRIPT"
-      log_resume_event "续跑脚本已落盘: $RUNTIME_SCRIPT (来源: ${BASH_SOURCE[0]})"
-    fi
-    return 0
-  fi
-
-  if [ -f "/workspace/merged_openclaw_readable .sh" ]; then
-    if same_path "/workspace/merged_openclaw_readable .sh" "$RUNTIME_SCRIPT"; then
-      log_resume_event "续跑脚本已就位: $RUNTIME_SCRIPT (来源: /workspace/merged_openclaw_readable .sh)"
-    else
-      cp -f "/workspace/merged_openclaw_readable .sh" "$RUNTIME_SCRIPT"
-      chmod +x "$RUNTIME_SCRIPT"
-      log_resume_event "续跑脚本已落盘: $RUNTIME_SCRIPT (来源: /workspace/merged_openclaw_readable .sh)"
-    fi
-    return 0
-  fi
-
-  echo "警告：未能自动落盘续跑脚本，请后续手动用文件方式运行。"
-  log_resume_event "警告：续跑脚本自动落盘失败"
 }
 
-init_resume_log() {
-  mkdir -p "$WORK_ROOT"
-  touch "$AUTO_RESUME_LOG"
-  {
-    echo "========================================"
-    echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "事件: 脚本启动"
-    echo "脚本路径: $RUNTIME_SCRIPT"
-    echo "说明: 脚本本体已尝试落盘，续跑和状态记录写入本日志"
-  } >> "$AUTO_RESUME_LOG"
+run_wslwin() {
+  log "执行步骤 1/4: wslwin"
+  bash "$STAGE_DIR/wslwin.sh"
 }
 
-log_resume_event() {
-  mkdir -p "$WORK_ROOT"
-  touch "$AUTO_RESUME_LOG"
-  {
-    echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "事件: $1"
-  } >> "$AUTO_RESUME_LOG"
-}
-
-save_state() {
-  mkdir -p "$WORK_ROOT"
-  cat > "$STATE_FILE" <<EOF
-SKPL_NEXT_STEP="$1"
-SKPL_PROXY_PORT="${SKPL_PROXY_PORT:-10808}"
-SKPL_PAUSE_REASON="${2:-manual}"
-SKPL_ENABLE_MEMORY="${SKPL_ENABLE_MEMORY:-0}"
-SKPL_SAVED_BOOT_ID="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)"
-EOF
-}
-
-load_state() {
-  [ -f "$STATE_FILE" ] && . "$STATE_FILE"
-}
-
-boot_id_current() {
-  cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown
-}
-
-should_resume_after_reboot() {
-  [ -f "$STATE_FILE" ] || return 1
-  load_state
-  [ "${SKPL_PAUSE_REASON:-}" = "wsl_systemd_restart" ] || return 1
-  [ "$(boot_id_current)" != "${SKPL_SAVED_BOOT_ID:-}" ] || return 1
-  return 0
-}
-
-clear_state() {
-  rm -f "$STATE_FILE"
-  rm -f "${WORK_ROOT}/auto-resume.running"
-}
-
-disable_auto_resume() {
-  rm -f "$STATE_FILE" "${WORK_ROOT}/auto-resume.running"
-  log_resume_event "安装完成，自动续跑已关闭；后续仅保留 skpl 面板入口"
-}
-
-install_resume_hook() {
-  mkdir -p "$WORK_ROOT"
-  cat > "$RESUME_RUNNER" <<'EOF'
-#!/bin/bash
-LOCK_FILE="/root/.skpl/auto-resume.running"
-LOG_FILE="/root/.skpl/auto-resume.log"
-SCRIPT_FILE="/root/.skpl/merged_openclaw_readable.sh"
-
-if [ -f "$LOCK_FILE" ]; then
-  old_pid=$(cat "$LOCK_FILE" 2>/dev/null || true)
-  if [[ "$old_pid" =~ ^[0-9]+$ ]] && kill -0 "$old_pid" 2>/dev/null; then
-    old_cmd=$(ps -p "$old_pid" -o args= 2>/dev/null || true)
-    if [[ "$old_cmd" == *"/root/.skpl/resume_runner.sh"* ]] || [[ "$old_cmd" == *"/root/.skpl/merged_openclaw_readable.sh --resume"* ]]; then
-      echo "时间: $(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG_FILE"
-      echo "事件: 检测到已有续跑进程，跳过重复启动" >>"$LOG_FILE"
-      exit 0
-    fi
-  fi
-  rm -f "$LOCK_FILE"
-fi
-
-printf '%s\n' "$$" > "$LOCK_FILE"
-trap 'rm -f "$LOCK_FILE"' EXIT
-
-echo "时间: $(date '+%Y-%m-%d %H:%M:%S')" >>"$LOG_FILE"
-echo "事件: 触发自动续跑" >>"$LOG_FILE"
-
-if [ ! -f "$SCRIPT_FILE" ]; then
-  echo "续跑失败：未找到脚本文件 $SCRIPT_FILE" >>"$LOG_FILE"
-  exit 127
-fi
-
-exec /bin/bash "$SCRIPT_FILE" --resume >>"$LOG_FILE" 2>&1
-EOF
-  chmod +x "$RESUME_RUNNER"
-
-  cat > "$AUTO_RESUME_HOOK" <<'EOF'
-#!/bin/bash
-if [ -n "${SKPL_AUTO_RESUME_HOOK_RAN:-}" ]; then
-  return 0 2>/dev/null || exit 0
-fi
-export SKPL_AUTO_RESUME_HOOK_RAN=1
-
-LAUNCH_LOCK_DIR="/root/.skpl/auto-resume.launch.lock"
-
-acquire_launch_lock() {
-  mkdir "$LAUNCH_LOCK_DIR" 2>/dev/null
-}
-
-release_launch_lock() {
-  rmdir "$LAUNCH_LOCK_DIR" 2>/dev/null || true
-}
-
-[ -t 1 ] || return 0 2>/dev/null || exit 0
-case "$-" in
-  *i*) ;;
-  *) return 0 2>/dev/null || exit 0 ;;
-esac
-[ -f /root/.skpl/install.state ] || return 0 2>/dev/null || exit 0
-
-. /root/.skpl/install.state
-
-CURRENT_BOOT_ID=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)
-
-if [ "${SKPL_PAUSE_REASON:-}" != "wsl_systemd_restart" ]; then
-  return 0 2>/dev/null || exit 0
-fi
-
-if [ "$CURRENT_BOOT_ID" = "${SKPL_SAVED_BOOT_ID:-}" ]; then
-  echo ""
-  echo "[SKPL] 安装已暂停，等待你在 Windows PowerShell 执行: wsl --shutdown"
-  echo "[SKPL] 执行后重新进入 WSL，脚本会自动继续。"
-  return 0 2>/dev/null || exit 0
-fi
-
-if ! acquire_launch_lock; then
-  return 0 2>/dev/null || exit 0
-fi
-trap 'release_launch_lock' EXIT
-
-if [ -f /root/.skpl/auto-resume.running ]; then
-  running_pid=$(cat /root/.skpl/auto-resume.running 2>/dev/null || true)
-  if [[ "$running_pid" =~ ^[0-9]+$ ]] && kill -0 "$running_pid" 2>/dev/null; then
-    running_cmd=$(ps -p "$running_pid" -o args= 2>/dev/null || true)
-    if [[ "$running_cmd" == *"/root/.skpl/resume_runner.sh"* ]] || [[ "$running_cmd" == *"/root/.skpl/merged_openclaw_readable.sh --resume"* ]]; then
-      echo ""
-      echo "[SKPL] 未完成安装程序已经在后台继续执行中。日志: /root/.skpl/auto-resume.log"
-      return 0 2>/dev/null || exit 0
-    fi
-  fi
-  rm -f /root/.skpl/auto-resume.running
-fi
-
-echo ""
-echo "[SKPL] 检测到 WSL 已重启，正在后台自动继续未完成安装..."
-echo "[SKPL] 可查看日志: /root/.skpl/auto-resume.log"
-echo "[SKPL] 查看日志请执行: sed -n '1,200p' /root/.skpl/auto-resume.log"
-printf '%s\n' "pending" > /root/.skpl/auto-resume.running
-nohup /bin/bash /root/.skpl/resume_runner.sh >/dev/null 2>&1 &
-sleep 0.2
-if [ -f /root/.skpl/auto-resume.running ]; then
-  running_pid=$(cat /root/.skpl/auto-resume.running 2>/dev/null || true)
-  if ! [[ "$running_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$running_pid" 2>/dev/null; then
-    echo "[SKPL] 后台续跑未成功拉起，请手动执行: bash /root/.skpl/merged_openclaw_readable.sh --resume"
-  fi
-fi
-
-trap - EXIT
-release_launch_lock
-EOF
-  chmod +x "$AUTO_RESUME_HOOK"
-
-  sed -i '/skpl-auto-resume.sh/d' /root/.bashrc 2>/dev/null || true
-  echo '[ -f /etc/profile.d/skpl-auto-resume.sh ] && source /etc/profile.d/skpl-auto-resume.sh' >> /root/.bashrc
-
-  if [ -f "$BASHRC_HOOK_FILE" ]; then
-    sed -i '/skpl-auto-resume.sh/d' "$BASHRC_HOOK_FILE" 2>/dev/null || true
-    printf '%s\n' '[ -f /etc/profile.d/skpl-auto-resume.sh ] && source /etc/profile.d/skpl-auto-resume.sh' >> "$BASHRC_HOOK_FILE"
-  fi
-}
-
-apt_update_safe() {
-  local update_log="${WORK_ROOT}/apt-update.log"
-  local insecure_log="${WORK_ROOT}/apt-update-insecure.log"
-  export DEBIAN_FRONTEND=noninteractive
-  SKPL_APT_INSECURE="0"
-
-  if apt-get update -y >"$update_log" 2>&1; then
-    return 0
-  fi
-
-  if grep -q "Could not get lock" "$update_log" 2>/dev/null; then
-    echo "检测到 apt 锁被占用，等待包管理进程结束后重试..."
-    if wait_for_apt_idle 120 && apt-get update -y >"$update_log" 2>&1; then
-      return 0
-    fi
-  fi
-
-  if grep -q "Couldn't wait for subprocess - waitpid" "$update_log" 2>/dev/null; then
-    echo "检测到 apt 子进程异常，等待后台 apt 进程空闲后重试..."
-    if wait_for_apt_idle 45 && apt-get update -y >"$update_log" 2>&1; then
-      return 0
-    fi
-  fi
-
-  echo "apt update 失败，日志如下："
-  sed -n '1,120p' "$update_log" 2>/dev/null || true
-
-  if [ -f /etc/apt/sources.list.bak.original ]; then
-    cp -f /etc/apt/sources.list.bak.original /etc/apt/sources.list
-    echo "已自动回滚到原始 sources.list，再试一次 apt update。"
-    apt-get update -y >"$update_log" 2>&1 || {
-      echo "回滚后 apt update 仍失败。"
-      sed -n '1,120p' "$update_log" 2>/dev/null || true
-      if grep -q "Waited for apt-key but it wasn't there" "$update_log" 2>/dev/null; then
-        echo "检测到 apt-key 子进程异常，尝试使用非签名校验模式继续安装依赖。"
-        if apt-get update -y \
-          -o Acquire::AllowInsecureRepositories=true \
-          -o Acquire::AllowDowngradeToInsecureRepositories=true \
-          -o APT::Get::AllowUnauthenticated=true >"$insecure_log" 2>&1; then
-          SKPL_APT_INSECURE="1"
-          echo "已切换到非签名校验模式（仅用于本次安装流程）。"
-          return 0
-        fi
-
-        echo "非签名校验模式也失败，日志如下："
-        sed -n '1,120p' "$insecure_log" 2>/dev/null || true
-      fi
-
-      return 1
-    }
-    return 0
-  fi
-
-  return 1
-}
-
-apt_install_safe() {
-  export DEBIAN_FRONTEND=noninteractive
-  if [ "${SKPL_APT_INSECURE:-0}" = "1" ]; then
-    apt-get install -y --allow-unauthenticated "$@"
-  else
-    apt-get install -y "$@"
-  fi
-}
-
-wait_for_apt_idle() {
-  local timeout_sec="${1:-30}"
-  local i=0
-  while [ "$i" -lt "$timeout_sec" ]; do
-    if ! pgrep -x apt >/dev/null 2>&1 \
-      && ! pgrep -x apt-get >/dev/null 2>&1 \
-      && ! pgrep -x dpkg >/dev/null 2>&1 \
-      && ! pgrep -x apt-key >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 1
-    i=$((i + 1))
-  done
-  return 1
-}
-
-is_wsl() {
-  grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || grep -qi microsoft /proc/version 2>/dev/null
-}
-
-wsl_systemd_active() {
-  [ "$(cat /proc/1/comm 2>/dev/null)" = "systemd" ]
-}
-
-ensure_wsl_systemd_config() {
-  python3 - <<'PY'
-from pathlib import Path
-
-path = Path('/etc/wsl.conf')
-text = path.read_text(encoding='utf-8') if path.exists() else ''
-lines = text.splitlines()
-out = []
-in_boot = False
-boot_seen = False
-systemd_seen = False
-
-for line in lines:
-    stripped = line.strip()
-    if stripped.startswith('[') and stripped.endswith(']'):
-        if in_boot and not systemd_seen:
-            out.append('systemd=true')
-        in_boot = stripped.lower() == '[boot]'
-        if in_boot:
-            boot_seen = True
-            systemd_seen = False
-        out.append(line)
-        continue
-    if in_boot and stripped.startswith('systemd='):
-        out.append('systemd=true')
-        systemd_seen = True
-    else:
-        out.append(line)
-
-if in_boot and not systemd_seen:
-    out.append('systemd=true')
-if not boot_seen:
-    if out and out[-1] != '':
-        out.append('')
-    out.extend(['[boot]', 'systemd=true'])
-
-result = '\n'.join(out).rstrip() + '\n'
-path.write_text(result, encoding='utf-8')
-PY
-}
-
-pause_for_wsl_restart() {
-  local next_step="$1"
-  save_state "$next_step" "wsl_systemd_restart"
-  install_resume_hook
-  log_resume_event "等待 WSL 执行 wsl --shutdown，保存续跑点: ${next_step}"
-  echo ""
-  echo "检测到当前 WSL 还没有以 systemd 模式重新启动。"
-  echo "我已经保存了继续执行的位置: ${next_step}"
-  echo "并且已安装自动续跑钩子。"
-  echo ""
-  echo "我已经自动写入 /etc/wsl.conf，确保至少包含："
-  echo "  [boot]"
-  echo "  systemd=true"
-  echo ""
-  echo "然后关闭所有 WSL 终端，到 Windows PowerShell 执行:"
-  echo "  wsl --shutdown"
-  echo ""
-  echo "然后重新打开当前发行版。打开后脚本会自动在后台唤醒并继续执行。"
-  echo "自动续跑日志: /root/.skpl/auto-resume.log"
-  echo "如果没有自动继续，你手动唤醒这一条也可以:"
-  echo "  bash /root/.skpl/merged_openclaw_readable.sh --resume"
-  exit 0
-}
-
-ensure_wsl_systemd_or_pause() {
-  local next_step="$1"
-  if ! is_wsl; then
-    return 0
-  fi
-  if wsl_systemd_active; then
-    return 0
-  fi
-  ensure_wsl_systemd_config
-  pause_for_wsl_restart "$next_step"
-}
-
-step1_wsl_proxy_sync() {
-  clear >/dev/null 2>&1 || true
-  echo "==================== Step 1/4: WSL/Windows 代理同步 ===================="
-  local ubuntu_codename=""
-
-  if wait_for_apt_idle 30; then
-    rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock* 2>/dev/null || true
-    dpkg --configure -a 2>/dev/null || true
-  else
-    echo "检测到 apt/dpkg 正在运行，跳过锁清理，避免中断系统包管理进程。"
-  fi
-
-  rm -f /etc/apt/apt.conf.d/*proxy* /etc/apt/apt.conf.d/99* 2>/dev/null || true
-  echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
-  [ ! -f /etc/apt/sources.list.bak.original ] && cp /etc/apt/sources.list /etc/apt/sources.list.bak.original
-
-  ubuntu_codename=$( . /etc/os-release 2>/dev/null && printf '%s' "${VERSION_CODENAME:-}" )
-  [ -n "$ubuntu_codename" ] || ubuntu_codename="jammy"
-
-  cat > /etc/apt/sources.list <<EOF
-deb http://mirrors.aliyun.com/ubuntu/ ${ubuntu_codename} main restricted universe multiverse
-deb http://mirrors.aliyun.com/ubuntu/ ${ubuntu_codename}-security main restricted universe multiverse
-deb http://mirrors.aliyun.com/ubuntu/ ${ubuntu_codename}-updates main restricted universe multiverse
-deb http://mirrors.aliyun.com/ubuntu/ ${ubuntu_codename}-backports main restricted universe multiverse
-deb-src http://mirrors.aliyun.com/ubuntu/ ${ubuntu_codename} main restricted universe multiverse
-deb-src http://mirrors.aliyun.com/ubuntu/ ${ubuntu_codename}-security main restricted universe multiverse
-deb-src http://mirrors.aliyun.com/ubuntu/ ${ubuntu_codename}-updates main restricted universe multiverse
-deb-src http://mirrors.aliyun.com/ubuntu/ ${ubuntu_codename}-backports main restricted universe multiverse
-EOF
-  echo "软件源已写入，实际安装前会自动校验；若镜像不可用，会自动回滚原始源。"
-
-  echo "默认代理端口是 10808。直接回车使用默认。"
-  if [ -t 0 ] && [ -t 1 ]; then
-    read -r -p "请输入代理端口号: " CUSTOM_PORT || CUSTOM_PORT=""
-  else
-    CUSTOM_PORT="${SKPL_PROXY_PORT:-10808}"
-    echo "检测到后台/非交互续跑，自动使用代理端口: ${CUSTOM_PORT}"
-  fi
-
-  [ -z "${CUSTOM_PORT}" ] && PROXY_PORT="${SKPL_PROXY_PORT:-10808}" || PROXY_PORT="${CUSTOM_PORT}"
-  if ! [[ "$PROXY_PORT" =~ ^[0-9]+$ ]] || [ "$PROXY_PORT" -lt 1 ] || [ "$PROXY_PORT" -gt 65535 ]; then
-    echo "端口输入无效，已回退默认端口 10808"
-    PROXY_PORT="10808"
-  fi
-  SKPL_PROXY_PORT="${PROXY_PORT}"
-
-  sed -i '/proxy_/d;/auto_proxy/d;/http_proxy/d;/https_proxy/d;/all_proxy/d;/no_proxy/d;/NO_PROXY/d' /root/.bashrc || true
-
-  cat > /root/.auto_proxy_sync.sh <<'EOF'
-#!/bin/bash
-PROXY_MIRRORED="127.0.0.1:__PORT__"
-PROXY_LEGACY="10.255.255.254:__PORT__"
-NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
-
-check_port() {
-  local ip_port="$1"
-  local ip="${ip_port%%:*}"
-  local port="${ip_port##*:}"
-  timeout 0.5 bash -c "echo > /dev/tcp/${ip}/${port}" 2>/dev/null
-}
-
-if check_port "$PROXY_MIRRORED"; then
-  ACTIVE_PROXY="$PROXY_MIRRORED"
-elif check_port "$PROXY_LEGACY"; then
-  ACTIVE_PROXY="$PROXY_LEGACY"
-else
-  ACTIVE_PROXY=""
-fi
-
-if [ -n "$ACTIVE_PROXY" ]; then
-  export http_proxy="http://$ACTIVE_PROXY"
-  export https_proxy="http://$ACTIVE_PROXY"
-  export HTTP_PROXY="http://$ACTIVE_PROXY"
-  export HTTPS_PROXY="http://$ACTIVE_PROXY"
-  export all_proxy="socks5://$ACTIVE_PROXY"
-  export ALL_PROXY="socks5://$ACTIVE_PROXY"
-  export no_proxy="$NO_PROXY_RULE"
-  export NO_PROXY="$NO_PROXY_RULE"
-  echo "自动同步：代理已开启 ($ACTIVE_PROXY)"
-else
-  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
-  echo "自动同步：代理未开启"
-fi
-EOF
-
-  sed -i "s/__PORT__/${PROXY_PORT}/g" /root/.auto_proxy_sync.sh
-  chmod +x /root/.auto_proxy_sync.sh
-  sed -i '/source ~\/\.auto_proxy_sync.sh/d' /root/.bashrc || true
-  echo "source ~/.auto_proxy_sync.sh" >> /root/.bashrc
-  source /root/.auto_proxy_sync.sh || true
-
-  echo "Step 1 完成：已配置 WSL/Windows 代理同步（未执行 kejilion 安装）。"
-}
-
-step0_prepare_wsl_systemd() {
-  echo "==================== Step 0/4: WSL systemd 预处理 ===================="
-
-  if ! is_wsl; then
-    echo "当前不是 WSL 环境，跳过 systemd 预处理。"
-    return 0
-  fi
-
-  if wsl_systemd_active; then
-    echo "当前 WSL 已在 systemd 模式下启动。"
-    return 0
-  fi
-
-  ensure_wsl_systemd_config
-  pause_for_wsl_restart step1_wsl_proxy_sync
-}
-
-install_node_and_tools_from_openclaw_logic() {
-  local node_major=""
-  local need_node_install="1"
-
-  if command -v node >/dev/null 2>&1; then
-    node_major=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1)
-    if [ -n "$node_major" ] && [ "$node_major" -ge 22 ] && [ "$node_major" -lt 23 ]; then
-      need_node_install="0"
-    fi
-  fi
-
-  if [ "$need_node_install" = "1" ]; then
-    if ! install_node22_from_binary; then
-      echo "Node.js 二进制安装失败。当前环境包管理器异常时不会再强依赖 apt/dnf。"
-    fi
-  fi
-
-  command -v git >/dev/null 2>&1 || echo "[提示] 未检测到 git，后续仅在需要 git 的步骤会受影响。"
-  command -v jq >/dev/null 2>&1 || echo "[提示] 未检测到 jq，脚本已避免将其作为强依赖。"
-  command -v python3 >/dev/null 2>&1 || echo "[提示] 未检测到 python3，部分兜底下载能力不可用。"
-
-  if ! command -v node >/dev/null 2>&1; then
-    echo "Node.js 安装后仍不可用。"
-    exit 1
-  fi
-
-  local node_major
-  node_major=$(node -v | sed 's/^v//' | cut -d. -f1)
-  if [ -z "$node_major" ] || [ "$node_major" -lt 22 ] || [ "$node_major" -ge 23 ]; then
-    echo "当前 Node.js 版本不符合要求: $(node -v 2>/dev/null || echo unknown)，需要 v22.x。"
-    exit 1
-  fi
-}
-
-log_and_run() {
-  local desc="$1"
-  shift
-  echo "[执行] ${desc}"
-  "$@"
-}
-
-run_with_retry() {
-  local desc="$1"
-  local max_retry="$2"
-  shift 2
-
-  local attempt=1
-  while [ "$attempt" -le "$max_retry" ]; do
-    echo "[执行] ${desc} (第 ${attempt}/${max_retry} 次)"
-    if "$@"; then
-      return 0
-    fi
-    if [ "$attempt" -lt "$max_retry" ]; then
-      echo "[提示] ${desc} 失败，5 秒后重试..."
-      sleep 5
-    fi
-    attempt=$((attempt + 1))
-  done
-
-  echo "[错误] ${desc} 连续 ${max_retry} 次失败"
-  return 1
-}
-
-npm_install_openclaw_resilient() {
-  local -a registries=(
-    "https://registry.npmjs.org"
-    "https://registry.npmmirror.com"
-  )
-  local reg
-  local rc=0
-
-  if command -v openclaw >/dev/null 2>&1; then
-    echo "openclaw 已存在，跳过安装。"
-    return 0
-  fi
-
-  if [ -n "${http_proxy:-}" ]; then
-    export npm_config_proxy="${http_proxy}"
-  fi
-  if [ -n "${https_proxy:-}" ]; then
-    export npm_config_https_proxy="${https_proxy}"
-  fi
-
-  prepare_openclaw_global_dir
-
-  ensure_openclaw_command() {
-    if command -v openclaw >/dev/null 2>&1; then
-      return 0
-    fi
-
-    local npm_root=""
-    local openclaw_entry=""
-    npm_root=$(npm root -g 2>/dev/null || true)
-    [ -n "$npm_root" ] || return 1
-
-    if [ -f "${npm_root}/openclaw/dist/index.js" ]; then
-      openclaw_entry="${npm_root}/openclaw/dist/index.js"
-      {
-        printf '%s\n' '#!/bin/bash'
-        printf 'exec /usr/local/bin/node "%s" "$$@"\n' "${openclaw_entry}"
-      } > /usr/local/bin/openclaw
-      chmod +x /usr/local/bin/openclaw
-      command -v openclaw >/dev/null 2>&1
-      return $?
-    fi
-
-    return 1
-  }
-
-  for reg in "${registries[@]}"; do
-    echo "[执行] 使用 npm 源安装 openclaw: ${reg}"
-    timeout 1200 npm install -g openclaw@latest \
-      --registry="${reg}" \
-      --fetch-retries=5 \
-      --fetch-retry-mintimeout=20000 \
-      --fetch-retry-maxtimeout=120000 \
-      --no-fund \
-      --no-audit
-    rc=$?
-
-    if [ "$rc" -eq 0 ] && ensure_openclaw_command; then
-      return 0
-    fi
-
-    if [ "$rc" -eq 124 ]; then
-      echo "[提示] npm 安装超时（20 分钟），切换下一个源。"
-    else
-      echo "[提示] npm 安装失败（退出码: ${rc}），切换下一个源。"
-      prepare_openclaw_global_dir
-    fi
-  done
-
-  ensure_openclaw_command && return 0
-
-  return 1
-}
-
-fetch_file() {
-  local url="$1"
-  local output="$2"
-
-  if command -v curl >/dev/null 2>&1; then
-    curl --fail --location --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 "$url" -o "$output"
-    return $?
-  fi
-
-  if command -v wget >/dev/null 2>&1; then
-    wget -O "$output" "$url"
-    return $?
-  fi
-
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$url" "$output" <<'PY'
-import sys
-import urllib.request
-
-url = sys.argv[1]
-out = sys.argv[2]
-with urllib.request.urlopen(url, timeout=120) as resp:
-    data = resp.read()
-with open(out, 'wb') as f:
-    f.write(data)
-PY
-    return $?
-  fi
-
-  return 127
-}
-
-install_node22_from_binary() {
-  local node_version="v22.19.0"
-  local arch=""
-  local node_arch=""
-  local node_dir=""
-  local node_tar=""
-  local node_tmp="/tmp/node-${node_version}.tar.xz"
-  local node_url_primary=""
-  local node_url_mirror=""
-
-  arch=$(uname -m)
-  case "$arch" in
-    x86_64) node_arch="x64" ;;
-    aarch64|arm64) node_arch="arm64" ;;
-    *)
-      echo "不支持的 CPU 架构: ${arch}，无法自动安装 Node.js 22"
-      return 1
-      ;;
-  esac
-
-  node_tar="node-${node_version}-linux-${node_arch}.tar.xz"
-  node_dir="/usr/local/lib/nodejs/node-${node_version}-linux-${node_arch}"
-  node_url_primary="https://nodejs.org/dist/${node_version}/${node_tar}"
-  node_url_mirror="https://npmmirror.com/mirrors/node/${node_version}/${node_tar}"
-
-  mkdir -p /usr/local/lib/nodejs
-  if ! fetch_file "$node_url_primary" "$node_tmp"; then
-    fetch_file "$node_url_mirror" "$node_tmp"
-  fi
-
-  tar -xJf "$node_tmp" -C /usr/local/lib/nodejs
-  ln -sfn "${node_dir}/bin/node" /usr/local/bin/node
-  ln -sfn "${node_dir}/bin/npm" /usr/local/bin/npm
-  ln -sfn "${node_dir}/bin/npx" /usr/local/bin/npx
-}
-
-prepare_openclaw_global_dir() {
-  local npm_root=""
-  local openclaw_dir=""
-  local backup_dir=""
-
-  npm_root=$(npm root -g 2>/dev/null || true)
-  [ -n "$npm_root" ] || return 0
-
-  openclaw_dir="${npm_root}/openclaw"
-  if [ -d "$openclaw_dir" ] && ! command -v openclaw >/dev/null 2>&1; then
-    backup_dir="${openclaw_dir}.broken.$(date +%Y%m%d%H%M%S)"
-    mv "$openclaw_dir" "$backup_dir"
-    echo "[提示] 检测到损坏的 openclaw 目录，已迁移到: $backup_dir"
-  fi
-}
-
-download_with_heartbeat() {
-  local url="$1"
-  local output="$2"
-  shift 2
-
-  "$@" "$url" -o "$output" &
-  local pid=$!
-
-  while kill -0 "$pid" 2>/dev/null; do
-    echo "[信息] 正在下载模型，请稍候... ($(date '+%H:%M:%S'))"
-    sleep 15
-  done
-
-  wait "$pid"
-}
-
-enable_memory_local_default() {
-  if [ "${SKPL_ENABLE_MEMORY:-0}" != "1" ]; then
-    echo "[信息] 已禁用记忆模型安装（SKPL_ENABLE_MEMORY!=1），跳过本地 Memory 初始化。"
-    return 0
-  fi
-
-  local model_dir="/root/.openclaw/models/embedding"
-  local model_file="${model_dir}/embeddinggemma-300M-Q8_0.gguf"
-  local model_url_hf="https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf"
-  local model_url_mirror="https://hf-mirror.com/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf"
-  local model_url_ms="https://modelscope.cn/models/ggml-org/embeddinggemma-300M-GGUF/resolve/master/embeddinggemma-300M-Q8_0.gguf"
-  local min_size_bytes=10485760
-  local curl_cmd=(curl --fail --location --retry 3 --retry-all-errors --retry-delay 2 --connect-timeout 15 --max-time 900 --continue-at -)
-  local size=0
-  local attempt_url
-
-  mkdir -p /root/.openclaw/workspace/default/memory
-  [ -f /root/.openclaw/workspace/default/MEMORY.md ] || cat > /root/.openclaw/workspace/default/MEMORY.md <<'EOF'
-# OpenClaw Memory
-
-本文件由整合脚本自动创建，用于保证 Memory 菜单首次进入时有可用工作区。
-EOF
-
+run_openclaw() {
+  log "执行步骤 2/4: openclaw"
+  install_openclaw_runtime_stub
+  # shellcheck disable=SC1091
+  source "$STAGE_DIR/openclaw.sh"
+  # 通过菜单输入调用安装，保持原脚本安装逻辑
+  printf "1\n0\n" | moltbot_menu || true
+
+  # 二次兜底，确保不进入配置界面并启用 Local
+  OPENCLAW_ONBOARD_NO_UI=1 openclaw onboard --install-daemon >/dev/null 2>&1 || true
   openclaw config set memory.backend builtin >/dev/null 2>&1 || true
   openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
-
-  mkdir -p "${model_dir}"
-  if [ -f "${model_file}" ]; then
-    size=$(stat -c '%s' "${model_file}" 2>/dev/null || echo 0)
-  fi
-
-  if [ "$size" -lt "$min_size_bytes" ]; then
-    echo "[信息] Memory 本地模型未就绪，开始下载（支持断点续传与重试）..."
-    for attempt_url in "$model_url_hf" "$model_url_mirror" "$model_url_ms"; do
-      echo "[信息] 尝试下载源: ${attempt_url}"
-      if run_with_retry "下载本地 embedding 模型" 2 download_with_heartbeat "$attempt_url" "$model_file" "${curl_cmd[@]}"; then
-        size=$(stat -c '%s' "${model_file}" 2>/dev/null || echo 0)
-        if [ "$size" -ge "$min_size_bytes" ]; then
-          echo "[成功] 模型下载完成，大小: ${size} bytes"
-          break
-        fi
-        echo "[提示] 下载文件大小异常 (${size} bytes)，切换下一个源重试。"
-      fi
-    done
-
-    size=$(stat -c '%s' "${model_file}" 2>/dev/null || echo 0)
-    if [ "$size" -lt "$min_size_bytes" ]; then
-      echo "[错误] Memory 本地模型下载失败，无法保证 Local 记忆功能。"
-      echo "[错误] 请检查代理后重试，或手动下载到: ${model_file}"
-      return 1
-    fi
-  fi
-
-  if [ -f "${model_file}" ]; then
-    openclaw config set agents.defaults.memorySearch.local.modelPath "${model_file}" >/dev/null 2>&1 || true
-  fi
-
-  openclaw memory index >/dev/null 2>&1 || true
-  openclaw gateway restart >/dev/null 2>&1 || true
 }
 
-step2_install_openclaw_compatible() {
-  echo "==================== Step 2/4: 安装 OpenClaw（不配置） ===================="
-  install_node_and_tools_from_openclaw_logic
+run_openclaw2() {
+  log "执行步骤 3/4: openclaw2"
+  bash "$STAGE_DIR/openclaw2.sh"
+}
 
-  if ! npm_install_openclaw_resilient; then
-    echo "OpenClaw 安装失败：npm 多源重试后仍未成功。"
-    exit 1
-  fi
-  if ! command -v openclaw >/dev/null 2>&1; then
-    echo "OpenClaw 安装失败：未检测到 openclaw 命令。"
-    exit 1
-  fi
+run_evomap() {
+  log "执行步骤 4/4: EvoMap"
+  bash "$STAGE_DIR/evomap.sh"
+}
 
-  if ! enable_memory_local_default; then
-    echo "Step 2 失败：Local Memory 依赖模型未准备完成。"
-    exit 1
-  fi
+run_all() {
+  run_wslwin
+  run_openclaw
+  run_openclaw2
+  run_evomap
+  install_skpl_command
+  log "四段脚本执行完成。"
+}
 
-  if ! is_wsl || wsl_systemd_active; then
-    openclaw gateway install >/dev/null 2>&1 || true
-    openclaw gateway start >/dev/null 2>&1 || true
+evomap_root() { echo "/root/.openclaw/evolver"; }
+evomap_memory_dir() { echo "/root/.openclaw/workspace/.learnings"; }
+evomap_backup_dir() { echo "/root/.openclaw/backups/evomap-memory"; }
+
+evomap_install() { run_evomap; }
+
+evomap_uninstall() {
+  local root
+  root="$(evomap_root)"
+  pkill -f "node index.js --loop" 2>/dev/null || true
+  if [ -d "$root" ]; then
+    mv "$root" "${root}.removed.$(date +%Y%m%d%H%M%S)"
+    log "EvoMap 已卸载（目录改名备份）"
   else
-    echo "当前 WSL 尚未完成 systemd 重启，已先跳过网关安装与启动，稍后在 Step 3 自动继续。"
+    warn "未检测到 EvoMap 目录"
   fi
-
-  echo "Step 2 完成：OpenClaw 已安装，不执行配置向导，记忆默认 Local。"
-}
-
-step3_run_openclaw2() {
-  echo "==================== Step 3/4: 运行 openclaw2 适配 ===================="
-  local oc2_rc=0
-
-  set +e
-  bash "$OPENCLAW2_SRC" "${SKPL_PROXY_PORT:-10808}"
-  oc2_rc=$?
-  set -e
-
-  if [ "$oc2_rc" -eq 2 ]; then
-    log_resume_event "openclaw2 检测到 systemd 未生效，准备等待 WSL 重启"
-    ensure_wsl_systemd_config
-    pause_for_wsl_restart step3_run_openclaw2
-  fi
-
-  if [ "$oc2_rc" -ne 0 ]; then
-    echo "openclaw2 适配失败，退出码: ${oc2_rc}"
-    return "$oc2_rc"
-  fi
-
-  enable_memory_local_default
-  echo "已执行记忆模块修复，并保留原有 channels/WhatsApp 配置。"
-  echo "Step 3 完成：openclaw2 适配已执行。"
-}
-
-install_skpl_panel() {
-  echo "==================== 安装 skpl 操作面板 ===================="
-
-  cat > /root/.skpl/compat.sh <<'EOF'
-#!/bin/bash
-gl_huang=""; gl_bai=""; gl_lv=""; gl_hui=""; gl_kjlan="";
-gh_proxy=""
-sh_v="local-merged"
-ENABLE_STATS="false"
-
-send_stats() { :; }
-add_app_id() { :; }
-add_yuming() { echo "当前环境未集成 add_yuming"; return 1; }
-ldnmp_Proxy() { echo "当前环境未集成 ldnmp_Proxy"; return 1; }
-web_del() { echo "当前环境未集成 web_del"; return 1; }
-
-install() {
-  if command -v apt >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt update -y >/dev/null 2>&1
-    apt install -y "$@" >/dev/null 2>&1
-  elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y "$@" >/dev/null 2>&1
-  fi
-}
-
-break_end() {
-  read -r -p "按回车继续..." _
-}
-EOF
-
-  cat > /root/skpl <<'EOF'
-#!/bin/bash
-set +e +u +o pipefail
-
-prepare_memory_runtime() {
-  mkdir -p /root/.openclaw/workspace/default/memory
-  [ -f /root/.openclaw/workspace/default/MEMORY.md ] || cat > /root/.openclaw/workspace/default/MEMORY.md <<'MEMEOF'
-# OpenClaw Memory
-
-本文件由 skpl 自动补齐，用于保证 Memory 菜单进入时不秒退。
-MEMEOF
-  if command -v openclaw >/dev/null 2>&1; then
-    openclaw config set memory.backend builtin >/dev/null 2>&1 || true
-    openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
-    openclaw memory index >/dev/null 2>&1 || true
-  fi
-}
-
-show_install_state() {
-  if [ -f /root/.skpl/install.state ]; then
-    . /root/.skpl/install.state
-    echo "当前续跑步骤: ${SKPL_NEXT_STEP:-unknown}"
-    echo "续跑原因: ${SKPL_PAUSE_REASON:-unknown}"
-    echo "Memory 开关: ${SKPL_ENABLE_MEMORY:-0} (1=开启,0=关闭)"
-  else
-    echo "未检测到 install.state，安装可能已完成或尚未开始。"
-  fi
-}
-
-resume_install_foreground() {
-  echo "开始继续安装..."
-  bash /root/.skpl/merged_openclaw_readable.sh --resume
-}
-
-evomap_install() {
-  bash /root/.skpl/EvoMap.txt
 }
 
 evomap_update() {
-  local dir="/root/.openclaw/evolver"
-  [ -d "$dir" ] || { echo "未检测到 Evolver 目录: $dir"; return 1; }
-  cd "$dir"
-  git pull --ff-only
-  npm install --silent
+  local root
+  root="$(evomap_root)"
+  [ -d "$root/.git" ] || err "未检测到 EvoMap git 目录，请先安装"
+  git -C "$root" pull --rebase
+  npm --prefix "$root" install
   pkill -f "node index.js --loop" 2>/dev/null || true
-  nohup node index.js --loop >/root/.openclaw/evolver/nohup.out 2>&1 &
-  echo "EvoMap 更新完成并已重启。"
+  (cd "$root" && nohup node index.js --loop >/dev/null 2>&1 &)
+  log "EvoMap 已更新并重启"
 }
 
-evomap_uninstall() {
-  local dir="/root/.openclaw/evolver"
-  [ -d "$dir" ] || { echo "EvoMap 未安装。"; return 0; }
-  pkill -f "node index.js --loop" 2>/dev/null || true
-  mv "$dir" "${dir}.removed.$(date +%Y%m%d%H%M%S)"
-  echo "EvoMap 已卸载（目录已改名保留备份）。"
-}
-
-evomap_backup() {
-  local dir="/root/.openclaw/evolver"
-  local backup_dir="/root/.openclaw/backups"
-  [ -d "$dir" ] || { echo "未检测到 EvoMap 目录，无法备份。"; return 1; }
+evomap_memory_manage() {
+  local memory_dir backup_dir ts archive
+  memory_dir="$(evomap_memory_dir)"
+  backup_dir="$(evomap_backup_dir)"
   mkdir -p "$backup_dir"
-  local out="${backup_dir}/evomap-backup-$(date +%Y%m%d%H%M%S).tar.gz"
-  tar -czf "$out" -C /root/.openclaw evolver
-  echo "备份完成: $out"
+  ts="$(date +%Y%m%d%H%M%S)"
+  archive="$backup_dir/memory-backup-$ts.tar.gz"
+
+  if [ -d "$memory_dir" ]; then
+    tar -czf "$archive" -C "$memory_dir" .
+    log "EvoMap 记忆备份完成: $archive"
+  else
+    warn "未找到记忆目录: $memory_dir"
+  fi
+
+  echo "记忆存储地址: $memory_dir"
+  echo "备份存储地址: $backup_dir"
 }
 
-skpl_uninstall() {
-  echo "开始卸载 SKPL 控制层..."
-  rm -f /usr/local/bin/skpl /usr/local/bin/skpl-uninstall /root/skpl /root/.skpl/resume_runner.sh /root/.skpl/install.state /root/.skpl/auto-resume.running
-  rm -f /etc/profile.d/skpl-auto-resume.sh
-  sed -i '/skpl-auto-resume.sh/d' /root/.bashrc 2>/dev/null || true
-  sed -i '/skpl-auto-resume.sh/d' /etc/bash.bashrc 2>/dev/null || true
-  echo "SKPL 控制层已卸载。已保留 /root/.skpl 目录和 auto-resume.log 供排查。"
+panel_update() {
+  log "面板更新：请使用新版本脚本覆盖当前文件"
+}
+
+panel_uninstall() {
+  local cmd="/usr/local/bin/skpl"
+  if [ -f "$cmd" ]; then
+    mv "$cmd" "${cmd}.removed.$(date +%Y%m%d%H%M%S)"
+    log "已卸载 skpl 快捷命令（不影响其他程序）"
+  else
+    warn "未发现 skpl 快捷命令"
+  fi
+}
+
+install_skpl_command() {
+  local self launcher_target
+  self="$(readlink -f "$0")"
+  launcher_target="${WORK_ROOT}/merged_openclaw_readable.sh"
+  if [ "$self" != "$launcher_target" ]; then
+    cp -f "$self" "$launcher_target"
+    chmod +x "$launcher_target"
+    self="$launcher_target"
+  fi
+  if [ -f "$launcher_target" ]; then
+    self="$launcher_target"
+  fi
+  cat > /usr/local/bin/skpl <<EOF
+#!/usr/bin/env bash
+exec bash "$self" --panel
+EOF
+  chmod +x /usr/local/bin/skpl
 }
 
 openclaw_panel() {
-  (
-    set +e +u +o pipefail
-    if [ "$(cat /proc/1/comm 2>/dev/null)" != "systemd" ]; then
-      echo "当前 WSL 尚未以 systemd 模式启动，OpenClaw 原始面板暂不可用。"
-      echo "请先在 Windows PowerShell 执行: wsl --shutdown"
-      echo "然后重新进入 WSL。"
-      read -r -p "按回车返回..." _
-      return 0
-    fi
-    source /root/.skpl/compat.sh
-    source /root/.skpl/openclaw.txt
-    prepare_memory_runtime
-    moltbot_menu
-  )
+  install_openclaw_runtime_stub
+  # shellcheck disable=SC1091
+  source "$STAGE_DIR/openclaw.sh"
+  moltbot_menu
 }
 
-if [ "${1:-}" = "--uninstall" ]; then
-  skpl_uninstall
-  exit 0
-fi
-
-while true; do
-  clear
-  echo "======================================="
-  echo "SKPL 操作面板"
-  echo "======================================="
-  echo "1. 查看安装续跑状态"
-  echo "2. 继续安装"
-  echo "3. OpenClaw 原始面板"
-  echo "4. EvoMap 安装"
-  echo "5. EvoMap 更新"
-  echo "6. EvoMap 卸载"
-  echo "7. EvoMap 备份"
-  echo "8. 卸载 SKPL 控制层"
-  echo "0. 退出"
-  echo "---------------------------------------"
-  read -r -p "请选择: " c
-  case "$c" in
-    1) show_install_state ; read -r -p "按回车返回..." _ ;;
-    2) resume_install_foreground ; read -r -p "按回车返回..." _ ;;
-    3) openclaw_panel ;;
-    4) evomap_install ; read -r -p "按回车返回..." _ ;;
-    5) evomap_update ; read -r -p "按回车返回..." _ ;;
-    6) evomap_uninstall ; read -r -p "按回车返回..." _ ;;
-    7) evomap_backup ; read -r -p "按回车返回..." _ ;;
-    8) skpl_uninstall ; read -r -p "按回车返回..." _ ;;
-    0) exit 0 ;;
-    *) echo "无效选项"; sleep 1 ;;
-  esac
-done
-EOF
-
-  chmod +x /root/skpl
-  cp -f /root/skpl /usr/local/bin/skpl
-  chmod +x /usr/local/bin/skpl
-
-  cat > /usr/local/bin/skpl-uninstall <<'EOF'
-#!/bin/bash
-exec /root/skpl --uninstall
-EOF
-  chmod +x /usr/local/bin/skpl-uninstall
-
-  echo "已创建面板命令：skpl"
-  echo "已创建卸载命令：skpl-uninstall"
-}
-
-step4_run_evomap() {
-  echo "==================== Step 4/4: 运行 EvoMap 升级 ===================="
-  bash "$EVOMAP_SRC"
-  echo "Step 4 完成：EvoMap 已执行。"
-}
-
-ensure_skpl_panel_installed() {
-  if [ ! -x /usr/local/bin/skpl ] || [ ! -f /root/skpl ]; then
-    install_skpl_panel
-  fi
-}
-
-run_from_step() {
-  case "$1" in
-    step0_prepare_wsl_systemd)
-      step0_prepare_wsl_systemd
-      save_state step1_wsl_proxy_sync
-      ;&
-    step1_wsl_proxy_sync)
-      step1_wsl_proxy_sync
-      ensure_skpl_panel_installed
-      save_state step2_install_openclaw_compatible
-      ;&
-    step2_install_openclaw_compatible)
-      step2_install_openclaw_compatible
-      save_state step3_run_openclaw2
-      ensure_wsl_systemd_or_pause step3_run_openclaw2
-      ;&
-    step3_run_openclaw2)
-      ensure_wsl_systemd_or_pause step3_run_openclaw2
-      step3_run_openclaw2
-      ensure_skpl_panel_installed
-      save_state step4_run_evomap
-      ;&
-    step4_run_evomap)
-      step4_run_evomap
-      disable_auto_resume
-      ;;
-    *)
-      echo "未知恢复步骤: $1"
-      exit 1
-      ;;
-  esac
-}
-
-report_error() {
-  local rc="$1"
-  local line="$2"
-  local cmd="$3"
-  {
-    echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "事件: 执行失败，行号=${line}，命令=${cmd}，退出码=${rc}"
-  } >> "${WORK_ROOT}/auto-resume.log" 2>/dev/null || true
-  echo ""
-  echo "[错误定位] 行号: ${line}"
-  echo "[错误定位] 命令: ${cmd}"
-  exit "$rc"
-}
-
-report_exit() {
-  local rc="$1"
-  if [ "$rc" -ne 0 ]; then
-    echo ""
-    echo "[错误定位] merged_openclaw_readable.sh 执行失败，退出码: ${rc}"
-    if [ -f "${WORK_ROOT}/auto-resume.log" ] && [ -s "${WORK_ROOT}/auto-resume.log" ]; then
-      echo "查看续跑日志: sed -n '1,200p' ${WORK_ROOT}/auto-resume.log"
-    fi
-    if [ -f "${WORK_ROOT}/apt-update.log" ] && [ -s "${WORK_ROOT}/apt-update.log" ]; then
-      echo "查看 apt 日志: sed -n '1,200p' ${WORK_ROOT}/apt-update.log"
-    fi
-    if [ ! -s "${WORK_ROOT}/auto-resume.log" ] && [ ! -s "${WORK_ROOT}/apt-update.log" ]; then
-      echo "当前还没有可用日志，说明失败发生在日志生成之前。"
-    fi
-    echo "如果是整段粘贴执行，请使用包装脚本 merged_openclaw_paste.sh。"
-  fi
+skpl_menu() {
+  while true; do
+    clear
+    echo "==========================================="
+    echo "SKPL 面板"
+    echo "==========================================="
+    echo "1. OpenClaw 面板"
+    echo "2. EvoMap 安装"
+    echo "3. EvoMap 卸载"
+    echo "4. EvoMap 更新"
+    echo "5. EvoMap 记忆管理（含备份）"
+    echo "6. 面板更新"
+    echo "7. 面板卸载"
+    echo "8. 重新执行完整流程"
+    echo "0. 退出"
+    read -r -p "请选择: " choice
+    case "$choice" in
+      1) openclaw_panel ;;
+      2) evomap_install ;;
+      3) evomap_uninstall ;;
+      4) evomap_update ;;
+      5) evomap_memory_manage ;;
+      6) panel_update ;;
+      7) panel_uninstall ;;
+      8) run_all ;;
+      0) break ;;
+      *) warn "无效选项" ;;
+    esac
+    read -r -p "按回车继续..." _
+  done
 }
 
 main() {
-  local start_step="step0_prepare_wsl_systemd"
+  mkdir -p "$WORK_ROOT"
 
-  export SKPL_ENABLE_MEMORY="${SKPL_ENABLE_MEMORY:-0}"
-
-  trap 'report_error $? ${LINENO:-unknown} "${BASH_COMMAND:-unknown}"' ERR
-  trap 'report_exit $?' EXIT
-
-  persist_runtime_script
-  init_resume_log
-  prepare_embedded_sources
-  install_resume_hook
-
-  if [ "${1:-}" = "--resume" ]; then
-    load_state
-    start_step="${SKPL_NEXT_STEP:-step1_wsl_proxy_sync}"
-    echo "检测到续跑请求，当前从 ${start_step} 继续。"
-    echo "续跑原因: ${SKPL_PAUSE_REASON:-unknown}"
-  elif should_resume_after_reboot; then
-    start_step="${SKPL_NEXT_STEP:-step1_wsl_proxy_sync}"
-    echo "检测到 WSL 已重启，自动恢复未完成安装。"
-    echo "当前从 ${start_step} 继续。"
-    echo "续跑原因: ${SKPL_PAUSE_REASON:-unknown}"
-  else
-    clear_state
-  fi
-
-  run_from_step "$start_step"
-
-  echo "======================================="
-  echo "全部步骤已完成。"
-  echo "后续可直接执行：skpl"
-  echo "======================================="
+  write_sources
+  install_skpl_command
+  case "${1:-}" in
+    --panel)
+      skpl_menu
+      ;;
+    --run-all)
+      run_all
+      ;;
+    *)
+      run_all
+      skpl_menu
+      ;;
+  esac
 }
 
 main "$@"
-)
