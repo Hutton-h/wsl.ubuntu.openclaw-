@@ -393,10 +393,20 @@ ensure_node_runtime() {
   fi
 
   if command -v apt >/dev/null 2>&1; then
-    install curl ca-certificates gnupg
-    curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null 2>&1 || true
+    install curl ca-certificates gnupg build-essential python3 libatomic1
     SKPL_APT_UPDATED="0"
-    install build-essential python3 libatomic1 nodejs
+    if curl -fsSL https://deb.nodesource.com/setup_24.x | bash -; then
+      install nodejs
+    else
+      echo "NodeSource 安装源初始化失败，回退到系统仓库安装 nodejs/npm..."
+      log_msg "NodeSource 安装源初始化失败，回退到系统仓库安装 nodejs/npm"
+      install nodejs npm
+    fi
+  fi
+
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "Node.js 运行时安装失败，请先检查网络或软件源后重试。"
+    return 1
   fi
 }
 
@@ -454,7 +464,7 @@ https://registry.npmmirror.com"
 
 npm_try_with_registries() {
   local registry rc=1
-  local npm_timeout_seconds="${SKPL_NPM_INSTALL_TIMEOUT:-180}"
+  local npm_timeout_seconds="${SKPL_NPM_INSTALL_TIMEOUT:-600}"
   local -a npm_args=("$@")
 
   while IFS= read -r registry; do
@@ -491,13 +501,20 @@ npm_query_openclaw_latest_version() {
   return 1
 }
 
+configure_openclaw_git_transport() {
+  git config --global url."https://github.com/".insteadOf ssh://git@github.com/ >/dev/null 2>&1 || true
+  git config --global url."https://github.com/".insteadOf git@github.com: >/dev/null 2>&1 || true
+}
+
 install_openclaw_global() {
   local country="unknown"
   local preferred_registry="https://registry.npmjs.org"
+  local active_proxy=""
 
   refresh_runtime_proxy_env
 
-  if resolve_active_proxy "${SKPL_PROXY_PORT:-10808}" >/dev/null 2>&1; then
+  active_proxy=$(resolve_active_proxy "${SKPL_PROXY_PORT:-10808}" 2>/dev/null || true)
+  if [ -n "$active_proxy" ]; then
     preferred_registry="https://registry.npmmirror.com"
   else
     country=$(detect_npm_country)
@@ -506,16 +523,30 @@ install_openclaw_global() {
     fi
   fi
 
+  configure_openclaw_git_transport
   npm config set registry "$preferred_registry" >/dev/null 2>&1 || true
+  npm config set fund false >/dev/null 2>&1 || true
+  npm config set audit false >/dev/null 2>&1 || true
+  npm config set progress true >/dev/null 2>&1 || true
+  npm config set fetch-retries 5 >/dev/null 2>&1 || true
+  npm config set fetch-timeout 600000 >/dev/null 2>&1 || true
 
   echo "正在按 kejilion 逻辑安装 OpenClaw CLI..."
+  echo "Node 版本: $(node -v 2>/dev/null || echo unknown)"
+  echo "npm 版本: $(npm -v 2>/dev/null || echo unknown)"
   echo "当前 npm 源: ${preferred_registry}"
-  if timeout "${SKPL_NPM_INSTALL_TIMEOUT:-180}" npm install -g openclaw@latest --no-fund --no-audit --loglevel=error --prefer-online --fetch-retries=2 --fetch-timeout=300000; then
+  if [ -n "$active_proxy" ]; then
+    echo "当前检测到代理: ${active_proxy}"
+  else
+    echo "当前未检测到可用代理监听，按直连方式安装。"
+  fi
+
+  if npm install -g openclaw@latest --no-fund --no-audit --prefer-online --fetch-retries=5 --fetch-timeout=600000; then
     return 0
   fi
 
-  echo "单源直装失败，开始尝试备用 npm 源..."
-  npm_try_with_registries install -g openclaw@latest --no-fund --no-audit --loglevel=error --prefer-online --fetch-retries=2 --fetch-timeout=300000
+  echo "按 kejilion 方式单源直装失败，开始尝试备用 npm 源..."
+  npm_try_with_registries install -g openclaw@latest --no-fund --no-audit --prefer-online --fetch-retries=5 --fetch-timeout=600000
 }
 
 install_evomap_dependencies() {
