@@ -19,6 +19,12 @@ SKPL_NPM_COUNTRY=""
 SKPL_NPM_REGISTRIES=""
 SKPL_PROXY_ENV_SCRIPT="${SKPL_HOME}/proxy-env.sh"
 SKPL_OPENCLAW_LAUNCHER="${SKPL_HOME}/openclaw-gateway-launch.sh"
+SKPL_MEMORY_STATUS_CACHE_FILE="${SKPL_HOME}/memory-status.json"
+SKPL_MEMORY_AGENTS_CACHE_FILE="${SKPL_HOME}/memory-agents.tsv"
+SKPL_MULTIAGENT_AGENTS_CACHE_FILE="${SKPL_HOME}/multiagent-agents.json"
+SKPL_MULTIAGENT_BINDINGS_CACHE_FILE="${SKPL_HOME}/multiagent-bindings.json"
+SKPL_MULTIAGENT_SESSIONS_CACHE_FILE="${SKPL_HOME}/multiagent-sessions.json"
+SKPL_WEBUI_TOKEN_CACHE_FILE="${SKPL_HOME}/webui-token.txt"
 
 gl_bai='\033[0m'
 gl_lv='\033[32m'
@@ -531,7 +537,7 @@ install_openclaw_global() {
   npm config set fetch-retries 5 >/dev/null 2>&1 || true
   npm config set fetch-timeout 600000 >/dev/null 2>&1 || true
 
-  echo "正在按 kejilion 逻辑安装 OpenClaw CLI..."
+  echo "正在安装 OpenClaw CLI..."
   echo "Node 版本: $(node -v 2>/dev/null || echo unknown)"
   echo "npm 版本: $(npm -v 2>/dev/null || echo unknown)"
   echo "当前 npm 源: ${preferred_registry}"
@@ -545,7 +551,7 @@ install_openclaw_global() {
     return 0
   fi
 
-  echo "按 kejilion 方式单源直装失败，开始尝试备用 npm 源..."
+  echo "首选 npm 源安装失败，开始尝试备用 npm 源..."
   npm_try_with_registries install -g openclaw@latest --no-fund --no-audit --prefer-online --fetch-retries=5 --fetch-timeout=600000
 }
 
@@ -732,7 +738,7 @@ ldnmp_Proxy() {
   local conf_file="/home/web/conf.d/${domain}.conf"
 
   if [ ! -d /home/web/conf.d ] || ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
-    echo "未检测到 kejilion/LDNMP 的 Nginx 反向代理环境，无法自动为 ${domain} 配置域名访问。"
+    echo "未检测到可用的 Nginx 反向代理环境，无法自动为 ${domain} 配置域名访问。"
     echo "请手动将 ${domain} 反向代理到 ${target_host}:${target_port}。"
     return 1
   fi
@@ -777,7 +783,7 @@ web_del() {
   [ -z "$remove_domain" ] && return 0
 
   if [ ! -d /home/web/conf.d ] || ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
-    echo "未检测到 kejilion/LDNMP 的 Nginx 反向代理环境，请按你的环境手动删除域名配置：$remove_domain"
+    echo "未检测到可用的 Nginx 反向代理环境，请按你的环境手动删除域名配置：$remove_domain"
     return 1
   fi
 
@@ -940,10 +946,10 @@ EOF
 
 load_openclaw_panel() {
   eval "$(cat <<'OPENCLAW_PANEL_EOF'
-moltbot_menu() {
+openclaw_panel_menu() {
   local app_id="114"
 
-  send_stats "clawdbot/moltbot管理"
+  send_stats "OpenClaw 面板管理"
 
   check_openclaw_update() {
     local now
@@ -1010,45 +1016,41 @@ moltbot_menu() {
 
 
   show_menu() {
-
-
     clear
 
     local install_status=$(get_install_status)
     local running_status=$(get_running_status)
     local update_message=$(get_cached_openclaw_update_message)
 
-    echo "======================================="
-    echo -e "🦞 OPENCLAW 管理工具 by KEJILION 🦞"
-    echo -e "💡 终端执行 \033[1;33mk claw\033[0m 快速进入菜单"
-    echo -e "$install_status $running_status $update_message"
-    echo "======================================="
-    echo "1.  安装"
-    echo "2.  启动"
-    echo "3.  停止"
-    echo "--------------------"
-    echo "4.  状态日志查看"
-    echo "5.  换模型"
-    echo "6.  API管理"
-    echo "7.  机器人连接对接"
-    echo "8.  插件管理（安装/删除）"
-    echo "9.  技能管理（安装/删除）"
-    echo "10. 编辑主配置文件"
+    echo "==============================================="
+    echo "OpenClaw 控制台"
+    echo "==============================================="
+    echo -e "状态: $install_status | $running_status"
+    [ -n "$update_message" ] && echo -e "版本: $update_message"
+    echo "-----------------------------------------------"
+    echo "1. 安装 OpenClaw"
+    echo "2. 启动网关"
+    echo "3. 停止网关"
+    echo "4. 查看状态与日志"
+    echo "5. 切换模型"
+    echo "6. API 管理"
+    echo "7. 设备连接"
+    echo "8. 插件管理"
+    echo "9. 技能管理"
+    echo "10. 编辑主配置"
     echo "11. 配置向导"
     echo "12. 健康检测与修复"
-    echo "13. WebUI访问与设置"
-    echo "14. TUI命令行对话窗口"
-    echo "15. 记忆/Memory"
+    echo "13. WebUI 访问设置"
+    echo "14. TUI 对话"
+    echo "15. 记忆管理"
     echo "16. 权限管理"
     echo "17. 多智能体管理"
-    echo "--------------------"
     echo "18. 备份与还原"
-    echo "19. 更新"
-    echo "20. 卸载"
+    echo "19. 更新 OpenClaw"
+    echo "20. 卸载 OpenClaw"
     echo "21. EvoMap 管理"
-    echo "--------------------"
-    echo "0. 返回上一级选单"
-    echo "--------------------"
+    echo "0. 返回上一级"
+    echo "-----------------------------------------------"
     printf "请输入选项并回车: "
   }
 
@@ -1089,27 +1091,7 @@ stats_enabled = (sys.argv[2].lower() == "true") if len(sys.argv) > 2 else True
 script_version = sys.argv[3] if len(sys.argv) > 3 else ""
 
 def send_stat(action):
-    if not stats_enabled:
-        return
-    payload = {
-        "action": action,
-        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-        "country": "",
-        "os_info": platform.platform(),
-        "cpu_arch": platform.machine(),
-        "version": script_version,
-    }
-    try:
-        req = urllib.request.Request(
-            "https://api.kejilion.pro/api/log",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=3):
-            pass
-    except Exception:
-        pass
+    return
 
 with open(path, 'r', encoding='utf-8') as f:
     obj = json.load(f)
@@ -1420,7 +1402,7 @@ PY
 
 
 
-  install_moltbot() {
+  install_openclaw_panel() {
     echo "开始安装 OpenClaw..."
     send_stats "开始安装 OpenClaw..."
     install git jq
@@ -4131,29 +4113,41 @@ if os.path.isdir(agents_root):
     openclaw config set "$key" "$@" >/dev/null 2>&1
   }
 
-  openclaw_memory_config_unset() {
-    local key="$1"
-    openclaw config unset "$key" >/dev/null 2>&1
-  }
+openclaw_memory_config_unset() {
+  local key="$1"
+  openclaw config unset "$key" >/dev/null 2>&1
+}
 
-  openclaw_memory_cleanup_legacy_keys() {
-    openclaw_memory_config_unset "memory.local"
-  }
+openclaw_memory_cache_fresh() {
+  local cache_file="$1"
+  local ttl="${2:-10}"
+  [ -f "$cache_file" ] || return 1
+  python3 - "$cache_file" "$ttl" <<'PY'
+import os, sys, time
+path = sys.argv[1]
+ttl = int(sys.argv[2])
+try:
+    age = time.time() - os.path.getmtime(path)
+except OSError:
+    raise SystemExit(1)
+raise SystemExit(0 if age <= ttl else 1)
+PY
+}
 
-  openclaw_memory_list_agents() {
-    if command -v openclaw >/dev/null 2>&1; then
-      local agents_json
-      agents_json=$(openclaw agents list --json 2>/dev/null || true)
-      if [ -n "$agents_json" ]; then
-        python3 - "$agents_json" <<'PY'
+openclaw_memory_refresh_agents_cache() {
+  local agents_json config_path
+  if command -v openclaw >/dev/null 2>&1; then
+    agents_json=$(timeout 6 openclaw agents list --json 2>/dev/null || true)
+    if [ -n "$agents_json" ]; then
+      python3 - "$agents_json" "$SKPL_MEMORY_AGENTS_CACHE_FILE" <<'PY'
 import json, os, sys
-raw = sys.argv[1]
+raw, path = sys.argv[1:3]
 try:
     data = json.loads(raw)
 except Exception:
-    data = None
+    raise SystemExit(1)
 seen = set()
-results = []
+rows = []
 if isinstance(data, list):
     for item in data:
         if not isinstance(item, dict):
@@ -4161,23 +4155,23 @@ if isinstance(data, list):
         aid = item.get('id')
         if not aid or aid in seen:
             continue
-        ws = item.get('workspace') or ("~/.openclaw/workspace" if aid == 'main' else f"~/.openclaw/workspace-{aid}")
-        results.append((aid, os.path.expanduser(ws)))
+        ws = item.get('workspace') or ('~/.openclaw/workspace' if aid == 'main' else f'~/.openclaw/workspace-{aid}')
+        rows.append(f"{aid}\t{os.path.expanduser(ws)}")
         seen.add(aid)
-if results:
-    for aid, ws in results:
-        print(f"{aid}\t{ws}")
+if rows:
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(rows) + '\n')
     raise SystemExit(0)
 raise SystemExit(1)
 PY
-        [ $? -eq 0 ] && return 0
-      fi
+      [ $? -eq 0 ] && return 0
     fi
-    local config_path
-    config_path=$(openclaw_memory_config_file)
-    python3 - "$config_path" <<'PY'
+  fi
+
+  config_path=$(openclaw_memory_config_file)
+  python3 - "$config_path" "$SKPL_MEMORY_AGENTS_CACHE_FILE" <<'PY'
 import json, os, sys
-config_path = sys.argv[1]
+config_path, out_path = sys.argv[1:3]
 results = [("main", os.path.expanduser("~/.openclaw/workspace"))]
 seen = {"main"}
 try:
@@ -4199,10 +4193,46 @@ try:
                 seen.add(aid)
 except Exception:
     pass
-for aid, ws in results:
-    print(f"{aid}\t{ws}")
+with open(out_path, 'w', encoding='utf-8') as f:
+    for aid, ws in results:
+        f.write(f"{aid}\t{ws}\n")
 PY
-  }
+}
+
+openclaw_memory_refresh_status_cache() {
+  local json_output
+  json_output=$(timeout 8 openclaw memory status --json 2>/dev/null || true)
+  if [ -z "$json_output" ]; then
+    return 1
+  fi
+  printf '%s' "$json_output" > "$SKPL_MEMORY_STATUS_CACHE_FILE"
+}
+
+openclaw_memory_refresh_runtime_state() {
+  echo "正在刷新记忆状态缓存..."
+  openclaw_memory_refresh_agents_cache >/dev/null 2>&1 || true
+  if openclaw_memory_refresh_status_cache; then
+    echo "✅ 记忆状态已刷新"
+    return 0
+  fi
+  echo "⚠️ 记忆状态刷新失败，将尝试显示缓存或基础信息。"
+  return 1
+}
+
+openclaw_memory_cleanup_legacy_keys() {
+  openclaw_memory_config_unset "memory.local"
+}
+
+openclaw_memory_list_agents() {
+  if ! openclaw_memory_cache_fresh "$SKPL_MEMORY_AGENTS_CACHE_FILE" 30; then
+    openclaw_memory_refresh_agents_cache >/dev/null 2>&1 || true
+  fi
+  if [ -s "$SKPL_MEMORY_AGENTS_CACHE_FILE" ]; then
+    cat "$SKPL_MEMORY_AGENTS_CACHE_FILE"
+    return 0
+  fi
+  printf 'main\t%s\n' "$HOME/.openclaw/workspace"
+}
 
   openclaw_memory_status_value() {
     local key="$1"
@@ -4307,14 +4337,37 @@ EOF
     return 0
   }
 
-  openclaw_memory_render_status() {
-    local json_output
-    json_output=$(openclaw memory status --json 2>/dev/null)
-    if [ -z "$json_output" ]; then
-      echo "获取记忆状态失败（openclaw memory status --json 无输出）"
-      return 1
-    fi
-    python3 - "$json_output" <<'PY'
+openclaw_memory_render_basic_status() {
+  local backend provider model_path model_status workspace
+  backend=$(openclaw_memory_get_backend)
+  provider=$(openclaw_memory_config_get "agents.defaults.memorySearch.provider")
+  model_path=$(openclaw_memory_get_local_model_path)
+  model_status=$(openclaw_memory_local_model_status "$model_path")
+  workspace="$HOME/.openclaw/workspace"
+  echo "当前显示为基础配置视图（尚未刷新运行时状态）"
+  echo "Agent: main"
+  echo "  底层方案: ${backend:--}"
+  echo "  搜索提供方: ${provider:--}"
+  case "$model_status" in
+    ok) echo "  本地模型: 已就绪" ;;
+    hf) echo "  本地模型: 来自远端下载源" ;;
+    *) echo "  本地模型: 未就绪" ;;
+  esac
+  echo "  工作区: $workspace"
+}
+
+openclaw_memory_render_status() {
+  local json_output cache_note=""
+  if ! openclaw_memory_cache_fresh "$SKPL_MEMORY_STATUS_CACHE_FILE" 60 && [ -s "$SKPL_MEMORY_STATUS_CACHE_FILE" ]; then
+    cache_note="当前显示缓存状态，可手动刷新获取最新结果。"
+  fi
+  json_output=$(cat "$SKPL_MEMORY_STATUS_CACHE_FILE" 2>/dev/null || true)
+  if [ -z "$json_output" ]; then
+    openclaw_memory_render_basic_status
+    return 0
+  fi
+  [ -n "$cache_note" ] && echo "$cache_note"
+  python3 - "$json_output" <<'PY'
 import json, sys
 raw = sys.argv[1]
 try:
@@ -4507,7 +4560,6 @@ PY
       else
         OPENCLAW_MEMORY_HF_BASE="https://hf-mirror.com"
       fi
-      OPENCLAW_MEMORY_GH_PROXY="https://gh.kejilion.pro/"
     else
       if [ "$hf_ok" = "ok" ]; then
         OPENCLAW_MEMORY_HF_BASE="https://huggingface.co"
@@ -4516,7 +4568,6 @@ PY
       else
         OPENCLAW_MEMORY_HF_BASE="https://huggingface.co"
       fi
-      OPENCLAW_MEMORY_GH_PROXY="https://"
     fi
   }
 
@@ -5154,29 +5205,34 @@ EOF
   }
 
   openclaw_memory_menu() {
-    openclaw_memory_prepare_workspace_all >/dev/null 2>&1 || true
     if [ "$(openclaw_memory_config_get "memory.qmd.includeDefaultMemory")" = "false" ]; then
       openclaw_memory_config_set "memory.qmd.includeDefaultMemory" true >/dev/null 2>&1 || true
     fi
     send_stats "OpenClaw记忆管理"
     while true; do
       clear
-      echo "======================================="
+      echo "==============================================="
       echo "OpenClaw 记忆管理"
-      echo "======================================="
+      echo "==============================================="
       openclaw_memory_render_status
-      echo "1. 更新记忆索引"
-      echo "2. 查看记忆文件"
-      echo "3. 索引修复（Indexed 异常）"
-      echo "4. 记忆方案（QMD/Local/Auto）"
-      echo "5. 搜索测试（验证索引是否工作）"
-      echo "6. 深度状态探测（检查嵌入模型）"
-      echo "7. 查看后台预热日志"
+      echo "-----------------------------------------------"
+      echo "1. 刷新记忆状态"
+      echo "2. 更新记忆索引"
+      echo "3. 查看记忆文件"
+      echo "4. 索引修复（Indexed 异常）"
+      echo "5. 记忆方案（QMD/Local/Auto）"
+      echo "6. 搜索测试（验证索引是否工作）"
+      echo "7. 深度状态探测（检查嵌入模型）"
+      echo "8. 查看后台预热日志"
       echo "0. 返回上一级"
-      echo "---------------------------------------"
+      echo "-----------------------------------------------"
       read -e -p "请输入你的选择: " memory_choice
       case "$memory_choice" in
         1)
+          openclaw_memory_refresh_runtime_state
+          break_end
+          ;;
+        2)
           echo "即将更新记忆索引。"
           read -e -p "第一次确认：输入 yes 继续: " confirm_step1
           if [ "$confirm_step1" != "yes" ]; then
@@ -5184,49 +5240,50 @@ EOF
             break_end
             continue
           fi
-        openclaw_memory_prepare_workspace_all
-        read -e -p "二次确认：输入 force 使用全量（留空为增量）: " confirm_step2
-        if [ "$confirm_step2" = "force" ]; then
-          echo "⚠️ 全量重建更彻底，但耗时更长。"
-          echo "推荐：输入 rebuild 进行安全重建（先备份索引库）。"
-          read -e -p "第三次确认：输入 rebuild 执行安全重建；直接回车继续普通 force: " confirm_step3
-          if [ "$confirm_step3" = "rebuild" ]; then
-            openclaw_memory_rebuild_index_all
-          else
-            local fl_agent_lines fl_agent_id fl_workspace
-            fl_agent_lines=$(openclaw_memory_list_agents)
-            while IFS=$'\t' read -r fl_agent_id fl_workspace; do
-              [ -z "$fl_agent_id" ] && continue
-              openclaw memory index --agent "$fl_agent_id" --force
-            done <<EOF
+          openclaw_memory_prepare_workspace_all
+          read -e -p "二次确认：输入 force 使用全量（留空为增量）: " confirm_step2
+          if [ "$confirm_step2" = "force" ]; then
+            echo "⚠️ 全量重建更彻底，但耗时更长。"
+            echo "推荐：输入 rebuild 进行安全重建（先备份索引库）。"
+            read -e -p "第三次确认：输入 rebuild 执行安全重建；直接回车继续普通 force: " confirm_step3
+            if [ "$confirm_step3" = "rebuild" ]; then
+              openclaw_memory_rebuild_index_all
+            else
+              local fl_agent_lines fl_agent_id fl_workspace
+              fl_agent_lines=$(openclaw_memory_list_agents)
+              while IFS=$'\t' read -r fl_agent_id fl_workspace; do
+                [ -z "$fl_agent_id" ] && continue
+                openclaw memory index --agent "$fl_agent_id" --force
+              done <<EOF
 $fl_agent_lines
 EOF
-            openclaw gateway restart
-            echo "✅ 已对所有智能体执行 force 重建并自动重启网关"
+              openclaw gateway restart
+              echo "✅ 已对所有智能体执行 force 重建并自动重启网关"
+            fi
+          else
+            openclaw memory index
           fi
-        else
-          openclaw memory index
-        fi
-        break_end
-          ;;
-        2)
-          openclaw_memory_files_menu
+          openclaw_memory_refresh_status_cache >/dev/null 2>&1 || true
+          break_end
           ;;
         3)
-          openclaw_memory_fix_index
+          openclaw_memory_files_menu
           ;;
         4)
-          openclaw_memory_scheme_menu
+          openclaw_memory_fix_index
           ;;
         5)
+          openclaw_memory_scheme_menu
+          ;;
+        6)
           openclaw_memory_search_test
           break_end
           ;;
-        6)
+        7)
           openclaw_memory_deep_status
           break_end
           ;;
-        7)
+        8)
           openclaw_memory_show_bootstrap_log
           break_end
           ;;
@@ -5819,20 +5876,60 @@ except Exception:
     return 0
   }
 
+  openclaw_multiagent_write_cache() {
+    local cache_file="$1"
+    local payload="$2"
+    printf '%s' "$payload" > "$cache_file"
+  }
+
+  openclaw_multiagent_refresh_runtime_cache() {
+    local result rc=0
+    echo "正在刷新多智能体运行时缓存..."
+
+    if openclaw_has_command openclaw; then
+      result=$(timeout 8 openclaw agents list --json 2>/dev/null || true)
+      if [ -n "$result" ] && python3 -c "import json,sys; json.loads(sys.argv[1])" "$result" 2>/dev/null; then
+        openclaw_multiagent_write_cache "$SKPL_MULTIAGENT_AGENTS_CACHE_FILE" "$result"
+      else
+        rc=1
+      fi
+
+      result=$(timeout 8 openclaw agents bindings --json 2>/dev/null || true)
+      if [ -n "$result" ] && python3 -c "import json,sys; json.loads(sys.argv[1])" "$result" 2>/dev/null; then
+        openclaw_multiagent_write_cache "$SKPL_MULTIAGENT_BINDINGS_CACHE_FILE" "$result"
+      else
+        rc=1
+      fi
+
+      result=$(timeout 8 bash -lc "openclaw sessions --json 2>/dev/null | grep -v '^\\['" || true)
+      if [ -n "$result" ] && python3 -c "import json,sys; json.loads(sys.argv[1])" "$result" 2>/dev/null; then
+        openclaw_multiagent_write_cache "$SKPL_MULTIAGENT_SESSIONS_CACHE_FILE" "$result"
+      else
+        rc=1
+      fi
+    else
+      rc=1
+    fi
+
+    if [ $rc -eq 0 ]; then
+      echo "✅ 多智能体缓存已刷新"
+    else
+      echo "⚠️ 运行时缓存刷新未完全成功，当前将继续使用本地配置或旧缓存。"
+    fi
+    return 0
+  }
+
   openclaw_multiagent_agents_json() {
     local result
-    if openclaw_has_command openclaw; then
-      result=$(openclaw agents list --json 2>/dev/null)
-      if [ -n "$result" ] && python3 -c "import json,sys; json.loads(sys.argv[1])" "$result" 2>/dev/null; then
-        echo "$result"
-        return 0
-      fi
+    if [ -s "$SKPL_MULTIAGENT_AGENTS_CACHE_FILE" ] && openclaw_memory_cache_fresh "$SKPL_MULTIAGENT_AGENTS_CACHE_FILE" 60; then
+      cat "$SKPL_MULTIAGENT_AGENTS_CACHE_FILE"
+      return 0
     fi
     # 回退：从配置文件读取
     local config_file
     config_file=$(openclaw_permission_config_file)
     if [ -s "$config_file" ]; then
-      python3 - "$config_file" <<'PY'
+      result=$(python3 - "$config_file" <<'PY'
 import json,sys,os
 path=sys.argv[1]
 try:
@@ -5845,6 +5942,9 @@ try:
 except Exception:
     print("[]")
 PY
+)
+      openclaw_multiagent_write_cache "$SKPL_MULTIAGENT_AGENTS_CACHE_FILE" "$result"
+      echo "$result"
       return 0
     fi
     echo '[]'
@@ -5852,18 +5952,15 @@ PY
 
   openclaw_multiagent_bindings_json() {
     local result
-    if openclaw_has_command openclaw; then
-      result=$(openclaw agents bindings --json 2>/dev/null)
-      if [ -n "$result" ] && python3 -c "import json,sys; json.loads(sys.argv[1])" "$result" 2>/dev/null; then
-        echo "$result"
-        return 0
-      fi
+    if [ -s "$SKPL_MULTIAGENT_BINDINGS_CACHE_FILE" ] && openclaw_memory_cache_fresh "$SKPL_MULTIAGENT_BINDINGS_CACHE_FILE" 60; then
+      cat "$SKPL_MULTIAGENT_BINDINGS_CACHE_FILE"
+      return 0
     fi
     # 回退：从配置文件读取
     local config_file
     config_file=$(openclaw_permission_config_file)
     if [ -s "$config_file" ]; then
-      python3 - "$config_file" <<'PY'
+      result=$(python3 - "$config_file" <<'PY'
 import json,sys
 path=sys.argv[1]
 try:
@@ -5881,6 +5978,9 @@ try:
 except Exception:
     print("[]")
 PY
+)
+      openclaw_multiagent_write_cache "$SKPL_MULTIAGENT_BINDINGS_CACHE_FILE" "$result"
+      echo "$result"
       return 0
     fi
     echo '[]'
@@ -5888,15 +5988,12 @@ PY
 
   openclaw_multiagent_sessions_json() {
     local result
-    if openclaw_has_command openclaw; then
-      result=$(openclaw sessions --json 2>/dev/null | grep -v '^\[')
-      if [ -n "$result" ] && python3 -c "import json,sys; json.loads(sys.argv[1])" "$result" 2>/dev/null; then
-        echo "$result"
-        return 0
-      fi
+    if [ -s "$SKPL_MULTIAGENT_SESSIONS_CACHE_FILE" ] && openclaw_memory_cache_fresh "$SKPL_MULTIAGENT_SESSIONS_CACHE_FILE" 60; then
+      cat "$SKPL_MULTIAGENT_SESSIONS_CACHE_FILE"
+      return 0
     fi
     # 回退：从文件系统读取
-    python3 <<'PY'
+    result=$(python3 <<'PY'
 import json,os
 base=os.path.expanduser("~/.openclaw/agents")
 sessions=[]
@@ -5926,14 +6023,21 @@ for agent_id in agent_dirs:
         sessions.append({"agentId": agent_id, "key": key, "model": model})
 print(json.dumps({"path":"(filesystem)","count":len(sessions),"sessions":sessions}, ensure_ascii=False))
 PY
+)
+    openclaw_multiagent_write_cache "$SKPL_MULTIAGENT_SESSIONS_CACHE_FILE" "$result"
+    echo "$result"
   }
 
   openclaw_multiagent_render_status() {
-    local config_file default_agent
+    local config_file default_agent cache_note=""
     config_file=$(openclaw_multiagent_config_file)
     default_agent=$(openclaw_multiagent_default_agent)
+    if [ -s "$SKPL_MULTIAGENT_AGENTS_CACHE_FILE" ] && ! openclaw_memory_cache_fresh "$SKPL_MULTIAGENT_AGENTS_CACHE_FILE" 60; then
+      cache_note="当前显示缓存或本地配置视图，可手动刷新运行时信息。"
+    fi
     echo "配置文件: ${config_file:-$(openclaw_permission_config_file)}"
     echo "默认智能体: $default_agent"
+    [ -n "$cache_note" ] && echo "$cache_note"
     python3 -c '
 import json,sys
 agents=json.loads(sys.argv[1] or "[]")
@@ -5993,6 +6097,7 @@ for idx,item in enumerate(agents,1):
       [ -z "$theme" ] && theme="助手"
       echo "正在配置智能体身份..."
       openclaw agents set-identity --agent "$agent_id" --name "$name" --theme "$theme"
+      openclaw_multiagent_refresh_runtime_cache >/dev/null 2>&1 || true
     else
       echo "❌ 智能体创建失败"
       return 1
@@ -6010,6 +6115,7 @@ for idx,item in enumerate(agents,1):
     [ "$confirm" = "DELETE" ] || { echo "已取消"; return 1; }
     if openclaw agents delete "$agent_id"; then
       echo "✅ 智能体删除成功: $agent_id"
+      openclaw_multiagent_refresh_runtime_cache >/dev/null 2>&1 || true
     else
       echo "❌ 智能体删除失败"
       return 1
@@ -6042,6 +6148,7 @@ for idx,item in enumerate(bindings,1):
     [ "$confirm" = "yes" ] || { echo "已取消"; return 1; }
     if openclaw agents bind --agent "$agent_id" --bind "$bind_value"; then
       echo "✅ 路由绑定添加成功"
+      openclaw_multiagent_refresh_runtime_cache >/dev/null 2>&1 || true
     else
       echo "❌ 路由绑定添加失败"
       return 1
@@ -6060,6 +6167,7 @@ for idx,item in enumerate(bindings,1):
     [ "$confirm" = "yes" ] || { echo "已取消"; return 1; }
     if openclaw agents unbind --agent "$agent_id" --bind "$bind_value"; then
       echo "✅ 路由绑定移除成功"
+      openclaw_multiagent_refresh_runtime_cache >/dev/null 2>&1 || true
     else
       echo "❌ 路由绑定移除失败"
       return 1
@@ -6150,6 +6258,7 @@ print("✅ 多智能体健康检查完成")
       cmd="openclaw agents set-identity --agent $agent_id --from-identity"
     fi
     eval "$cmd"
+    openclaw_multiagent_refresh_runtime_cache >/dev/null 2>&1 || true
   }
 
   openclaw_multiagent_cleanup_sessions() {
@@ -6169,28 +6278,30 @@ print("✅ 多智能体健康检查完成")
       echo "======================================="
       openclaw_multiagent_render_status
       echo "---------------------------------------"
-      echo "1. 新增智能体"
-      echo "2. 删除智能体"
-      echo "3. 查看路由绑定"
-      echo "4. 新增路由绑定"
-      echo "5. 移除路由绑定"
-      echo "6. 查看会话概况"
-      echo "7. 运行多智能体健康检查"
-      echo "8. 修改智能体身份（名称/Emoji）"
-      echo "9. 清理过期会话"
+      echo "1. 刷新运行时状态"
+      echo "2. 新增智能体"
+      echo "3. 删除智能体"
+      echo "4. 查看路由绑定"
+      echo "5. 新增路由绑定"
+      echo "6. 移除路由绑定"
+      echo "7. 查看会话概况"
+      echo "8. 运行多智能体健康检查"
+      echo "9. 修改智能体身份（名称/Emoji）"
+      echo "10. 清理过期会话"
       echo "0. 返回上一级"
       echo "---------------------------------------"
       read -e -p "请输入你的选择: " multi_choice
       case "$multi_choice" in
-        1) openclaw_multiagent_add_agent; break_end ;;
-        2) openclaw_multiagent_delete_agent; break_end ;;
-        3) openclaw_multiagent_list_bindings; break_end ;;
-        4) openclaw_multiagent_add_binding; break_end ;;
-        5) openclaw_multiagent_remove_binding; break_end ;;
-        6) openclaw_multiagent_show_sessions; break_end ;;
-        7) openclaw_multiagent_health_check; break_end ;;
-        8) openclaw_multiagent_set_identity; break_end ;;
-        9) openclaw_multiagent_cleanup_sessions; break_end ;;
+        1) openclaw_multiagent_refresh_runtime_cache; break_end ;;
+        2) openclaw_multiagent_add_agent; break_end ;;
+        3) openclaw_multiagent_delete_agent; break_end ;;
+        4) openclaw_multiagent_list_bindings; break_end ;;
+        5) openclaw_multiagent_add_binding; break_end ;;
+        6) openclaw_multiagent_remove_binding; break_end ;;
+        7) openclaw_multiagent_show_sessions; break_end ;;
+        8) openclaw_multiagent_health_check; break_end ;;
+        9) openclaw_multiagent_set_identity; break_end ;;
+        10) openclaw_multiagent_cleanup_sessions; break_end ;;
         0) return 0 ;;
         *) echo "无效的选择，请重试。"; sleep 1 ;;
       esac
@@ -6260,7 +6371,7 @@ openclaw_backup_restore_menu() {
     done
   }
 
-  update_moltbot() {
+  update_openclaw_panel() {
     echo "更新 OpenClaw..."
     send_stats "更新 OpenClaw..."
     install_node_and_tools
@@ -6275,7 +6386,7 @@ openclaw_backup_restore_menu() {
   }
 
 
-  uninstall_moltbot() {
+  uninstall_openclaw_panel() {
     echo "卸载 OpenClaw..."
     send_stats "卸载 OpenClaw..."
     openclaw uninstall
@@ -6320,6 +6431,27 @@ openclaw_backup_restore_menu() {
     fi
   }
 
+  openclaw_webui_refresh_token_cache() {
+    local token
+    token=$(timeout 8 openclaw dashboard 2>/dev/null \
+      | sed -n 's/.*:18789\/#token=\([a-f0-9]\+\).*/\1/p' \
+      | head -n 1)
+    if [ -n "$token" ]; then
+      printf '%s' "$token" > "$SKPL_WEBUI_TOKEN_CACHE_FILE"
+      echo "$token"
+      return 0
+    fi
+    return 1
+  }
+
+  openclaw_webui_get_cached_token() {
+    if [ -s "$SKPL_WEBUI_TOKEN_CACHE_FILE" ]; then
+      cat "$SKPL_WEBUI_TOKEN_CACHE_FILE"
+      return 0
+    fi
+    return 1
+  }
+
 
 
   openclaw_show_webui_addr() {
@@ -6329,20 +6461,25 @@ openclaw_backup_restore_menu() {
     echo "OpenClaw WebUI 访问地址"
     local_ip="127.0.0.1"
 
-    token=$(
-      openclaw dashboard 2>/dev/null \
-      | sed -n 's/.*:18789\/#token=\([a-f0-9]\+\).*/\1/p' \
-      | head -n 1
-    )
+    token=$(openclaw_webui_get_cached_token 2>/dev/null || true)
     echo
     echo "本机地址："
-    echo "http://${local_ip}:18789/#token=${token}"
+    if [ -n "$token" ]; then
+      echo "http://${local_ip}:18789/#token=${token}"
+    else
+      echo "http://${local_ip}:18789/"
+      echo "当前未缓存 token，可在菜单中手动刷新。"
+    fi
 
     domains=$(openclaw_find_webui_domain)
     if [ -n "$domains" ]; then
       echo "域名地址："
       echo "$domains" | while read d; do
-        echo "https://${d}/#token=${token}"
+        if [ -n "$token" ]; then
+          echo "https://${d}/#token=${token}"
+        else
+          echo "https://${d}/"
+        fi
       done
     fi
 
@@ -6362,11 +6499,7 @@ openclaw_backup_restore_menu() {
     fi
     proxy_scheme="${SKPL_LAST_PROXY_SCHEME:-http}"
 
-    token=$(
-      openclaw dashboard 2>/dev/null \
-      | sed -n 's/.*:18789\/#token=\([a-f0-9]\+\).*/\1/p' \
-      | head -n 1
-    )
+    token=$(openclaw_webui_refresh_token_cache 2>/dev/null || openclaw_webui_get_cached_token 2>/dev/null || true)
 
     clear
     echo "访问地址:"
@@ -6414,19 +6547,29 @@ openclaw_backup_restore_menu() {
       clear
       openclaw_show_webui_addr
       echo
-      echo "1. 添加域名访问"
-      echo "2. 删除域名访问"
+      echo "1. 刷新访问 Token"
+      echo "2. 添加域名访问"
+      echo "3. 删除域名访问"
       echo "0. 退出"
       echo
       read -e -p "请选择: " choice
 
       case "$choice" in
         1)
-          openclaw_domain_webui
+          if openclaw_webui_refresh_token_cache >/dev/null 2>&1; then
+            echo "✅ WebUI Token 已刷新"
+          else
+            echo "⚠️ Token 刷新失败，请确认网关与 dashboard 可用"
+          fi
           echo
           read -p "按回车返回菜单..."
           ;;
         2)
+          openclaw_domain_webui
+          echo
+          read -p "按回车返回菜单..."
+          ;;
+        3)
           openclaw_remove_domain
           read -p "按回车返回菜单..."
           ;;
@@ -6448,7 +6591,7 @@ openclaw_backup_restore_menu() {
     show_menu
     read choice
     case $choice in
-      1) install_moltbot ;;
+      1) install_openclaw_panel ;;
       2) start_bot ;;
       3) stop_bot ;;
       4) view_logs ;;
@@ -6481,8 +6624,8 @@ openclaw_backup_restore_menu() {
       16) openclaw_permission_menu ;;
       17) openclaw_multiagent_menu ;;
       18) openclaw_backup_restore_menu ;;
-      19) update_moltbot ;;
-      20) uninstall_moltbot ;;
+      19) update_openclaw_panel ;;
+      20) uninstall_openclaw_panel ;;
       21) openclaw_evomap_menu ;;
       *) break ;;
     esac
@@ -6745,7 +6888,7 @@ run_full_pipeline_once() {
   step=$(state_get STEP)
   [ -z "$step" ] && step=2
   if [ "$step" -le 2 ]; then
-    echo "[2/4] 按 kejilion 逻辑安装 OpenClaw，并后台预热记忆模型资源..."
+    echo "[2/4] 安装 OpenClaw，并后台预热记忆模型资源..."
     if ! run_step_guard "step2_openclaw" run_openclaw_install_step; then
       print_failure_hint
       return 1
@@ -6827,22 +6970,22 @@ skpl_wslwin_and_update_system() {
 skpl_main_panel() {
   while true; do
     clear
-    echo "======================================="
-    echo "SKPL"
-    echo "======================================="
-    echo "1. OpenClaw 面板"
+    echo "==============================================="
+    echo "SKPL 控制台"
+    echo "==============================================="
+    echo "1. OpenClaw 控制台"
     echo "2. EvoMap 管理"
-    echo "3. 重新执行完整安装流程"
-    echo "4. SKPL 面板更新"
-    echo "5. SKPL 面板卸载"
+    echo "3. 从头重新执行安装流程"
+    echo "4. 更新当前面板脚本"
+    echo "5. 卸载当前面板入口"
     echo "6. 查看最近日志"
-    echo "7. 从中断点继续安装"
-    echo "8. WSL代理同步并更新系统"
+    echo "7. 从断点继续安装"
+    echo "8. WSL 代理同步并更新系统"
     echo "0. 退出"
-    echo "---------------------------------------"
+    echo "-----------------------------------------------"
     read -r -p "请输入你的选择: " skpl_choice
     case "$skpl_choice" in
-      1) moltbot_menu ;;
+      1) openclaw_panel_menu ;;
       2) openclaw_evomap_menu ;;
       3) rerun_full_pipeline_from_start; break_end ;;
       4) skpl_update_panel; break_end ;;
@@ -6875,7 +7018,7 @@ main() {
     openclaw)
       save_self_to_skpl
       load_openclaw_panel
-      moltbot_menu
+      openclaw_panel_menu
       ;;
     evomap)
       save_self_to_skpl
