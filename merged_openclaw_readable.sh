@@ -13,6 +13,8 @@ EVOMAP_BACKUP_DIR="/root/.openclaw/evolver_backups"
 SKPL_STATE_FILE="/root/.skpl/install.state"
 SKPL_LOG_FILE="/root/.skpl/install.log"
 SKPL_APT_UPDATED="0"
+OPENCLAW_UPDATE_CACHE_TS=""
+OPENCLAW_UPDATE_CACHE_MSG=""
 
 gl_bai='\033[0m'
 gl_lv='\033[32m'
@@ -118,8 +120,8 @@ prewarm_openclaw_dependencies() {
 send_stats() { :; }
 
 break_end() {
-  if [ -t 0 ]; then
-    read -r -p "按回车继续..." _tmp
+  if ensure_interactive_terminal "继续确认"; then
+    tty_prompt_line "按回车继续..." _tmp
   fi
 }
 
@@ -156,11 +158,21 @@ install() {
 
 ensure_interactive_terminal() {
   local action_name="$1"
-  if [ -t 0 ]; then
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
     return 0
   fi
   echo "${action_name}需要在界面中手动输入，当前不是交互终端，已停止。"
   return 1
+}
+
+tty_prompt_line() {
+  local prompt="$1"
+  local __resultvar="$2"
+  local __input
+
+  printf '%s' "$prompt" > /dev/tty
+  IFS= read -r __input < /dev/tty
+  printf -v "$__resultvar" '%s' "$__input"
 }
 
 prompt_proxy_port() {
@@ -171,7 +183,7 @@ prompt_proxy_port() {
   while true; do
     echo -e "默认代理端口：10808"
     echo -e "直接回车 = 使用默认端口 | 输入数字 = 使用自定义端口"
-    read -r -p "请输入代理端口号: " custom_port
+    tty_prompt_line "请输入代理端口号: " custom_port
 
     if [ -z "$custom_port" ]; then
       PROXY_PORT="10808"
@@ -200,13 +212,13 @@ prompt_evomap_node_id() {
   fi
 
   while true; do
-    read -r -p "请输入 EvoMap Node ID: " node_id_input
+    tty_prompt_line "请输入 EvoMap Node ID: " node_id_input
     if [ -z "$node_id_input" ]; then
       echo "Node ID 不能为空，必须手动输入或粘贴。"
       continue
     fi
 
-    read -r -p "确认 Node ID 为 [$node_id_input] 吗？(y/N): " confirm
+    tty_prompt_line "确认 Node ID 为 [$node_id_input] 吗？(y/N): " confirm
     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
       printf '%s\n' "$node_id_input"
       return 0
@@ -264,6 +276,78 @@ install_evomap_dependencies() {
   fi
 
   npm "${npm_args[@]}"
+}
+
+openclaw_get_config_path_quick() {
+  if [ -f "${HOME}/.openclaw/openclaw.json" ]; then
+    echo "${HOME}/.openclaw/openclaw.json"
+  else
+    echo "/root/.openclaw/openclaw.json"
+  fi
+}
+
+openclaw_onboard_if_needed() {
+  local config_file onboard_rc
+  config_file="$(openclaw_get_config_path_quick)"
+
+  if [ -s "$config_file" ]; then
+    log_msg "OpenClaw 配置已存在，跳过 onboard"
+    return 0
+  fi
+
+  echo "正在初始化 OpenClaw（最多等待 90 秒，超时将自动走兜底配置）..."
+  set +e
+  timeout 90 openclaw onboard --install-daemon >/dev/null 2>&1
+  onboard_rc=$?
+  set -e
+
+  if [ $onboard_rc -eq 0 ]; then
+    log_msg "OpenClaw onboard 成功"
+    return 0
+  fi
+
+  log_msg "OpenClaw onboard 未成功，返回码: $onboard_rc"
+  echo "OpenClaw 初始化未在限定时间内完成，继续执行后续兜底配置。"
+  return 0
+}
+
+openclaw_memory_prepare() {
+  local model_name model_dir model_path
+  model_name="embeddinggemma-300M-Q8_0.gguf"
+  model_dir="/root/.openclaw/models/embedding"
+  model_path="${model_dir}/${model_name}"
+
+  mkdir -p "${model_dir}" /root/.openclaw/workspace/memory
+  openclaw config set memory.backend builtin >/dev/null 2>&1 || true
+  openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
+  openclaw config set memory.qmd.includeDefaultMemory true --json >/dev/null 2>&1 || true
+  openclaw config set agents.defaults.memorySearch.local.modelPath "${model_path}" >/dev/null 2>&1 || true
+
+  printf '%s\n' "$model_path"
+}
+
+openclaw_memory_finalize() {
+  openclaw memory index --force >/dev/null 2>&1 || true
+  openclaw gateway restart >/dev/null 2>&1 || true
+}
+
+openclaw_memory_bootstrap() {
+  local model_path="$1"
+  local bootstrap_log="/root/.skpl/openclaw-memory-bootstrap.log"
+
+  nohup bash -lc '
+    set -e
+    model_path="$1"
+    model_url="https://hf-mirror.com/ggml-org/embeddinggemma-300M-GGUF/resolve/main/$(basename "$model_path")"
+    mkdir -p "$(dirname "$model_path")" /root/.openclaw/workspace/memory
+    if [ ! -f "$model_path" ]; then
+      curl -L --retry 3 --connect-timeout 10 --max-time 900 -C - -o "$model_path" "$model_url" || true
+    fi
+    openclaw memory index --force >/dev/null 2>&1 || true
+    openclaw gateway restart >/dev/null 2>&1 || true
+  ' _ "$model_path" >"$bootstrap_log" 2>&1 &
+  disown 2>/dev/null || true
+  echo "$bootstrap_log"
 }
 
 add_app_id() { :; }
@@ -425,8 +509,15 @@ moltbot_menu() {
   send_stats "clawdbot/moltbot管理"
 
   check_openclaw_update() {
+    local now
     if ! command -v npm >/dev/null 2>&1; then
       return 1
+    fi
+
+    now=$(date +%s)
+    if [ -n "$OPENCLAW_UPDATE_CACHE_TS" ] && [ $((now - OPENCLAW_UPDATE_CACHE_TS)) -lt 600 ]; then
+      echo "$OPENCLAW_UPDATE_CACHE_MSG"
+      return 0
     fi
 
     # 加上 --no-update-notifier，并确保错误重定向位置正确
@@ -443,10 +534,13 @@ moltbot_menu() {
     fi
 
     if [ "$local_version" != "$remote_version" ]; then
-      echo "${gl_huang}检测到新版本:$remote_version${gl_bai}"
+      OPENCLAW_UPDATE_CACHE_MSG="${gl_huang}检测到新版本:$remote_version${gl_bai}"
     else
-      echo "${gl_lv}当前版本已是最新:$local_version${gl_bai}"
+      OPENCLAW_UPDATE_CACHE_MSG="${gl_lv}当前版本已是最新:$local_version${gl_bai}"
     fi
+
+    OPENCLAW_UPDATE_CACHE_TS="$now"
+    echo "$OPENCLAW_UPDATE_CACHE_MSG"
   }
 
 
@@ -512,8 +606,8 @@ moltbot_menu() {
 
 
   start_gateway() {
-    openclaw gateway stop
-    openclaw gateway start
+    openclaw gateway stop >/dev/null 2>&1 || true
+    openclaw gateway start >/dev/null 2>&1 || true
     sleep 3
   }
 
@@ -883,8 +977,9 @@ PY
 
     install_node_and_tools
 
+    echo "正在安装 OpenClaw CLI..."
     install_openclaw_global
-    openclaw onboard --install-daemon
+    openclaw_onboard_if_needed
     start_gateway
     add_app_id
     break_end
@@ -5708,6 +5803,7 @@ openclaw_backup_restore_menu() {
     echo "更新 OpenClaw..."
     send_stats "更新 OpenClaw..."
     install_node_and_tools
+    echo "正在更新 OpenClaw CLI..."
     install_openclaw_global
     crontab -l 2>/dev/null | grep -v "s gateway" | crontab -
     start_gateway
@@ -5894,7 +5990,7 @@ openclaw_backup_restore_menu() {
       9) install_skill ;;
       10) nano_openclaw_json ;;
       11) send_stats "初始化配置向导"
-        openclaw onboard --install-daemon
+        openclaw_onboard_if_needed
         break_end
         ;;
       12) send_stats "健康检测与修复"
@@ -5930,26 +6026,17 @@ OPENCLAW_PANEL_EOF
 }
 
 openclaw_enable_local_memory_auto() {
-  local model_name model_dir model_path model_url
-  model_name="embeddinggemma-300M-Q8_0.gguf"
-  model_dir="/root/.openclaw/models/embedding"
-  model_path="${model_dir}/${model_name}"
-  model_url="https://hf-mirror.com/ggml-org/embeddinggemma-300M-GGUF/resolve/main/${model_name}"
+  local model_path bootstrap_log
+  model_path="$(openclaw_memory_prepare)"
 
-  mkdir -p "${model_dir}"
-  openclaw config set memory.backend builtin >/dev/null 2>&1 || true
-  openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
-  openclaw config set memory.qmd.includeDefaultMemory true --json >/dev/null 2>&1 || true
-  openclaw config set agents.defaults.memorySearch.local.modelPath "${model_path}" >/dev/null 2>&1 || true
-
-  if [ ! -f "${model_path}" ]; then
-    echo "下载 Local 记忆模型（首次仅执行一次）..."
-    curl -L --retry 3 --connect-timeout 10 -o "${model_path}" "${model_url}" || true
+  if [ -f "${model_path}" ]; then
+    openclaw_memory_finalize
+    return 0
   fi
 
-  mkdir -p /root/.openclaw/workspace/memory
-  openclaw memory index --force >/dev/null 2>&1 || true
-  openclaw gateway restart >/dev/null 2>&1 || true
+  bootstrap_log="$(openclaw_memory_bootstrap "$model_path")"
+  echo "Local 记忆模型将在后台下载并建立索引，不阻塞安装流程。"
+  echo "后台日志: ${bootstrap_log}"
 }
 
 run_openclaw_install_step() {
@@ -5959,7 +6046,6 @@ run_openclaw_install_step() {
   else
     openclaw gateway status >/dev/null 2>&1 || true
   fi
-  openclaw_enable_local_memory_auto
 }
 
 run_openclaw2_network_optimization() {
