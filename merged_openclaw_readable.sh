@@ -315,6 +315,8 @@ run_wslwin_proxy_sync() {
   while true; do
     if [ -t 0 ]; then
       read -r -p "代理端口: " CUSTOM_PORT
+    elif [ -r /dev/tty ]; then
+      read -r -p "代理端口: " CUSTOM_PORT </dev/tty
     else
       CUSTOM_PORT="${SKPL_PROXY_PORT_INPUT:-}"
       if [ -z "$CUSTOM_PORT" ]; then
@@ -6263,6 +6265,13 @@ skpl_main_panel() {
 }
 
 main() {
+  if [ "$(readlink -f "$0" 2>/dev/null)" = "/root/.skpl/merged_openclaw_readable.sh" ] && [ -f "/workspace/merged_openclaw_readable.sh" ]; then
+    if ! cmp -s "/root/.skpl/merged_openclaw_readable.sh" "/workspace/merged_openclaw_readable.sh"; then
+      echo "检测到 /workspace 存在更新版脚本，自动切换到最新版本执行。"
+      exec bash /workspace/merged_openclaw_readable.sh "$@"
+    fi
+  fi
+
   ensure_root "$@"
   init_skpl_runtime
   save_self_to_skpl
