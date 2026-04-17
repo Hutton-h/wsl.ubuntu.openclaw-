@@ -137,8 +137,8 @@ main() {
     info "即将启动安装程序..."
     echo ""
 
-    # 执行下载好的脚本
-    bash "$SAVE_FILE"
+    # ✅ 修复交互：重定向标准输入到终端
+    bash "$SAVE_FILE" </dev/tty
 }
 
 # 执行
