@@ -6325,87 +6325,39 @@ install_node_and_tools_from_openclaw_logic() {
     fi
   fi
 
-  if command -v dnf >/dev/null 2>&1; then
-    local -a dnf_pkgs=(cmake libatomic git jq python3)
-    if [ "$need_node_install" = "1" ]; then
-      curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
-      dnf update -y
-      dnf group install -y "Development Tools" "Development Libraries"
-      dnf_pkgs+=(nodejs)
-    fi
-    dnf install -y "${dnf_pkgs[@]}"
-  elif command -v apt >/dev/null 2>&1; then
-    local -a apt_pkgs=()
-    local -a core_tools=(curl git jq python3)
-    local tool
-
-    for tool in "${core_tools[@]}"; do
-      if ! command -v "$tool" >/dev/null 2>&1; then
-        apt_pkgs+=("$tool")
-      fi
-    done
-
-    if ! command -v gpg >/dev/null 2>&1; then
-      apt_pkgs+=(gnupg)
-    fi
-
-    if [ "$need_node_install" = "1" ]; then
-      apt_pkgs+=(build-essential libatomic1 ca-certificates)
-    fi
-
-    if [ "${#apt_pkgs[@]}" -gt 0 ]; then
-      apt_update_safe
-      apt_install_safe "${apt_pkgs[@]}"
-    else
-      echo "基础依赖已满足，跳过 apt 依赖安装。"
-    fi
-
-    if [ "$need_node_install" = "1" ]; then
-      if curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; then
+  if [ "$need_node_install" = "1" ]; then
+    if ! install_node22_from_binary; then
+      echo "Node.js 二进制安装失败，尝试通过包管理器兜底。"
+      if command -v apt >/dev/null 2>&1; then
         if apt_update_safe; then
-          apt_install_safe nodejs
+          apt_install_safe ca-certificates curl gnupg build-essential libatomic1 || true
+          if curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; then
+            apt_update_safe || true
+            apt_install_safe nodejs || true
+          fi
         fi
-      fi
-
-      if ! command -v node >/dev/null 2>&1; then
-        local node_version="v22.15.1"
-        local arch=""
-        local node_arch=""
-        local node_dir=""
-        local node_tar=""
-        local node_tmp="/tmp/node-${node_version}.tar.xz"
-        local node_url_primary=""
-        local node_url_mirror=""
-
-        arch=$(uname -m)
-        case "$arch" in
-          x86_64) node_arch="x64" ;;
-          aarch64|arm64) node_arch="arm64" ;;
-          *)
-            echo "不支持的 CPU 架构: ${arch}，无法自动安装 Node.js 22"
-            exit 1
-            ;;
-        esac
-
-        node_tar="node-${node_version}-linux-${node_arch}.tar.xz"
-        node_dir="/usr/local/lib/nodejs/node-${node_version}-linux-${node_arch}"
-        node_url_primary="https://nodejs.org/dist/${node_version}/${node_tar}"
-        node_url_mirror="https://npmmirror.com/mirrors/node/${node_version}/${node_tar}"
-
-        mkdir -p /usr/local/lib/nodejs
-        if ! curl --fail --location --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 "$node_url_primary" -o "$node_tmp"; then
-          curl --fail --location --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 "$node_url_mirror" -o "$node_tmp"
-        fi
-
-        tar -xJf "$node_tmp" -C /usr/local/lib/nodejs
-        ln -sfn "${node_dir}/bin/node" /usr/local/bin/node
-        ln -sfn "${node_dir}/bin/npm" /usr/local/bin/npm
-        ln -sfn "${node_dir}/bin/npx" /usr/local/bin/npx
+      elif command -v dnf >/dev/null 2>&1; then
+        curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
+        dnf install -y nodejs || true
       fi
     fi
-  else
-    echo "不支持的系统包管理器，无法自动安装依赖。"
-    exit 1
+  fi
+
+  if command -v apt >/dev/null 2>&1; then
+    local -a optional_pkgs=()
+    command -v git >/dev/null 2>&1 || optional_pkgs+=(git)
+    command -v jq >/dev/null 2>&1 || optional_pkgs+=(jq)
+    command -v python3 >/dev/null 2>&1 || optional_pkgs+=(python3)
+
+    if [ "${#optional_pkgs[@]}" -gt 0 ]; then
+      if apt_update_safe; then
+        apt_install_safe "${optional_pkgs[@]}" || echo "可选依赖安装失败，继续安装主流程。"
+      else
+        echo "apt 当前不可用，跳过可选依赖安装：${optional_pkgs[*]}"
+      fi
+    fi
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y git jq python3 >/dev/null 2>&1 || true
   fi
 
   if ! command -v node >/dev/null 2>&1; then
@@ -6448,6 +6400,59 @@ run_with_retry() {
 
   echo "[错误] ${desc} 连续 ${max_retry} 次失败"
   return 1
+}
+
+fetch_file() {
+  local url="$1"
+  local output="$2"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl --fail --location --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 "$url" -o "$output"
+    return $?
+  fi
+
+  if command -v wget >/dev/null 2>&1; then
+    wget -O "$output" "$url"
+    return $?
+  fi
+
+  return 127
+}
+
+install_node22_from_binary() {
+  local node_version="v22.15.1"
+  local arch=""
+  local node_arch=""
+  local node_dir=""
+  local node_tar=""
+  local node_tmp="/tmp/node-${node_version}.tar.xz"
+  local node_url_primary=""
+  local node_url_mirror=""
+
+  arch=$(uname -m)
+  case "$arch" in
+    x86_64) node_arch="x64" ;;
+    aarch64|arm64) node_arch="arm64" ;;
+    *)
+      echo "不支持的 CPU 架构: ${arch}，无法自动安装 Node.js 22"
+      return 1
+      ;;
+  esac
+
+  node_tar="node-${node_version}-linux-${node_arch}.tar.xz"
+  node_dir="/usr/local/lib/nodejs/node-${node_version}-linux-${node_arch}"
+  node_url_primary="https://nodejs.org/dist/${node_version}/${node_tar}"
+  node_url_mirror="https://npmmirror.com/mirrors/node/${node_version}/${node_tar}"
+
+  mkdir -p /usr/local/lib/nodejs
+  if ! fetch_file "$node_url_primary" "$node_tmp"; then
+    fetch_file "$node_url_mirror" "$node_tmp"
+  fi
+
+  tar -xJf "$node_tmp" -C /usr/local/lib/nodejs
+  ln -sfn "${node_dir}/bin/node" /usr/local/bin/node
+  ln -sfn "${node_dir}/bin/npm" /usr/local/bin/npm
+  ln -sfn "${node_dir}/bin/npx" /usr/local/bin/npx
 }
 
 download_with_heartbeat() {
