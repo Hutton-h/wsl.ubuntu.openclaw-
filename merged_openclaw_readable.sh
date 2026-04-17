@@ -570,29 +570,57 @@ openclaw_get_config_path_quick() {
   fi
 }
 
+install_node_and_tools() {
+  ensure_node_runtime
+}
+
+start_gateway() {
+  openclaw gateway stop >/dev/null 2>&1 || true
+  openclaw gateway start >/dev/null 2>&1 || true
+  if [ "${SKPL_BATCH_MODE:-0}" != "1" ]; then
+    sleep 3
+  fi
+}
+
 openclaw_onboard_if_needed() {
-  local config_file onboard_rc
+  local config_file onboard_rc onboard_log
   config_file="$(openclaw_get_config_path_quick)"
+  onboard_log="/root/.skpl/openclaw-onboard.log"
 
   if [ -s "$config_file" ]; then
     log_msg "OpenClaw 配置已存在，跳过 onboard"
     return 0
   fi
 
-  echo "正在初始化 OpenClaw（最多等待 90 秒，超时将自动走兜底配置）..."
+  echo "正在初始化 OpenClaw（首次执行可能需要 1-3 分钟）..."
+  echo "初始化日志: ${onboard_log}"
+  : > "$onboard_log"
   set +e
-  timeout 90 openclaw onboard --install-daemon >/dev/null 2>&1
+  timeout 180 bash -o pipefail -lc 'openclaw onboard --install-daemon 2>&1 | tee -a "$1"' _ "$onboard_log"
   onboard_rc=$?
   set -e
 
   if [ $onboard_rc -eq 0 ]; then
     log_msg "OpenClaw onboard 成功"
+    echo "OpenClaw 初始化完成。"
     return 0
   fi
 
   log_msg "OpenClaw onboard 未成功，返回码: $onboard_rc"
-  echo "OpenClaw 初始化未在限定时间内完成，继续执行后续兜底配置。"
+  if [ $onboard_rc -eq 124 ]; then
+    echo "OpenClaw 初始化超过 180 秒，继续执行后续兜底配置。"
+  else
+    echo "OpenClaw 初始化返回异常（返回码: $onboard_rc），继续执行后续兜底配置。"
+  fi
   return 0
+}
+
+openclaw_run_onboard_wizard() {
+  local onboard_log="/root/.skpl/openclaw-onboard.log"
+  echo "正在打开 OpenClaw 配置向导..."
+  echo "配置向导日志: ${onboard_log}"
+  : > "$onboard_log"
+  openclaw onboard --install-daemon 2>&1 | tee -a "$onboard_log"
 }
 
 openclaw_memory_prepare() {
@@ -771,6 +799,7 @@ run_wslwin_proxy_sync() {
   }
 
   killall apt apt-get dpkg 2>/dev/null
+  echo "正在清理 apt/dpkg 锁与旧代理配置..."
   sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
   sudo dpkg --configure -a 2>/dev/null
 
@@ -788,12 +817,15 @@ deb-src http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe
 deb-src http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse
 EOF
 
+  echo "正在刷新 apt 软件源缓存，这一步可能需要几十秒..."
   if ! DEBIAN_FRONTEND=noninteractive apt update -y >/dev/null 2>&1; then
     echo "检测到阿里源不可用，自动回退到原始 sources.list"
     if [ -f /etc/apt/sources.list.bak.original ]; then
       sudo cp /etc/apt/sources.list.bak.original /etc/apt/sources.list
     fi
   fi
+
+  echo "软件源准备完成，开始进入代理端口配置。"
 
   echo -e "
 ==================== 配置向导：自定义代理端口 ===================="
@@ -6372,7 +6404,7 @@ openclaw_backup_restore_menu() {
       9) install_skill ;;
       10) nano_openclaw_json ;;
       11) send_stats "初始化配置向导"
-        openclaw_onboard_if_needed
+        openclaw_run_onboard_wizard
         break_end
         ;;
       12) send_stats "健康检测与修复"
