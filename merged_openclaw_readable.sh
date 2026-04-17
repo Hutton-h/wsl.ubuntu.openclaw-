@@ -8,6 +8,7 @@ else
   WORK_ROOT="${SKPL_WORK_ROOT:-${HOME}/.skpl}"
 fi
 STAGE_DIR="${WORK_ROOT}/stage"
+INSTALL_MARKER="${WORK_ROOT}/.install-complete"
 
 log() { printf "[SKPL] %s\n" "$*"; }
 warn() { printf "[SKPL][WARN] %s\n" "$*"; }
@@ -5914,9 +5915,14 @@ choose_proxy_port() {
   echo "==========================================="
   echo "代理端口设置"
   echo "默认端口: 10808"
+  echo "可手动输入新端口"
+  echo "直接回车: 跳过修改并使用默认 10808"
   echo "==========================================="
-  read -r -p "请输入代理端口（直接回车使用默认）: " input_port
-  input_port="${input_port:-10808}"
+  read -r -p "请输入代理端口: " input_port
+  if [ -z "$input_port" ]; then
+    input_port="10808"
+    log "已跳过手动输入，使用默认端口: 10808"
+  fi
   case "$input_port" in
     ''|*[!0-9]*) err "代理端口必须是数字" ;;
   esac
@@ -5975,7 +5981,7 @@ install_openclaw_runtime_stub() {
 
 run_wslwin() {
   log "执行步骤 1/4: wslwin"
-  SKPL_PROXY_PORT="$SKPL_PROXY_PORT" bash "$STAGE_DIR/wslwin.sh"
+  SKPL_PROXY_PORT="${SKPL_PROXY_PORT:-10808}" bash "$STAGE_DIR/wslwin.sh"
 }
 
 run_openclaw() {
@@ -5996,7 +6002,7 @@ run_openclaw() {
 
 run_openclaw2() {
   log "执行步骤 3/4: openclaw2"
-  SKPL_PROXY_PORT="$SKPL_PROXY_PORT" bash "$STAGE_DIR/openclaw2.sh"
+  SKPL_PROXY_PORT="${SKPL_PROXY_PORT:-10808}" bash "$STAGE_DIR/openclaw2.sh"
 }
 
 run_evomap() {
@@ -6005,12 +6011,21 @@ run_evomap() {
 }
 
 run_all() {
+  ensure_proxy_port
   run_wslwin
   run_openclaw
   run_openclaw2
   run_evomap
   install_skpl_command
+  touch "$INSTALL_MARKER"
   log "四段脚本执行完成。"
+}
+
+ensure_proxy_port() {
+  if [ -z "${SKPL_PROXY_PORT:-}" ]; then
+    choose_proxy_port
+    apply_proxy_port_to_stage "$SKPL_PROXY_PORT"
+  fi
 }
 
 evomap_root() { echo "/root/.openclaw/evolver"; }
@@ -6125,7 +6140,7 @@ skpl_menu() {
       5) evomap_memory_manage ;;
       6) panel_update ;;
       7) panel_uninstall ;;
-      8) run_all ;;
+      8) unset SKPL_PROXY_PORT; run_all ;;
       0) break ;;
       *) warn "无效选项" ;;
     esac
@@ -6140,6 +6155,11 @@ main() {
   install_skpl_command
   case "${1:-}" in
     --panel)
+      if [ ! -f "$INSTALL_MARKER" ]; then
+        log "检测到尚未完成四合一安装流程，先执行完整安装。"
+        unset SKPL_PROXY_PORT
+        run_all
+      fi
       skpl_menu
       ;;
     --run-all)
