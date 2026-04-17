@@ -6398,6 +6398,8 @@ npm_install_openclaw_resilient() {
     export npm_config_https_proxy="${https_proxy}"
   fi
 
+  prepare_openclaw_global_dir
+
   for reg in "${registries[@]}"; do
     echo "[执行] 使用 npm 源安装 openclaw: ${reg}"
     timeout 1200 npm install -g openclaw@latest \
@@ -6417,6 +6419,7 @@ npm_install_openclaw_resilient() {
       echo "[提示] npm 安装超时（20 分钟），切换下一个源。"
     else
       echo "[提示] npm 安装失败（退出码: ${rc}），切换下一个源。"
+      prepare_openclaw_global_dir
     fi
   done
 
@@ -6456,7 +6459,7 @@ PY
 }
 
 install_node22_from_binary() {
-  local node_version="v22.15.1"
+  local node_version="v22.19.0"
   local arch=""
   local node_arch=""
   local node_dir=""
@@ -6489,6 +6492,22 @@ install_node22_from_binary() {
   ln -sfn "${node_dir}/bin/node" /usr/local/bin/node
   ln -sfn "${node_dir}/bin/npm" /usr/local/bin/npm
   ln -sfn "${node_dir}/bin/npx" /usr/local/bin/npx
+}
+
+prepare_openclaw_global_dir() {
+  local npm_root=""
+  local openclaw_dir=""
+  local backup_dir=""
+
+  npm_root=$(npm root -g 2>/dev/null || true)
+  [ -n "$npm_root" ] || return 0
+
+  openclaw_dir="${npm_root}/openclaw"
+  if [ -d "$openclaw_dir" ] && ! command -v openclaw >/dev/null 2>&1; then
+    backup_dir="${openclaw_dir}.broken.$(date +%Y%m%d%H%M%S)"
+    mv "$openclaw_dir" "$backup_dir"
+    echo "[提示] 检测到损坏的 openclaw 目录，已迁移到: $backup_dir"
+  fi
 }
 
 download_with_heartbeat() {
@@ -6682,19 +6701,8 @@ show_install_state() {
 }
 
 resume_install_foreground() {
-  echo "开始前台继续安装..."
+  echo "开始继续安装..."
   bash /root/.skpl/merged_openclaw_readable.sh --resume
-}
-
-resume_install_background() {
-  echo "开始后台继续安装..."
-  nohup /bin/bash /root/.skpl/merged_openclaw_readable.sh --resume >/root/.skpl/auto-resume.log 2>&1 &
-  echo "后台已启动，日志: /root/.skpl/auto-resume.log"
-}
-
-resume_install_with_memory() {
-  echo "开始继续安装（启用 Memory）..."
-  SKPL_ENABLE_MEMORY=1 bash /root/.skpl/merged_openclaw_readable.sh --resume
 }
 
 evomap_install() {
@@ -6767,29 +6775,25 @@ while true; do
   echo "SKPL 操作面板"
   echo "======================================="
   echo "1. 查看安装续跑状态"
-  echo "2. 继续安装（前台）"
-  echo "3. 继续安装（后台）"
-  echo "4. 继续安装（启用Memory）"
-  echo "5. OpenClaw 原始面板"
-  echo "6. EvoMap 安装"
-  echo "7. EvoMap 更新"
-  echo "8. EvoMap 卸载"
-  echo "9. EvoMap 备份"
-  echo "10. 卸载 SKPL 控制层"
+  echo "2. 继续安装"
+  echo "3. OpenClaw 原始面板"
+  echo "4. EvoMap 安装"
+  echo "5. EvoMap 更新"
+  echo "6. EvoMap 卸载"
+  echo "7. EvoMap 备份"
+  echo "8. 卸载 SKPL 控制层"
   echo "0. 退出"
   echo "---------------------------------------"
   read -r -p "请选择: " c
   case "$c" in
     1) show_install_state ; read -r -p "按回车返回..." _ ;;
     2) resume_install_foreground ; read -r -p "按回车返回..." _ ;;
-    3) resume_install_background ; read -r -p "按回车返回..." _ ;;
-    4) resume_install_with_memory ; read -r -p "按回车返回..." _ ;;
-    5) openclaw_panel ;;
-    6) evomap_install ; read -r -p "按回车返回..." _ ;;
-    7) evomap_update ; read -r -p "按回车返回..." _ ;;
-    8) evomap_uninstall ; read -r -p "按回车返回..." _ ;;
-    9) evomap_backup ; read -r -p "按回车返回..." _ ;;
-    10) skpl_uninstall ; read -r -p "按回车返回..." _ ;;
+    3) openclaw_panel ;;
+    4) evomap_install ; read -r -p "按回车返回..." _ ;;
+    5) evomap_update ; read -r -p "按回车返回..." _ ;;
+    6) evomap_uninstall ; read -r -p "按回车返回..." _ ;;
+    7) evomap_backup ; read -r -p "按回车返回..." _ ;;
+    8) skpl_uninstall ; read -r -p "按回车返回..." _ ;;
     0) exit 0 ;;
     *) echo "无效选项"; sleep 1 ;;
   esac
