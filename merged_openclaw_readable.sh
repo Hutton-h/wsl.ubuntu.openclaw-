@@ -591,7 +591,14 @@ openclaw_memory_bootstrap() {
   echo "$bootstrap_log"
 }
 
-add_app_id() { :; }
+add_app_id() {
+  local app_id_value="${app_id:-}"
+  [ -z "$app_id_value" ] && return 0
+
+  mkdir -p /home/docker
+  touch /home/docker/appno.txt
+  grep -qxF "$app_id_value" /home/docker/appno.txt || echo "$app_id_value" >> /home/docker/appno.txt
+}
 
 add_yuming() {
   read -r -p "请输入域名（example.com）: " yuming
@@ -601,13 +608,70 @@ ldnmp_Proxy() {
   local domain="$1"
   local target_host="$2"
   local target_port="$3"
-  echo "未检测到原生 ldnmp_Proxy 环境，已跳过自动反向代理配置。"
-  echo "请手动将 $domain 反向代理到 $target_host:$target_port"
+  local conf_file="/home/web/conf.d/${domain}.conf"
+
+  if [ ! -d /home/web/conf.d ] || ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
+    echo "未检测到 kejilion/LDNMP 的 Nginx 反向代理环境，无法自动为 ${domain} 配置域名访问。"
+    echo "请手动将 ${domain} 反向代理到 ${target_host}:${target_port}。"
+    return 1
+  fi
+
+  cat > "$conf_file" <<EOF
+server {
+  listen 80;
+  listen [::]:80;
+  server_name ${domain};
+
+  location / {
+    proxy_pass http://${target_host}:${target_port};
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+  }
+}
+EOF
+
+  docker exec nginx nginx -s reload >/dev/null 2>&1 || {
+    echo "Nginx 重载失败，请检查生成的配置：$conf_file"
+    return 1
+  }
+
+  SKPL_LAST_PROXY_SCHEME="http"
+  echo "已生成域名反向代理配置：${conf_file}"
+  echo "访问地址：http://${domain}"
+  return 0
 }
 
 web_del() {
-  read -r -p "请输入要移除的域名: " _remove_domain
-  echo "请按你的 Nginx/反向代理环境手动删除域名配置：$_remove_domain"
+  local remove_domain="${1:-}"
+
+  if [ -z "$remove_domain" ]; then
+    read -r -p "请输入要移除的域名: " remove_domain
+  fi
+
+  [ -z "$remove_domain" ] && return 0
+
+  if [ ! -d /home/web/conf.d ] || ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
+    echo "未检测到 kejilion/LDNMP 的 Nginx 反向代理环境，请按你的环境手动删除域名配置：$remove_domain"
+    return 1
+  fi
+
+  if [ -f "/home/web/conf.d/${remove_domain}.conf" ]; then
+    rm -f "/home/web/conf.d/${remove_domain}.conf"
+  fi
+  if [ -f "/home/web/certs/${remove_domain}_key.pem" ]; then
+    rm -f "/home/web/certs/${remove_domain}_key.pem"
+  fi
+  if [ -f "/home/web/certs/${remove_domain}_cert.pem" ]; then
+    rm -f "/home/web/certs/${remove_domain}_cert.pem"
+  fi
+
+  docker exec nginx nginx -s reload >/dev/null 2>&1 || true
+  echo "域名配置已删除：$remove_domain"
 }
 
 ensure_root() {
@@ -6090,7 +6154,9 @@ openclaw_backup_restore_menu() {
     rm -rf "$HOME/.openclaw"
     [ "$HOME" != "/root" ] && [ -d /root/.openclaw ] && echo "⚠️ 检测到 root 目录下仍存在 /root/.openclaw，如需清理请手动处理"
     hash -r
-    sed -i "/\b${app_id}\b/d" /home/docker/appno.txt
+    if [ -f /home/docker/appno.txt ]; then
+      sed -i "/\b${app_id}\b/d" /home/docker/appno.txt
+    fi
     echo "卸载完成"
     break_end
   }
@@ -6157,8 +6223,14 @@ openclaw_backup_restore_menu() {
 
   # 添加域名（调用你给的函数）
   openclaw_domain_webui() {
+    local proxy_scheme token config_file new_origin tmp_json
+
     add_yuming
-    ldnmp_Proxy ${yuming} 127.0.0.1 18789
+    if ! ldnmp_Proxy "${yuming}" 127.0.0.1 18789; then
+      echo "域名代理未自动配置，已停止后续设备配对流程。"
+      return 1
+    fi
+    proxy_scheme="${SKPL_LAST_PROXY_SCHEME:-http}"
 
     token=$(
       openclaw dashboard 2>/dev/null \
@@ -6168,14 +6240,14 @@ openclaw_backup_restore_menu() {
 
     clear
     echo "访问地址:"
-    echo "https://${yuming}/#token=$token"
+    echo "${proxy_scheme}://${yuming}/#token=$token"
     echo "先访问URL触发设备ID，然后回车下一步进行配对。"
     read
     echo -e "${gl_kjlan}正在加载设备列表……${gl_bai}"
     # 自动添加域名到 allowedOrigins
     config_file=$(openclaw_get_config_file)
     if [ -f "$config_file" ]; then
-      new_origin="https://${yuming}"
+      new_origin="${proxy_scheme}://${yuming}"
       # 使用 jq 安全修改 JSON，确保结构存在且不重复添加域名
       if command -v jq >/dev/null 2>&1; then
         tmp_json=$(mktemp)
