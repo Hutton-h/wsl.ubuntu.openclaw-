@@ -15,6 +15,8 @@ SKPL_LOG_FILE="/root/.skpl/install.log"
 SKPL_APT_UPDATED="0"
 OPENCLAW_UPDATE_CACHE_TS=""
 OPENCLAW_UPDATE_CACHE_MSG=""
+SKPL_NPM_COUNTRY=""
+SKPL_NPM_REGISTRIES=""
 
 gl_bai='\033[0m'
 gl_lv='\033[32m'
@@ -252,30 +254,100 @@ ensure_node_runtime() {
   fi
 }
 
-install_openclaw_global() {
-  local registry_url="${SKPL_NPM_REGISTRY:-}"
-  local npm_args=(install -g openclaw@latest --no-fund --no-audit --loglevel=error --prefer-online)
-
-  if [ -n "$registry_url" ]; then
-    npm_args+=(--registry "$registry_url")
+detect_npm_country() {
+  if [ -n "$SKPL_NPM_COUNTRY" ]; then
+    echo "$SKPL_NPM_COUNTRY"
+    return 0
   fi
 
-  npm "${npm_args[@]}"
+  SKPL_NPM_COUNTRY="unknown"
+  if command -v curl >/dev/null 2>&1; then
+    SKPL_NPM_COUNTRY=$(curl -s --max-time 2 ipinfo.io/country | tr -d '\r\n' || echo "unknown")
+  fi
+
+  [ -n "$SKPL_NPM_COUNTRY" ] || SKPL_NPM_COUNTRY="unknown"
+  echo "$SKPL_NPM_COUNTRY"
+}
+
+get_npm_registry_candidates() {
+  local country
+
+  if [ -n "$SKPL_NPM_REGISTRIES" ]; then
+    printf '%s\n' "$SKPL_NPM_REGISTRIES"
+    return 0
+  fi
+
+  if [ -n "$SKPL_NPM_REGISTRY" ]; then
+    SKPL_NPM_REGISTRIES="$SKPL_NPM_REGISTRY
+https://registry.npmjs.org"
+    printf '%s\n' "$SKPL_NPM_REGISTRIES"
+    return 0
+  fi
+
+  country=$(detect_npm_country)
+  case "$country" in
+    CN|HK)
+      SKPL_NPM_REGISTRIES="https://registry.npmmirror.com
+https://registry.npmjs.org"
+      ;;
+    *)
+      SKPL_NPM_REGISTRIES="https://registry.npmjs.org
+https://registry.npmmirror.com"
+      ;;
+  esac
+
+  printf '%s\n' "$SKPL_NPM_REGISTRIES"
+}
+
+npm_try_with_registries() {
+  local registry rc=1
+  local -a npm_args=("$@")
+
+  while IFS= read -r registry; do
+    [ -z "$registry" ] && continue
+    log_msg "npm 尝试 registry: $registry | args: ${npm_args[*]}"
+    set +e
+    npm "${npm_args[@]}" --registry "$registry"
+    rc=$?
+    set -e
+    if [ $rc -eq 0 ]; then
+      log_msg "npm 执行成功，registry: $registry"
+      return 0
+    fi
+    echo "npm 源 ${registry} 失败，正在尝试下一个..."
+  done < <(get_npm_registry_candidates)
+
+  return $rc
+}
+
+npm_query_openclaw_latest_version() {
+  local registry remote_version
+
+  while IFS= read -r registry; do
+    [ -z "$registry" ] && continue
+    remote_version=$(npm view openclaw version --no-update-notifier --registry "$registry" 2>/dev/null)
+    if [ -n "$remote_version" ]; then
+      printf '%s\n' "$remote_version"
+      return 0
+    fi
+  done < <(get_npm_registry_candidates)
+
+  return 1
+}
+
+install_openclaw_global() {
+  npm_try_with_registries install -g openclaw@latest --no-fund --no-audit --loglevel=error --prefer-online --fetch-retries=2 --fetch-timeout=300000
 }
 
 install_evomap_dependencies() {
   local npm_args=(install --silent --no-fund --no-audit --prefer-offline)
-  local registry_url="${SKPL_NPM_REGISTRY:-}"
 
   if [ -f package-lock.json ]; then
     npm_args=(ci --silent --no-fund --no-audit --prefer-offline)
   fi
 
-  if [ -n "$registry_url" ]; then
-    npm_args+=(--registry "$registry_url")
-  fi
-
-  npm "${npm_args[@]}"
+  npm_args+=(--fetch-retries=2 --fetch-timeout=300000)
+  npm_try_with_registries "${npm_args[@]}"
 }
 
 openclaw_get_config_path_quick() {
@@ -527,7 +599,7 @@ moltbot_menu() {
       return 1
     fi
 
-    remote_version=$(npm view openclaw version --no-update-notifier 2>/dev/null)
+    remote_version=$(npm_query_openclaw_latest_version)
 
     if [ -z "$remote_version" ]; then
       return 1
