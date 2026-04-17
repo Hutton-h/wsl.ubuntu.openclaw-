@@ -178,17 +178,31 @@ optimize_openclaw_install_path() {
 
 install_openclaw_fast() {
   prewarm_openclaw_dependencies
+  log_msg "step2: 准备快速安装 OpenClaw"
+  echo "正在准备 OpenClaw 安装环境..."
 
   if ! command -v npm >/dev/null 2>&1; then
+    log_msg "step2: npm 不可用"
     return 1
   fi
 
   if ! command -v openclaw >/dev/null 2>&1; then
-    npm install -g openclaw@latest --no-fund --no-audit --prefer-online >/dev/null 2>&1 || return 1
+    echo "正在安装 OpenClaw（可能需要几分钟）..."
+    log_msg "step2: npm install -g openclaw@latest"
+    timeout 900 npm install -g openclaw@latest --no-fund --no-audit --prefer-online >/dev/null 2>&1 \
+      || timeout 900 npm install -g openclaw@2026.4.14 --no-fund --no-audit --prefer-online >/dev/null 2>&1 \
+      || {
+        log_msg "step2: npm 安装 OpenClaw 失败"
+        return 1
+      }
+    hash -r 2>/dev/null || true
   fi
 
-  openclaw onboard --install-daemon >/dev/null 2>&1 || true
-  openclaw gateway start >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
+  echo "正在初始化 OpenClaw 网关..."
+  timeout 20 openclaw --version >/dev/null 2>&1 || true
+  timeout 180 openclaw onboard --install-daemon >/dev/null 2>&1 || true
+  timeout 45 openclaw gateway start >/dev/null 2>&1 || timeout 45 openclaw gateway restart >/dev/null 2>&1 || true
+  log_msg "step2: OpenClaw 快速安装路径完成"
   return 0
 }
 
@@ -294,51 +308,32 @@ remove_skpl_panel_only() {
 run_wslwin_proxy_sync() {
   set +e
   clear
-  echo -e "====================  WSL 全能一键脚本 ===================="
+  echo "==================== WSL 代理同步 ===================="
+  echo "配置向导：请输入代理端口（回车默认 10808）"
 
-  killall apt apt-get dpkg 2>/dev/null
-  sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
-  sudo dpkg --configure -a 2>/dev/null
-
-  sudo rm -f /etc/apt/apt.conf.d/*proxy* /etc/apt/apt.conf.d/99*
-  echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
-  [ ! -f /etc/apt/sources.list.bak.original ] && sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak.original
-  sudo tee /etc/apt/sources.list >/dev/null <<'EOF'
-deb http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
-deb http://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
-deb http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
-deb http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse
-deb-src http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
-deb-src http://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
-deb-src http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
-deb-src http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse
-EOF
-
-  if ! DEBIAN_FRONTEND=noninteractive apt update -y >/dev/null 2>&1; then
-    echo "检测到阿里源不可用，自动回退到原始 sources.list"
-    if [ -f /etc/apt/sources.list.bak.original ]; then
-      sudo cp /etc/apt/sources.list.bak.original /etc/apt/sources.list
+  local CUSTOM_PORT
+  while true; do
+    if [ -t 0 ]; then
+      read -r -p "代理端口: " CUSTOM_PORT
+    else
+      CUSTOM_PORT="${SKPL_PROXY_PORT_INPUT:-}"
+      if [ -z "$CUSTOM_PORT" ]; then
+        echo "错误：非交互模式必须显式传入代理端口。"
+        echo "示例：SKPL_PROXY_PORT_INPUT=10808 bash merged_openclaw_readable.sh install"
+        return 1
+      fi
     fi
-  fi
 
-  echo -e "
-==================== 配置向导：自定义代理端口 ===================="
-  echo -e "默认代理端口：10808"
-  echo -e "直接回车 = 使用默认端口 | 输入数字 = 使用自定义端口"
-  if [ -t 0 ]; then
-    read -r -p "请输入代理端口号（回车默认 10808）：" CUSTOM_PORT
-  else
-    CUSTOM_PORT="${SKPL_PROXY_PORT_INPUT:-}"
-    if [ -z "$CUSTOM_PORT" ]; then
-      echo "错误：当前为非交互模式，必须显式提供代理端口。"
-      echo "请使用：SKPL_PROXY_PORT_INPUT=10808 bash merged_openclaw_readable.sh install"
-      return 1
+    [ -z "$CUSTOM_PORT" ] && CUSTOM_PORT="10808"
+    if [[ "$CUSTOM_PORT" =~ ^[0-9]+$ ]] && [ "$CUSTOM_PORT" -ge 1 ] && [ "$CUSTOM_PORT" -le 65535 ]; then
+      PROXY_PORT="$CUSTOM_PORT"
+      break
     fi
-  fi
+    echo "端口不合法，请输入 1-65535 的数字。"
+    [ ! -t 0 ] && return 1
+  done
 
-  [ -z "$CUSTOM_PORT" ] && PROXY_PORT="10808" || PROXY_PORT="$CUSTOM_PORT"
-  echo -e "已选择代理端口：$PROXY_PORT
-"
+  echo "已选择代理端口：$PROXY_PORT"
 
   sed -i '/proxy_/d;/auto_proxy/d;/http_proxy/d;/https_proxy/d;/all_proxy/d;/no_proxy/d;/NO_PROXY/d' ~/.bashrc
   source ~/.bashrc >/dev/null 2>&1 || true
@@ -5938,18 +5933,17 @@ openclaw_enable_local_memory_auto() {
 
   if [ ! -f "${model_path}" ]; then
     echo "下载 Local 记忆模型（首次仅执行一次）..."
-    curl -L --retry 3 --connect-timeout 10 -o "${model_path}" "${model_url}" || true
+    timeout 900 curl -L --retry 3 --connect-timeout 10 --max-time 900 -o "${model_path}" "${model_url}" || true
   fi
 
   mkdir -p /root/.openclaw/workspace/memory
-  openclaw memory index --force >/dev/null 2>&1 || true
-  openclaw gateway restart >/dev/null 2>&1 || true
+  timeout 240 openclaw memory index --force >/dev/null 2>&1 || true
+  timeout 45 openclaw gateway restart >/dev/null 2>&1 || true
 }
 
 run_openclaw_install_step() {
   prewarm_openclaw_dependencies
   optimize_openclaw_install_path
-  printf '0\n' | moltbot_menu >/dev/null 2>&1 || true
 
   if ! command -v openclaw >/dev/null 2>&1; then
     if install_openclaw_fast; then
@@ -5960,9 +5954,11 @@ run_openclaw_install_step() {
       printf '1\n' | moltbot_menu || true
     fi
   else
-    openclaw gateway status >/dev/null 2>&1 || true
+    timeout 20 openclaw gateway status >/dev/null 2>&1 || true
   fi
+  echo "正在启用 Local 记忆方案..."
   openclaw_enable_local_memory_auto
+  echo "OpenClaw 步骤完成。"
 }
 
 run_openclaw2_network_optimization() {
