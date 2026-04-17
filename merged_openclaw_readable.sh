@@ -17,6 +17,8 @@ OPENCLAW_UPDATE_CACHE_TS=""
 OPENCLAW_UPDATE_CACHE_MSG=""
 SKPL_NPM_COUNTRY=""
 SKPL_NPM_REGISTRIES=""
+SKPL_PROXY_ENV_SCRIPT="${SKPL_HOME}/proxy-env.sh"
+SKPL_OPENCLAW_LAUNCHER="${SKPL_HOME}/openclaw-gateway-launch.sh"
 
 gl_bai='\033[0m'
 gl_lv='\033[32m'
@@ -39,6 +41,119 @@ init_skpl_runtime() {
 log_msg() {
   local msg="$1"
   printf '[%s] %s\n' "$(date '+%F %T')" "$msg" >> "$SKPL_LOG_FILE"
+}
+
+check_tcp_port() {
+  local ip_port="$1"
+  local ip port
+  ip=$(echo "$ip_port" | cut -d: -f1)
+  port=$(echo "$ip_port" | cut -d: -f2)
+  timeout 0.5 bash -c "echo > /dev/tcp/$ip/$port" 2>/dev/null
+}
+
+resolve_active_proxy() {
+  local port="${1:-${SKPL_PROXY_PORT:-10808}}"
+  local mirrored="127.0.0.1:${port}"
+  local legacy="10.255.255.254:${port}"
+
+  if check_tcp_port "$mirrored"; then
+    printf '%s\n' "$mirrored"
+    return 0
+  fi
+
+  if check_tcp_port "$legacy"; then
+    printf '%s\n' "$legacy"
+    return 0
+  fi
+
+  return 1
+}
+
+apply_detected_proxy_env() {
+  local active_proxy="$1"
+  local no_proxy_rule="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
+
+  if [ -z "$active_proxy" ]; then
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+    return 0
+  fi
+
+  export http_proxy="http://$active_proxy"
+  export https_proxy="http://$active_proxy"
+  export HTTP_PROXY="http://$active_proxy"
+  export HTTPS_PROXY="http://$active_proxy"
+  export all_proxy="socks5://$active_proxy"
+  export ALL_PROXY="socks5://$active_proxy"
+  export no_proxy="$no_proxy_rule"
+  export NO_PROXY="$no_proxy_rule"
+}
+
+refresh_runtime_proxy_env() {
+  local active_proxy=""
+  if active_proxy=$(resolve_active_proxy "${SKPL_PROXY_PORT:-10808}"); then
+    apply_detected_proxy_env "$active_proxy"
+    log_msg "检测到活动代理: $active_proxy"
+  else
+    apply_detected_proxy_env ""
+    log_msg "未检测到活动代理，使用直连"
+  fi
+}
+
+write_skpl_proxy_env_script() {
+  mkdir -p "$SKPL_HOME"
+  cat > "$SKPL_PROXY_ENV_SCRIPT" <<'EOF_PROXY_ENV'
+#!/bin/bash
+SKPL_PROXY_PORT_VALUE="${1:-10808}"
+NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
+
+check_port() {
+  local ip_port="$1"
+  local ip port
+  ip=$(echo "$ip_port" | cut -d: -f1)
+  port=$(echo "$ip_port" | cut -d: -f2)
+  timeout 0.5 bash -c "echo > /dev/tcp/$ip/$port" 2>/dev/null
+}
+
+ACTIVE_PROXY=""
+if check_port "127.0.0.1:${SKPL_PROXY_PORT_VALUE}"; then
+  ACTIVE_PROXY="127.0.0.1:${SKPL_PROXY_PORT_VALUE}"
+elif check_port "10.255.255.254:${SKPL_PROXY_PORT_VALUE}"; then
+  ACTIVE_PROXY="10.255.255.254:${SKPL_PROXY_PORT_VALUE}"
+fi
+
+if [ -n "$ACTIVE_PROXY" ]; then
+  export http_proxy="http://$ACTIVE_PROXY"
+  export https_proxy="http://$ACTIVE_PROXY"
+  export HTTP_PROXY="http://$ACTIVE_PROXY"
+  export HTTPS_PROXY="http://$ACTIVE_PROXY"
+  export all_proxy="socks5://$ACTIVE_PROXY"
+  export ALL_PROXY="socks5://$ACTIVE_PROXY"
+  export no_proxy="$NO_PROXY_RULE"
+  export NO_PROXY="$NO_PROXY_RULE"
+else
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+fi
+EOF_PROXY_ENV
+  chmod +x "$SKPL_PROXY_ENV_SCRIPT"
+}
+
+write_openclaw_gateway_launcher() {
+  mkdir -p "$SKPL_HOME"
+  cat > "$SKPL_OPENCLAW_LAUNCHER" <<'EOF_OPENCLAW_LAUNCHER'
+#!/bin/bash
+set -e
+OPENCLAW_JS="$1"
+PROXY_PORT="$2"
+shift 2
+
+if [ -f /root/.skpl/proxy-env.sh ]; then
+  # shellcheck disable=SC1091
+  source /root/.skpl/proxy-env.sh "$PROXY_PORT"
+fi
+
+exec /usr/bin/node "$OPENCLAW_JS" "$@"
+EOF_OPENCLAW_LAUNCHER
+  chmod +x "$SKPL_OPENCLAW_LAUNCHER"
 }
 
 state_get() {
@@ -122,6 +237,10 @@ prewarm_openclaw_dependencies() {
 send_stats() { :; }
 
 break_end() {
+  if [ "${SKPL_BATCH_MODE:-0}" = "1" ]; then
+    return 0
+  fi
+
   if ensure_interactive_terminal "继续确认"; then
     tty_prompt_line "按回车继续..." _tmp
   fi
@@ -336,11 +455,14 @@ npm_query_openclaw_latest_version() {
 }
 
 install_openclaw_global() {
+  refresh_runtime_proxy_env
   npm_try_with_registries install -g openclaw@latest --no-fund --no-audit --loglevel=error --prefer-online --fetch-retries=2 --fetch-timeout=300000
 }
 
 install_evomap_dependencies() {
   local npm_args=(install --silent --no-fund --no-audit --prefer-offline)
+
+  refresh_runtime_proxy_env
 
   if [ -f package-lock.json ]; then
     npm_args=(ci --silent --no-fund --no-audit --prefer-offline)
@@ -567,6 +689,8 @@ EOF
   chmod +x ~/.auto_proxy_sync.sh
   sed -i '/source ~\/\.auto_proxy_sync.sh/d' ~/.bashrc
   echo "source ~/.auto_proxy_sync.sh" >> ~/.bashrc
+  write_skpl_proxy_env_script
+  refresh_runtime_proxy_env
   source ~/.bashrc >/dev/null 2>&1 || true
 
   SKPL_PROXY_PORT="${PROXY_PORT:-10808}"
@@ -632,6 +756,17 @@ moltbot_menu() {
     fi
   }
 
+  get_cached_openclaw_update_message() {
+    if [ -n "$OPENCLAW_UPDATE_CACHE_MSG" ]; then
+      echo "$OPENCLAW_UPDATE_CACHE_MSG"
+      return 0
+    fi
+
+    if command -v openclaw >/dev/null 2>&1; then
+      echo "${gl_hui}更新检查按需执行${gl_bai}"
+    fi
+  }
+
 
   show_menu() {
 
@@ -640,7 +775,7 @@ moltbot_menu() {
 
     local install_status=$(get_install_status)
     local running_status=$(get_running_status)
-    local update_message=$(check_openclaw_update)
+    local update_message=$(get_cached_openclaw_update_message)
 
     echo "======================================="
     echo -e "🦞 OPENCLAW 管理工具 by KEJILION 🦞"
@@ -680,7 +815,9 @@ moltbot_menu() {
   start_gateway() {
     openclaw gateway stop >/dev/null 2>&1 || true
     openclaw gateway start >/dev/null 2>&1 || true
-    sleep 3
+    if [ "${SKPL_BATCH_MODE:-0}" != "1" ]; then
+      sleep 3
+    fi
   }
 
 
@@ -6114,7 +6251,7 @@ openclaw_enable_local_memory_auto() {
 run_openclaw_install_step() {
   prewarm_openclaw_dependencies
   if ! command -v openclaw >/dev/null 2>&1; then
-    printf '1\n' | moltbot_menu || true
+    install_moltbot
   else
     openclaw gateway status >/dev/null 2>&1 || true
   fi
@@ -6125,6 +6262,7 @@ run_openclaw2_network_optimization() {
   echo "执行 openclaw2 网络优化（稳定模式）..."
 
   local npm_global openclaw_js
+  refresh_runtime_proxy_env
   npm_global=$(npm root -g 2>/dev/null)
   openclaw_js="${npm_global}/openclaw/dist/index.js"
   if [ ! -f "$openclaw_js" ] && [ -f "/usr/lib/node_modules/openclaw/dist/index.js" ]; then
@@ -6132,13 +6270,15 @@ run_openclaw2_network_optimization() {
   fi
 
   if [ ! -f "$openclaw_js" ]; then
-    npm install -g openclaw@2026.4.14 >/dev/null 2>&1 || true
+    npm_try_with_registries install -g openclaw@2026.4.14 --no-fund --no-audit --loglevel=error --prefer-online --fetch-retries=2 --fetch-timeout=300000 >/dev/null 2>&1 || true
     npm_global=$(npm root -g 2>/dev/null)
     openclaw_js="${npm_global}/openclaw/dist/index.js"
   fi
 
   mkdir -p /root/.config/systemd/user
   mkdir -p /root/.openclaw/credentials /root/.openclaw/logs /root/.openclaw/agents
+  write_skpl_proxy_env_script
+  write_openclaw_gateway_launcher
   chmod 700 /root/.openclaw 2>/dev/null || true
 
   if [ ! -s /root/.openclaw/openclaw.json ]; then
@@ -6162,20 +6302,12 @@ Description=OpenClaw Gateway
 After=network-online.target
 
 [Service]
-ExecStart=/usr/bin/node ${openclaw_js} gateway --port 18789
+ExecStart=${SKPL_OPENCLAW_LAUNCHER} ${openclaw_js} ${SKPL_PROXY_PORT} gateway --port 18789
 Restart=always
 RestartSec=5
 Environment=HOME=/root
 Environment=TMPDIR=/tmp
 Environment=PATH=/usr/bin:/usr/local/bin:/bin
-Environment=http_proxy=http://127.0.0.1:${SKPL_PROXY_PORT}
-Environment=https_proxy=http://127.0.0.1:${SKPL_PROXY_PORT}
-Environment=HTTP_PROXY=http://127.0.0.1:${SKPL_PROXY_PORT}
-Environment=HTTPS_PROXY=http://127.0.0.1:${SKPL_PROXY_PORT}
-Environment=all_proxy=socks5://127.0.0.1:${SKPL_PROXY_PORT}
-Environment=ALL_PROXY=socks5://127.0.0.1:${SKPL_PROXY_PORT}
-Environment=no_proxy=localhost,127.0.0.1
-Environment=NO_PROXY=localhost,127.0.0.1
 Environment=OPENCLAW_GATEWAY_PORT=18789
 
 [Install]
@@ -6227,7 +6359,10 @@ evomap_install() {
     mv "$EVOMAP_DIR" "${EVOMAP_DIR}.old.$(date +%Y%m%d%H%M%S)"
   fi
 
-  git clone --depth 1 https://github.com/EvoMap/evolver.git "$EVOMAP_DIR" >/dev/null 2>&1 || git clone https://github.com/EvoMap/evolver.git "$EVOMAP_DIR"
+  if ! timeout 180 git clone --depth 1 https://github.com/EvoMap/evolver.git "$EVOMAP_DIR" >/dev/null 2>&1; then
+    echo "EvoMap 浅克隆失败，正在尝试一次受限完整克隆..."
+    timeout 180 git clone https://github.com/EvoMap/evolver.git "$EVOMAP_DIR"
+  fi
   cd "$EVOMAP_DIR"
   install_evomap_dependencies
   mkdir -p skills assets/gep memory
@@ -6310,6 +6445,7 @@ run_full_pipeline_once() {
   save_self_to_skpl
   init_skpl_runtime
 
+  local SKPL_BATCH_MODE=1
   local step
   step=$(state_get STEP)
   [ -z "$step" ] && step=1
@@ -6399,23 +6535,26 @@ main() {
   ensure_root "$@"
   init_skpl_runtime
   save_self_to_skpl
-  load_openclaw_panel
 
   case "${1:-install}" in
     install)
       run_full_pipeline_once
+      load_openclaw_panel
       skpl_main_panel
       ;;
     panel)
       save_self_to_skpl
+      load_openclaw_panel
       skpl_main_panel
       ;;
     openclaw)
       save_self_to_skpl
+      load_openclaw_panel
       moltbot_menu
       ;;
     evomap)
       save_self_to_skpl
+      load_openclaw_panel
       openclaw_evomap_menu
       ;;
     *)
