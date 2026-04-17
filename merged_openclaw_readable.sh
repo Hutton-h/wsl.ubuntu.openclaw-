@@ -6266,14 +6266,6 @@ OPENCLAW_PANEL_EOF
 )"
 }
 
-ensure_openclaw_panel_loaded() {
-  if declare -F install_moltbot >/dev/null 2>&1; then
-    return 0
-  fi
-
-  load_openclaw_panel
-}
-
 openclaw_enable_local_memory_auto() {
   local model_path bootstrap_log
   model_path="$(openclaw_memory_prepare)"
@@ -6288,11 +6280,32 @@ openclaw_enable_local_memory_auto() {
   echo "后台日志: ${bootstrap_log}"
 }
 
+install_openclaw_direct() {
+  echo "开始直装 OpenClaw..."
+  install git jq
+  install_node_and_tools
+
+  echo "正在安装 OpenClaw CLI..."
+  install_openclaw_global
+  if ! command -v openclaw >/dev/null 2>&1; then
+    echo "OpenClaw CLI 安装失败：未检测到 openclaw 命令。"
+    return 1
+  fi
+
+  openclaw_onboard_if_needed
+  start_gateway
+  if ! openclaw gateway status >/dev/null 2>&1; then
+    echo "OpenClaw 网关启动校验未通过。"
+    return 1
+  fi
+
+  return 0
+}
+
 run_openclaw_install_step() {
   prewarm_openclaw_dependencies
-  ensure_openclaw_panel_loaded
   if ! command -v openclaw >/dev/null 2>&1; then
-    install_moltbot
+    install_openclaw_direct
   else
     openclaw gateway status >/dev/null 2>&1 || true
   fi
