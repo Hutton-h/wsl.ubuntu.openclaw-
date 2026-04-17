@@ -486,8 +486,24 @@ npm_query_openclaw_latest_version() {
 }
 
 install_openclaw_global() {
+  local package_spec
+  local -a package_specs=("openclaw@latest" "openclaw@2026.4.14")
+
   refresh_runtime_proxy_env
-  npm_try_with_registries install -g openclaw@latest --no-fund --no-audit --loglevel=error --prefer-online --fetch-retries=2 --fetch-timeout=300000
+
+  if resolve_active_proxy "${SKPL_PROXY_PORT:-10808}" >/dev/null 2>&1; then
+    npm config set registry https://registry.npmmirror.com >/dev/null 2>&1 || true
+    package_specs=("openclaw@2026.4.14" "openclaw@latest")
+  fi
+
+  for package_spec in "${package_specs[@]}"; do
+    echo "正在安装 ${package_spec} ..."
+    if npm_try_with_registries install -g "$package_spec" --no-fund --no-audit --loglevel=error --prefer-online --fetch-retries=2 --fetch-timeout=300000; then
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 install_evomap_dependencies() {
