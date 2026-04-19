@@ -179,6 +179,61 @@ init_skpl_runtime() {
   write_openclaw_gateway_launcher >/dev/null 2>&1 || true
 }
 
+skpl_openclaw_gateway_service_path() {
+  echo "/root/.config/systemd/user/openclaw-gateway.service"
+}
+
+resolve_openclaw_js_entry() {
+  local npm_global openclaw_js=""
+  npm_global=$(npm root -g 2>/dev/null || true)
+  if [ -n "$npm_global" ] && [ -f "${npm_global}/openclaw/dist/index.js" ]; then
+    echo "${npm_global}/openclaw/dist/index.js"
+    return 0
+  fi
+  if [ -f "/usr/lib/node_modules/openclaw/dist/index.js" ]; then
+    echo "/usr/lib/node_modules/openclaw/dist/index.js"
+    return 0
+  fi
+  return 1
+}
+
+refresh_openclaw_gateway_service() {
+  local service_file openclaw_js active_state=1
+  service_file=$(skpl_openclaw_gateway_service_path)
+  openclaw_js=$(resolve_openclaw_js_entry 2>/dev/null || true)
+  [ -n "$openclaw_js" ] || return 0
+
+  mkdir -p /root/.config/systemd/user
+  write_skpl_proxy_env_script
+  write_openclaw_gateway_launcher
+
+  cat > "$service_file" <<EOF_SKPL_GATEWAY_SERVICE
+[Unit]
+Description=OpenClaw Gateway
+After=network-online.target
+
+[Service]
+ExecStart=${SKPL_OPENCLAW_LAUNCHER} ${openclaw_js} ${SKPL_PROXY_PORT} gateway --port 18789
+Restart=always
+RestartSec=5
+Environment=HOME=/root
+Environment=TMPDIR=/tmp
+Environment=PATH=/usr/bin:/usr/local/bin:/bin
+Environment=OPENCLAW_GATEWAY_PORT=18789
+
+[Install]
+WantedBy=default.target
+EOF_SKPL_GATEWAY_SERVICE
+
+  systemctl --user is-active --quiet openclaw-gateway.service >/dev/null 2>&1
+  active_state=$?
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  systemctl --user enable openclaw-gateway.service >/dev/null 2>&1 || true
+  if [ $active_state -eq 0 ]; then
+    systemctl --user restart openclaw-gateway.service >/dev/null 2>&1 || true
+  fi
+}
+
 log_msg() {
   local msg="$1"
   printf '[%s] %s\n' "$(date '+%F %T')" "$msg" >> "$SKPL_LOG_FILE"
@@ -192,20 +247,40 @@ check_tcp_port() {
   timeout 0.5 bash -c "echo > /dev/tcp/$ip/$port" 2>/dev/null
 }
 
+skpl_proxy_candidates() {
+  local port="${1:-${SKPL_PROXY_PORT:-10808}}"
+  local host=""
+
+  printf '%s\n' "127.0.0.1:${port}"
+  printf '%s\n' "10.255.255.254:${port}"
+
+  host=$(getent ahostsv4 host.docker.internal 2>/dev/null | awk 'NR==1{print $1}')
+  if [ -n "$host" ]; then
+    printf '%s\n' "${host}:${port}"
+  fi
+
+  host=$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf 2>/dev/null)
+  if [ -n "$host" ]; then
+    printf '%s\n' "${host}:${port}"
+  fi
+
+  host=$(ip route 2>/dev/null | awk '/^default /{print $3; exit}')
+  if [ -n "$host" ]; then
+    printf '%s\n' "${host}:${port}"
+  fi
+}
+
 resolve_active_proxy() {
   local port="${1:-${SKPL_PROXY_PORT:-10808}}"
-  local mirrored="127.0.0.1:${port}"
-  local legacy="10.255.255.254:${port}"
+  local candidate=""
 
-  if check_tcp_port "$mirrored"; then
-    printf '%s\n' "$mirrored"
-    return 0
-  fi
-
-  if check_tcp_port "$legacy"; then
-    printf '%s\n' "$legacy"
-    return 0
-  fi
+  while IFS= read -r candidate; do
+    [ -z "$candidate" ] && continue
+    if check_tcp_port "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done < <(skpl_proxy_candidates "$port" | awk '!seen[$0]++')
 
   return 1
 }
@@ -257,6 +332,29 @@ SKPL_PROXY_PORT_VALUE="${1:-10808}"
 NO_PROXY_RULE="__NO_PROXY_RULE__"
 PROXY_URL=""
 
+proxy_candidates() {
+  local port="$SKPL_PROXY_PORT_VALUE"
+  local host=""
+
+  printf '%s\n' "127.0.0.1:${port}"
+  printf '%s\n' "10.255.255.254:${port}"
+
+  host=$(getent ahostsv4 host.docker.internal 2>/dev/null | awk 'NR==1{print $1}')
+  if [ -n "$host" ]; then
+    printf '%s\n' "${host}:${port}"
+  fi
+
+  host=$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf 2>/dev/null)
+  if [ -n "$host" ]; then
+    printf '%s\n' "${host}:${port}"
+  fi
+
+  host=$(ip route 2>/dev/null | awk '/^default /{print $3; exit}')
+  if [ -n "$host" ]; then
+    printf '%s\n' "${host}:${port}"
+  fi
+}
+
 check_port() {
   local ip_port="$1"
   local ip port
@@ -266,11 +364,13 @@ check_port() {
 }
 
 ACTIVE_PROXY=""
-if check_port "127.0.0.1:${SKPL_PROXY_PORT_VALUE}"; then
-  ACTIVE_PROXY="127.0.0.1:${SKPL_PROXY_PORT_VALUE}"
-elif check_port "10.255.255.254:${SKPL_PROXY_PORT_VALUE}"; then
-  ACTIVE_PROXY="10.255.255.254:${SKPL_PROXY_PORT_VALUE}"
-fi
+while IFS= read -r candidate; do
+  [ -z "$candidate" ] && continue
+  if check_port "$candidate"; then
+    ACTIVE_PROXY="$candidate"
+    break
+  fi
+done < <(proxy_candidates | awk '!seen[$0]++')
 
 if [ -n "$ACTIVE_PROXY" ]; then
   PROXY_URL="http://$ACTIVE_PROXY"
@@ -1081,6 +1181,7 @@ run_wslwin_proxy_sync() {
   set +e
   clear
   echo -e "====================  WSL 全能一键脚本 ===================="
+  local distro_codename=""
 
   prompt_wsl_shutdown_confirmation || {
     set -e
@@ -1095,16 +1196,19 @@ run_wslwin_proxy_sync() {
   sudo rm -f /etc/apt/apt.conf.d/*proxy* /etc/apt/apt.conf.d/99*
   echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4 >/dev/null
   [ ! -f /etc/apt/sources.list.bak.original ] && sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak.original
+  distro_codename="$(awk -F= '/^(UBUNTU_CODENAME|VERSION_CODENAME)=/{gsub(/"/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null)"
+  [ -n "$distro_codename" ] || distro_codename="jammy"
   sudo tee /etc/apt/sources.list >/dev/null <<'EOF'
-deb http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
-deb http://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
-deb http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
-deb http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse
-deb-src http://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
-deb-src http://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
-deb-src http://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
-deb-src http://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse
+deb http://mirrors.aliyun.com/ubuntu/ __DISTRO_CODENAME__ main restricted universe multiverse
+deb http://mirrors.aliyun.com/ubuntu/ __DISTRO_CODENAME__-security main restricted universe multiverse
+deb http://mirrors.aliyun.com/ubuntu/ __DISTRO_CODENAME__-updates main restricted universe multiverse
+deb http://mirrors.aliyun.com/ubuntu/ __DISTRO_CODENAME__-backports main restricted universe multiverse
+deb-src http://mirrors.aliyun.com/ubuntu/ __DISTRO_CODENAME__ main restricted universe multiverse
+deb-src http://mirrors.aliyun.com/ubuntu/ __DISTRO_CODENAME__-security main restricted universe multiverse
+deb-src http://mirrors.aliyun.com/ubuntu/ __DISTRO_CODENAME__-updates main restricted universe multiverse
+deb-src http://mirrors.aliyun.com/ubuntu/ __DISTRO_CODENAME__-backports main restricted universe multiverse
 EOF
+  sudo sed -i "s/__DISTRO_CODENAME__/${distro_codename}/g" /etc/apt/sources.list
 
   echo "正在刷新 apt 软件源缓存，这一步可能需要几十秒..."
   if ! DEBIAN_FRONTEND=noninteractive apt update -y >/dev/null 2>&1; then
@@ -1125,14 +1229,62 @@ EOF
   echo -e "已选择代理端口：$PROXY_PORT
 "
 
-  sed -i '/proxy_/d;/auto_proxy/d;/http_proxy/d;/https_proxy/d;/all_proxy/d;/no_proxy/d;/NO_PROXY/d' ~/.bashrc
-  source ~/.bashrc >/dev/null 2>&1 || true
+  python3 - "$HOME/.bashrc" <<'PY'
+import os
+import sys
+
+path = sys.argv[1]
+start = '# >>> SKPL AUTO PROXY >>>\n'
+end = '# <<< SKPL AUTO PROXY <<<\n'
+try:
+    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+        lines = f.readlines()
+except FileNotFoundError:
+    lines = []
+
+out = []
+inside = False
+for line in lines:
+    if line == start:
+        inside = True
+        continue
+    if line == end:
+        inside = False
+        continue
+    if not inside:
+        out.append(line)
+
+with open(path, 'w', encoding='utf-8') as f:
+    f.writelines(out)
+PY
 
   cat > ~/.auto_proxy_sync.sh <<'EOF'
 #!/bin/bash
-PROXY_MIRRORED="127.0.0.1:__PORT__"
-PROXY_LEGACY="10.255.255.254:__PORT__"
+SKPL_PROXY_PORT_VALUE="__PORT__"
 NO_PROXY_RULE="__NO_PROXY_RULE__"
+
+proxy_candidates() {
+  local port="$SKPL_PROXY_PORT_VALUE"
+  local host=""
+
+  printf '%s\n' "127.0.0.1:${port}"
+  printf '%s\n' "10.255.255.254:${port}"
+
+  host=$(getent ahostsv4 host.docker.internal 2>/dev/null | awk 'NR==1{print $1}')
+  if [ -n "$host" ]; then
+    printf '%s\n' "${host}:${port}"
+  fi
+
+  host=$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf 2>/dev/null)
+  if [ -n "$host" ]; then
+    printf '%s\n' "${host}:${port}"
+  fi
+
+  host=$(ip route 2>/dev/null | awk '/^default /{print $3; exit}')
+  if [ -n "$host" ]; then
+    printf '%s\n' "${host}:${port}"
+  fi
+}
 
 check_port() {
   local ip_port=$1
@@ -1141,13 +1293,14 @@ check_port() {
   timeout 0.5 bash -c "echo > /dev/tcp/$ip/$port" 2>/dev/null
 }
 
-if check_port "$PROXY_MIRRORED"; then
-  ACTIVE_PROXY=$PROXY_MIRRORED
-elif check_port "$PROXY_LEGACY"; then
-  ACTIVE_PROXY=$PROXY_LEGACY
-else
-  ACTIVE_PROXY=""
-fi
+ACTIVE_PROXY=""
+while IFS= read -r candidate; do
+  [ -z "$candidate" ] && continue
+  if check_port "$candidate"; then
+    ACTIVE_PROXY="$candidate"
+    break
+  fi
+done < <(proxy_candidates | awk '!seen[$0]++')
 
 if [ -n "$ACTIVE_PROXY" ]; then
   PROXY_URL="http://$ACTIVE_PROXY"
@@ -1176,13 +1329,17 @@ EOF
   merged_no_proxy=$(skpl_build_no_proxy_rule)
   sed -i "s|__NO_PROXY_RULE__|${merged_no_proxy}|g" ~/.auto_proxy_sync.sh
   chmod +x ~/.auto_proxy_sync.sh
-  sed -i '/source ~\/\.auto_proxy_sync.sh/d' ~/.bashrc
-  echo "source ~/.auto_proxy_sync.sh" >> ~/.bashrc
+  cat >> ~/.bashrc <<'EOF_BASHRC_SKPL'
+# >>> SKPL AUTO PROXY >>>
+[ -f ~/.auto_proxy_sync.sh ] && source ~/.auto_proxy_sync.sh
+# <<< SKPL AUTO PROXY <<<
+EOF_BASHRC_SKPL
   write_skpl_proxy_env_script
   refresh_runtime_proxy_env
-  source ~/.bashrc >/dev/null 2>&1 || true
+  source ~/.auto_proxy_sync.sh >/dev/null 2>&1 || true
 
   SKPL_PROXY_PORT="${PROXY_PORT:-10808}"
+  refresh_openclaw_gateway_service >/dev/null 2>&1 || true
   set -e
 }
 
@@ -6670,6 +6827,9 @@ openclaw_backup_restore_menu() {
     install_openclaw_global
     crontab -l 2>/dev/null | grep -v "s gateway" | crontab -
     start_gateway
+    if ! openclaw_gateway_status_quick; then
+      echo "⚠️ OpenClaw 网关状态暂未就绪，可稍后在面板中执行健康检测与修复。"
+    fi
     hash -r
     add_app_id
     echo "更新完成"
@@ -6725,7 +6885,7 @@ openclaw_backup_restore_menu() {
   openclaw_webui_refresh_token_cache() {
     local token
     token=$(timeout 8 openclaw dashboard 2>/dev/null \
-      | sed -n 's/.*:18789\/#token=\([a-f0-9]\+\).*/\1/p' \
+      | sed -n 's/.*:18789\/#token=\([^[:space:]"&]\+\).*/\1/p' \
       | head -n 1)
     if [ -n "$token" ]; then
       printf '%s' "$token" > "$SKPL_WEBUI_TOKEN_CACHE_FILE"
@@ -6982,26 +7142,19 @@ run_openclaw_install_step() {
 
 run_openclaw2_network_optimization() {
   set +e
-  echo "执行 openclaw 网络优化（稳定模式）..."
+  echo "执行 openclaw2 网络优化（稳定模式）..."
 
-  local npm_global openclaw_js
+  local openclaw_js
   refresh_runtime_proxy_env
-  npm_global=$(npm root -g 2>/dev/null)
-  openclaw_js="${npm_global}/openclaw/dist/index.js"
-  if [ ! -f "$openclaw_js" ] && [ -f "/usr/lib/node_modules/openclaw/dist/index.js" ]; then
-    openclaw_js="/usr/lib/node_modules/openclaw/dist/index.js"
-  fi
+  openclaw_js=$(resolve_openclaw_js_entry 2>/dev/null || true)
 
   if [ ! -f "$openclaw_js" ]; then
     npm_try_with_registries install -g openclaw@2026.4.14 --no-fund --no-audit --loglevel=error --prefer-online --fetch-retries=2 --fetch-timeout=300000 >/dev/null 2>&1 || true
-    npm_global=$(npm root -g 2>/dev/null)
-    openclaw_js="${npm_global}/openclaw/dist/index.js"
+    openclaw_js=$(resolve_openclaw_js_entry 2>/dev/null || true)
   fi
 
   mkdir -p /root/.config/systemd/user
   mkdir -p /root/.openclaw/credentials /root/.openclaw/logs /root/.openclaw/agents
-  write_skpl_proxy_env_script
-  write_openclaw_gateway_launcher
   chmod 700 /root/.openclaw 2>/dev/null || true
 
   if [ ! -s /root/.openclaw/openclaw.json ]; then
@@ -7019,26 +7172,8 @@ run_openclaw2_network_optimization() {
 EOF2
   fi
 
-  cat > /root/.config/systemd/user/openclaw-gateway.service << EOF3
-[Unit]
-Description=OpenClaw Gateway
-After=network-online.target
-
-[Service]
-ExecStart=${SKPL_OPENCLAW_LAUNCHER} ${openclaw_js} ${SKPL_PROXY_PORT} gateway --port 18789
-Restart=always
-RestartSec=5
-Environment=HOME=/root
-Environment=TMPDIR=/tmp
-Environment=PATH=/usr/bin:/usr/local/bin:/bin
-Environment=OPENCLAW_GATEWAY_PORT=18789
-
-[Install]
-WantedBy=default.target
-EOF3
-
-  systemctl --user daemon-reload >/dev/null 2>&1 || true
-  systemctl --user enable --now openclaw-gateway.service >/dev/null 2>&1 || true
+  refresh_openclaw_gateway_service >/dev/null 2>&1 || true
+  systemctl --user start openclaw-gateway.service >/dev/null 2>&1 || true
   loginctl enable-linger root >/dev/null 2>&1 || true
   if ! systemctl --user is-active --quiet openclaw-gateway.service; then
     openclaw gateway restart >/dev/null 2>&1 || true
