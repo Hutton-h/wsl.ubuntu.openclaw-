@@ -54,23 +54,23 @@ skpl_ui_rule() {
 skpl_ui_header() {
   local title="$1"
   local subtitle="${2:-}"
-  skpl_ui_rule "$gl_hui" "-" 60
+  skpl_ui_rule "$gl_hui" "-" 68
   printf '%b%s%b\n' "$gl_bai" "${title}" "$gl_bai"
   if [ -n "$subtitle" ]; then
     printf '%b%s%b\n' "$gl_hui" "$subtitle" "$gl_bai"
   fi
-  skpl_ui_rule "$gl_hui" "-" 60
+  skpl_ui_rule "$gl_hui" "-" 68
 }
 
 skpl_ui_section() {
   local title="$1"
-  printf '%b%s%b\n' "$gl_hui" "$title" "$gl_bai"
+  printf '%b[%s]%b\n' "$gl_hui" "$title" "$gl_bai"
 }
 
 skpl_ui_kv() {
   local key="$1"
   local value="$2"
-  printf '%b%-12s%b  %b%s%b\n' "$gl_hui" "${key}" "$gl_bai" "$gl_bai" "$value" "$gl_bai"
+  printf '%b%-12s%b : %b%s%b\n' "$gl_hui" "${key}" "$gl_bai" "$gl_bai" "$value" "$gl_bai"
 }
 
 skpl_ui_badge() {
@@ -90,7 +90,7 @@ skpl_ui_status_row() {
   local title="$1"
   local tone="$2"
   local value="$3"
-  printf '%b%-12s%b ' "$gl_hui" "$title" "$gl_bai"
+  printf '%b%-12s%b : ' "$gl_hui" "$title" "$gl_bai"
   skpl_ui_badge "$tone" "$value"
   printf '\n'
 }
@@ -117,9 +117,9 @@ skpl_ui_menu_item() {
   local label="$2"
   local desc="${3:-}"
   if [ -n "$desc" ]; then
-    printf '%b%s.%b %-20s  %b%s%b\n' "$gl_bai" "$key" "$gl_bai" "$label" "$gl_hui" "$desc" "$gl_bai"
+    printf '%b%2s.%b %-24s  %b%s%b\n' "$gl_bai" "$key" "$gl_bai" "$label" "$gl_hui" "$desc" "$gl_bai"
   else
-    printf '%b%s.%b %s\n' "$gl_bai" "$key" "$gl_bai" "$label"
+    printf '%b%2s.%b %s\n' "$gl_bai" "$key" "$gl_bai" "$label"
   fi
 }
 
@@ -135,9 +135,9 @@ skpl_ui_menu_item_tone() {
     ok) color="$gl_lv" ;;
   esac
   if [ -n "$desc" ]; then
-    printf '%b%s.%b %-20s  %b%s%b\n' "$color" "$key" "$gl_bai" "$label" "$gl_hui" "$desc" "$gl_bai"
+    printf '%b%2s.%b %-24s  %b%s%b\n' "$color" "$key" "$gl_bai" "$label" "$gl_hui" "$desc" "$gl_bai"
   else
-    printf '%b%s.%b %s\n' "$color" "$key" "$gl_bai" "$label"
+    printf '%b%2s.%b %s\n' "$color" "$key" "$gl_bai" "$label"
   fi
 }
 
@@ -1557,14 +1557,14 @@ openclaw_panel_menu() {
     [ "$install_status" = "已安装" ] && install_tone="ok"
     [ "$running_status" = "运行中" ] && running_tone="ok"
 
-    skpl_ui_header "OpenClaw 控制台"
-    skpl_ui_section "摘要"
+    skpl_ui_header "OpenClaw管理面板"
+    skpl_ui_section "概览"
     skpl_ui_status_row "安装状态" "$install_tone" "$install_status"
     skpl_ui_status_row "网关状态" "$running_tone" "$running_status"
     skpl_ui_kv "版本信息" "$local_version"
 
     echo
-    skpl_ui_section "核心"
+    skpl_ui_section "服务"
     skpl_ui_menu_item_tone 1 "安装 OpenClaw" "初始化环境与配置" "ok"
     skpl_ui_menu_item_tone 2 "启动网关" "启动当前服务" "ok"
     skpl_ui_menu_item_tone 3 "停止网关" "停止当前服务" "warn"
@@ -1572,7 +1572,7 @@ openclaw_panel_menu() {
     skpl_ui_menu_item 5 "切换模型" "修改主模型与会话模型"
 
     echo
-    skpl_ui_section "配置"
+    skpl_ui_section "配置与接入"
     skpl_ui_menu_item 6 "API 管理" "Provider、Key、模型同步"
     skpl_ui_menu_item 7 "设备连接" "Telegram / WhatsApp / QQ"
     skpl_ui_menu_item 8 "插件管理" "扩展插件"
@@ -1581,7 +1581,7 @@ openclaw_panel_menu() {
     skpl_ui_menu_item 11 "配置向导" "重新进入 onboard"
 
     echo
-    skpl_ui_section "控制"
+    skpl_ui_section "运行与数据"
     skpl_ui_menu_item 12 "健康检测与修复" "自动修复常见问题"
     skpl_ui_menu_item 13 "WebUI 访问设置" "Token、域名、访问入口"
     skpl_ui_menu_item 14 "TUI 对话" "进入命令行对话界面"
@@ -1589,7 +1589,7 @@ openclaw_panel_menu() {
     skpl_ui_menu_item 16 "权限管理" "策略与白名单"
     skpl_ui_menu_item 17 "多智能体管理" "Agent、绑定、会话"
     skpl_ui_menu_item 18 "备份与还原" "记忆与项目快照"
-    skpl_ui_menu_item 21 "EvoMap 管理" "安装、更新、记忆"
+    skpl_ui_menu_item 21 "EvoMap 管理" "安装、更新与记忆"
 
     echo
     skpl_ui_section "维护"
@@ -7556,16 +7556,22 @@ skpl_wslwin_and_update_system() {
 skpl_main_panel() {
   while true; do
     clear
-    skpl_ui_header "SKPL"
-    skpl_ui_section "入口"
-    skpl_ui_menu_item 1 "OpenClaw 面板" "进入主控制面板"
-    skpl_ui_menu_item 2 "EvoMap 管理" "记忆与进化管理"
+    skpl_ui_header "SKPL-OpenClaw管理面板"
+    skpl_ui_section "核心入口"
+    skpl_ui_menu_item 1 "OpenClaw 面板" "进入 OpenClaw 主控制台"
+    skpl_ui_menu_item 2 "EvoMap 管理" "管理记忆、进化与同步"
+
+    echo
+    skpl_ui_section "安装与维护"
     skpl_ui_menu_item 3 "重新执行完整安装流程" "重置状态后从头运行"
-    skpl_ui_menu_item 4 "SKPL 面板更新" "同步最新脚本到运行入口"
-    skpl_ui_menu_item 5 "SKPL 面板卸载" "仅移除 SKPL 入口"
-    skpl_ui_menu_item 6 "查看最近日志" "读取安装与运行日志"
     skpl_ui_menu_item 7 "从中断点继续安装" "按当前步骤续跑"
+    skpl_ui_menu_item 4 "SKPL 面板更新" "同步最新脚本到运行入口"
+    skpl_ui_menu_item 6 "查看最近日志" "读取安装与运行日志"
     skpl_ui_menu_item 8 "WSL 代理同步并更新系统" "执行 wslwin 与系统更新"
+    skpl_ui_menu_item 5 "SKPL 面板卸载" "仅移除 SKPL 入口"
+
+    echo
+    skpl_ui_section "退出"
     skpl_ui_menu_item 0 "退出"
     skpl_ui_footer_prompt "请输入你的选择: "
     read -r skpl_choice
