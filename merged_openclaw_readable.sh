@@ -25,6 +25,8 @@ SKPL_MULTIAGENT_AGENTS_CACHE_FILE="${SKPL_HOME}/multiagent-agents.json"
 SKPL_MULTIAGENT_BINDINGS_CACHE_FILE="${SKPL_HOME}/multiagent-bindings.json"
 SKPL_MULTIAGENT_SESSIONS_CACHE_FILE="${SKPL_HOME}/multiagent-sessions.json"
 SKPL_WEBUI_TOKEN_CACHE_FILE="${SKPL_HOME}/webui-token.txt"
+SKPL_BASE_NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
+SKPL_DOMESTIC_MODEL_DIRECT_RULE="model-square.app.baizhi.cloud,.baizhi.cloud,.aliyuncs.com,.modelscope.cn,.deepseek.com,.moonshot.cn,.bigmodel.cn,.siliconflow.cn,.stepfun.com,.minimax.chat,.baichuan-ai.com,.ppinfra.com,.volces.com,.ark.cn-beijing.volces.com,.qianfan.baidubce.com,.xf-yun.com,.spark-api.xf-yun.com,.hunyuan.cloud.tencent.com,.tencentcloudapi.com"
 
 gl_bai='\033[0m'
 gl_lv='\033[32m'
@@ -37,6 +39,137 @@ gh_proxy=''
 if ! command -v sudo >/dev/null 2>&1; then
   sudo() { "$@"; }
 fi
+
+skpl_merge_no_proxy_csv() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+
+seen = set()
+items = []
+for raw in sys.argv[1:]:
+    for part in raw.split(','):
+        part = part.strip()
+        if not part or part in seen:
+            continue
+        seen.add(part)
+        items.append(part)
+print(','.join(items))
+PY
+}
+
+skpl_build_no_proxy_rule() {
+  local extra_hosts="${1:-}"
+  skpl_merge_no_proxy_csv "$SKPL_BASE_NO_PROXY_RULE" "$SKPL_DOMESTIC_MODEL_DIRECT_RULE" "$extra_hosts"
+}
+
+skpl_extract_url_host() {
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import urlparse
+
+url = (sys.argv[1] or '').strip()
+if not url:
+    print('')
+    raise SystemExit(0)
+parsed = urlparse(url)
+print(parsed.hostname or '')
+PY
+}
+
+skpl_is_domestic_model_host() {
+  python3 - "$1" <<'PY'
+import sys
+
+host = (sys.argv[1] or '').strip().lower()
+rules = [
+    'model-square.app.baizhi.cloud', '.baizhi.cloud', '.aliyuncs.com', '.modelscope.cn',
+    '.deepseek.com', '.moonshot.cn', '.bigmodel.cn', '.siliconflow.cn', '.stepfun.com',
+    '.minimax.chat', '.baichuan-ai.com', '.ppinfra.com', '.volces.com',
+    '.ark.cn-beijing.volces.com', '.qianfan.baidubce.com', '.xf-yun.com',
+    '.spark-api.xf-yun.com', '.hunyuan.cloud.tencent.com', '.tencentcloudapi.com'
+]
+ok = False
+for rule in rules:
+    if rule.startswith('.'):
+        if host.endswith(rule):
+            ok = True
+            break
+    elif host == rule or host.endswith('.' + rule):
+        ok = True
+        break
+print('1' if ok else '0')
+PY
+}
+
+skpl_model_request_no_proxy_hosts() {
+  local base_url="$1"
+  local host=""
+  host=$(skpl_extract_url_host "$base_url")
+  [ -z "$host" ] && return 0
+  if [ "$(skpl_is_domestic_model_host "$host")" = "1" ]; then
+    printf '%s\n' "$host"
+  fi
+}
+
+curl_fetch_models_json() {
+  local base_url="$1"
+  local api_key="$2"
+  local no_proxy_hosts=""
+  no_proxy_hosts=$(skpl_model_request_no_proxy_hosts "$base_url")
+  if [ -n "$no_proxy_hosts" ]; then
+    curl --noproxy "$no_proxy_hosts" -s -m 10 -H "Authorization: Bearer $api_key" "${base_url}/models"
+    return $?
+  fi
+  curl -s -m 10 -H "Authorization: Bearer $api_key" "${base_url}/models"
+}
+
+skpl_collect_domestic_provider_hosts_from_config() {
+  local config_file="$1"
+  [ -s "$config_file" ] || return 0
+  python3 - "$config_file" <<'PY'
+import json
+import sys
+from urllib.parse import urlparse
+
+rules = [
+    'model-square.app.baizhi.cloud', '.baizhi.cloud', '.aliyuncs.com', '.modelscope.cn',
+    '.deepseek.com', '.moonshot.cn', '.bigmodel.cn', '.siliconflow.cn', '.stepfun.com',
+    '.minimax.chat', '.baichuan-ai.com', '.ppinfra.com', '.volces.com',
+    '.ark.cn-beijing.volces.com', '.qianfan.baidubce.com', '.xf-yun.com',
+    '.spark-api.xf-yun.com', '.hunyuan.cloud.tencent.com', '.tencentcloudapi.com'
+]
+
+def is_domestic(host: str) -> bool:
+    host = (host or '').strip().lower()
+    if not host:
+        return False
+    for rule in rules:
+        if rule.startswith('.'):
+            if host.endswith(rule):
+                return True
+        elif host == rule or host.endswith('.' + rule):
+            return True
+    return False
+
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = json.load(f)
+
+providers = (((data or {}).get('models') or {}).get('providers') or {})
+hosts = []
+seen = set()
+for provider in providers.values():
+    if not isinstance(provider, dict):
+        continue
+    base_url = str(provider.get('baseUrl') or '').strip()
+    if not base_url:
+        continue
+    host = (urlparse(base_url).hostname or '').strip().lower()
+    if host and is_domestic(host) and host not in seen:
+        seen.add(host)
+        hosts.append(host)
+print(','.join(hosts))
+PY
+}
 
 init_skpl_runtime() {
   mkdir -p "$SKPL_HOME"
@@ -79,8 +212,10 @@ resolve_active_proxy() {
 
 apply_detected_proxy_env() {
   local active_proxy="$1"
-  local no_proxy_rule="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
+  local no_proxy_rule=""
   local proxy_url=""
+
+  no_proxy_rule=$(skpl_build_no_proxy_rule)
 
   if [ -z "$active_proxy" ]; then
     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY ftp_proxy FTP_PROXY no_proxy NO_PROXY npm_config_proxy npm_config_https_proxy npm_config_noproxy
@@ -119,7 +254,7 @@ write_skpl_proxy_env_script() {
   cat > "$SKPL_PROXY_ENV_SCRIPT" <<'EOF_PROXY_ENV'
 #!/bin/bash
 SKPL_PROXY_PORT_VALUE="${1:-10808}"
-NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
+NO_PROXY_RULE="__NO_PROXY_RULE__"
 PROXY_URL=""
 
 check_port() {
@@ -156,6 +291,9 @@ else
   unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY ftp_proxy FTP_PROXY no_proxy NO_PROXY npm_config_proxy npm_config_https_proxy npm_config_noproxy
 fi
 EOF_PROXY_ENV
+  local merged_no_proxy
+  merged_no_proxy=$(skpl_build_no_proxy_rule)
+  sed -i "s|__NO_PROXY_RULE__|${merged_no_proxy}|g" "$SKPL_PROXY_ENV_SCRIPT"
   chmod +x "$SKPL_PROXY_ENV_SCRIPT"
 }
 
@@ -168,9 +306,84 @@ OPENCLAW_JS="$1"
 PROXY_PORT="$2"
 shift 2
 
+merge_no_proxy_csv() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+
+seen = set()
+items = []
+for raw in sys.argv[1:]:
+    for part in raw.split(','):
+        part = part.strip()
+        if not part or part in seen:
+            continue
+        seen.add(part)
+        items.append(part)
+print(','.join(items))
+PY
+}
+
+collect_domestic_hosts_from_config() {
+  local config_file="$1"
+  [ -s "$config_file" ] || return 0
+  python3 - "$config_file" <<'PY'
+import json
+import sys
+from urllib.parse import urlparse
+
+rules = [
+    'model-square.app.baizhi.cloud', '.baizhi.cloud', '.aliyuncs.com', '.modelscope.cn',
+    '.deepseek.com', '.moonshot.cn', '.bigmodel.cn', '.siliconflow.cn', '.stepfun.com',
+    '.minimax.chat', '.baichuan-ai.com', '.ppinfra.com', '.volces.com',
+    '.ark.cn-beijing.volces.com', '.qianfan.baidubce.com', '.xf-yun.com',
+    '.spark-api.xf-yun.com', '.hunyuan.cloud.tencent.com', '.tencentcloudapi.com'
+]
+
+def is_domestic(host: str) -> bool:
+    host = (host or '').strip().lower()
+    if not host:
+        return False
+    for rule in rules:
+        if rule.startswith('.'):
+            if host.endswith(rule):
+                return True
+        elif host == rule or host.endswith('.' + rule):
+            return True
+    return False
+
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = json.load(f)
+
+providers = (((data or {}).get('models') or {}).get('providers') or {})
+hosts = []
+seen = set()
+for provider in providers.values():
+    if not isinstance(provider, dict):
+        continue
+    base_url = str(provider.get('baseUrl') or '').strip()
+    if not base_url:
+        continue
+    host = (urlparse(base_url).hostname or '').strip().lower()
+    if host and is_domestic(host) and host not in seen:
+        seen.add(host)
+        hosts.append(host)
+print(','.join(hosts))
+PY
+}
+
 if [ -f /root/.skpl/proxy-env.sh ]; then
   # shellcheck disable=SC1091
   source /root/.skpl/proxy-env.sh "$PROXY_PORT"
+fi
+
+CONFIG_FILE="/root/.openclaw/openclaw.json"
+DYNAMIC_NO_PROXY="$(collect_domestic_hosts_from_config "$CONFIG_FILE" 2>/dev/null || true)"
+if [ -n "$DYNAMIC_NO_PROXY" ]; then
+  no_proxy="$(merge_no_proxy_csv "${no_proxy:-}" "$DYNAMIC_NO_PROXY")"
+  NO_PROXY="$no_proxy"
+  export no_proxy NO_PROXY
+  npm_config_noproxy="$(merge_no_proxy_csv "${npm_config_noproxy:-}" "$DYNAMIC_NO_PROXY")"
+  export npm_config_noproxy
 fi
 
 exec /usr/bin/node "$OPENCLAW_JS" "$@"
@@ -608,6 +821,10 @@ start_gateway() {
   fi
 }
 
+openclaw_gateway_status_quick() {
+  timeout 8 openclaw gateway status >/dev/null 2>&1
+}
+
 openclaw_onboard_if_needed() {
   local config_file onboard_rc onboard_log
   config_file="$(openclaw_get_config_path_quick)"
@@ -915,7 +1132,7 @@ EOF
 #!/bin/bash
 PROXY_MIRRORED="127.0.0.1:__PORT__"
 PROXY_LEGACY="10.255.255.254:__PORT__"
-NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
+NO_PROXY_RULE="__NO_PROXY_RULE__"
 
 check_port() {
   local ip_port=$1
@@ -955,6 +1172,9 @@ fi
 EOF
 
   sed -i "s/__PORT__/$PROXY_PORT/g" ~/.auto_proxy_sync.sh
+  local merged_no_proxy
+  merged_no_proxy=$(skpl_build_no_proxy_rule)
+  sed -i "s|__NO_PROXY_RULE__|${merged_no_proxy}|g" ~/.auto_proxy_sync.sh
   chmod +x ~/.auto_proxy_sync.sh
   sed -i '/source ~\/\.auto_proxy_sync.sh/d' ~/.bashrc
   echo "source ~/.auto_proxy_sync.sh" >> ~/.bashrc
@@ -1105,6 +1325,7 @@ import os
 import platform
 import sys
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -1256,6 +1477,26 @@ def delete_provider_and_refs(name):
 
 def fetch_remote_models_with_retry(name, base_url, api_key, retries=3):
     last_error = None
+    host = (urllib.parse.urlparse(base_url).hostname or '').lower()
+    domestic_rules = [
+        'model-square.app.baizhi.cloud', '.baizhi.cloud', '.aliyuncs.com', '.modelscope.cn',
+        '.deepseek.com', '.moonshot.cn', '.bigmodel.cn', '.siliconflow.cn', '.stepfun.com',
+        '.minimax.chat', '.baichuan-ai.com', '.ppinfra.com', '.volces.com',
+        '.ark.cn-beijing.volces.com', '.qianfan.baidubce.com', '.xf-yun.com',
+        '.spark-api.xf-yun.com', '.hunyuan.cloud.tencent.com', '.tencentcloudapi.com'
+    ]
+
+    def is_domestic(h):
+        if not h:
+            return False
+        for rule in domestic_rules:
+            if rule.startswith('.'):
+                if h.endswith(rule):
+                    return True
+            elif h == rule or h.endswith('.' + rule):
+                return True
+        return False
+
     for attempt in range(1, retries + 1):
         req = urllib.request.Request(
             base_url.rstrip('/') + '/models',
@@ -1265,7 +1506,12 @@ def fetch_remote_models_with_retry(name, base_url, api_key, retries=3):
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=12) as resp:
+            if is_domestic(host):
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                resp = opener.open(req, timeout=12)
+            else:
+                resp = urllib.request.urlopen(req, timeout=12)
+            with resp:
                 payload = resp.read().decode('utf-8', 'ignore')
             data = json.loads(payload)
             return data, None, attempt
@@ -1589,9 +1835,8 @@ EOF
 
     echo "🔍 正在获取 $provider_name 的所有可用模型..."
 
-    local models_json=$(curl -s -m 10 \
-      -H "Authorization: Bearer $api_key" \
-      "${base_url}/models")
+    local models_json
+    models_json=$(curl_fetch_models_json "$base_url" "$api_key")
 
     if [[ -z "$models_json" ]]; then
       echo "❌ 无法获取模型列表"
@@ -1682,9 +1927,7 @@ EOF
 
     # 5. 获取模型列表
     echo "🔍 正在获取可用模型列表..."
-    models_json=$(curl -s -m 10 \
-      -H "Authorization: Bearer $api_key" \
-      "${base_url}/models")
+    models_json=$(curl_fetch_models_json "$base_url" "$api_key")
 
     if [[ -n "$models_json" ]]; then
       available_models=$(echo "$models_json" | grep -oP '"id":\s*"\K[^"]+' | sort)
@@ -1903,6 +2146,7 @@ import copy
 import json
 import sys
 import time
+import urllib.parse
 import urllib.request
 
 path = sys.argv[1]
@@ -1963,6 +2207,26 @@ def set_primary_ref(defaults_obj, new_ref):
 
 def fetch_remote_models_with_retry(base_url, api_key, retries=3):
     last_error = None
+    host = (urllib.parse.urlparse(base_url).hostname or '').lower()
+    domestic_rules = [
+        'model-square.app.baizhi.cloud', '.baizhi.cloud', '.aliyuncs.com', '.modelscope.cn',
+        '.deepseek.com', '.moonshot.cn', '.bigmodel.cn', '.siliconflow.cn', '.stepfun.com',
+        '.minimax.chat', '.baichuan-ai.com', '.ppinfra.com', '.volces.com',
+        '.ark.cn-beijing.volces.com', '.qianfan.baidubce.com', '.xf-yun.com',
+        '.spark-api.xf-yun.com', '.hunyuan.cloud.tencent.com', '.tencentcloudapi.com'
+    ]
+
+    def is_domestic(h):
+        if not h:
+            return False
+        for rule in domestic_rules:
+            if rule.startswith('.'):
+                if h.endswith(rule):
+                    return True
+            elif h == rule or h.endswith('.' + rule):
+                return True
+        return False
+
     for attempt in range(1, retries + 1):
         req = urllib.request.Request(
             base_url.rstrip('/') + '/models',
@@ -1972,7 +2236,12 @@ def fetch_remote_models_with_retry(base_url, api_key, retries=3):
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=12) as resp:
+            if is_domestic(host):
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                resp = opener.open(req, timeout=12)
+            else:
+                resp = urllib.request.urlopen(req, timeout=12)
+            with resp:
                 payload = resp.read().decode('utf-8', 'ignore')
             return json.loads(payload), None, attempt
         except Exception as e:
@@ -6687,8 +6956,14 @@ install_openclaw_direct() {
   fi
 
   openclaw_onboard_if_needed
+
+  if [ "${SKPL_BATCH_MODE:-0}" = "1" ]; then
+    echo "批量安装模式：跳过第 2 步网关启动，交由下一步网络优化统一接管。"
+    return 0
+  fi
+
   start_gateway
-  if ! openclaw gateway status >/dev/null 2>&1; then
+  if ! openclaw_gateway_status_quick; then
     echo "OpenClaw 网关启动校验未通过。"
     return 1
   fi
@@ -6765,7 +7040,9 @@ EOF3
   systemctl --user daemon-reload >/dev/null 2>&1 || true
   systemctl --user enable --now openclaw-gateway.service >/dev/null 2>&1 || true
   loginctl enable-linger root >/dev/null 2>&1 || true
-  openclaw gateway restart >/dev/null 2>&1 || true
+  if ! systemctl --user is-active --quiet openclaw-gateway.service; then
+    openclaw gateway restart >/dev/null 2>&1 || true
+  fi
   set -e
 }
 
