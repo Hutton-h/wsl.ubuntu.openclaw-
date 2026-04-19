@@ -43,9 +43,9 @@ if ! command -v sudo >/dev/null 2>&1; then
 fi
 
 skpl_ui_rule() {
-  local color="${1:-$gl_lan}"
+  local color="${1:-$gl_hui}"
   local char="${2:-─}"
-  local width="${3:-54}"
+  local width="${3:-60}"
   printf '%b' "$color"
   printf '%*s' "$width" '' | tr ' ' "$char"
   printf '%b\n' "$gl_bai"
@@ -54,34 +54,34 @@ skpl_ui_rule() {
 skpl_ui_header() {
   local title="$1"
   local subtitle="${2:-}"
-  skpl_ui_rule "$gl_lan" "═" 54
-  printf '%b%s%b\n' "$gl_kjlan" "  ${title}" "$gl_bai"
+  skpl_ui_rule "$gl_hui" "─" 60
+  printf '%b%s%b\n' "$gl_bai" "${title}" "$gl_bai"
   if [ -n "$subtitle" ]; then
-    printf '%b%s%b\n' "$gl_hui" "  ${subtitle}" "$gl_bai"
+    printf '%b%s%b\n' "$gl_hui" "$subtitle" "$gl_bai"
   fi
-  skpl_ui_rule "$gl_lan" "─" 54
+  skpl_ui_rule "$gl_hui" "─" 60
 }
 
 skpl_ui_section() {
   local title="$1"
-  printf '%b%s%b\n' "$gl_lv" "[ ${title} ]" "$gl_bai"
+  printf '%b%s%b\n' "$gl_hui" "$title" "$gl_bai"
 }
 
 skpl_ui_kv() {
   local key="$1"
   local value="$2"
-  printf '%b%-12s%b %b%s%b\n' "$gl_hui" "${key}" "$gl_bai" "$gl_bai" "$value" "$gl_bai"
+  printf '%b%-12s%b  %b%s%b\n' "$gl_hui" "${key}" "$gl_bai" "$gl_bai" "$value" "$gl_bai"
 }
 
 skpl_ui_badge() {
   local tone="$1"
   local text="$2"
-  local color="$gl_hui"
+  local color="$gl_bai"
   case "$tone" in
     ok) color="$gl_lv" ;;
     warn) color="$gl_huang" ;;
     danger) color="$gl_hong" ;;
-    info) color="$gl_kjlan" ;;
+    info) color="$gl_hui" ;;
   esac
   printf '%b[%s]%b' "$color" "$text" "$gl_bai"
 }
@@ -99,7 +99,7 @@ skpl_ui_alert() {
   local tone="$1"
   local title="$2"
   local detail="${3:-}"
-  local color="$gl_kjlan"
+  local color="$gl_hui"
   local tag="INFO"
   case "$tone" in
     warn) color="$gl_huang"; tag="WARN" ;;
@@ -117,9 +117,9 @@ skpl_ui_menu_item() {
   local label="$2"
   local desc="${3:-}"
   if [ -n "$desc" ]; then
-    printf '%b[%s]%b %-18s %b%s%b\n' "$gl_kjlan" "$key" "$gl_bai" "$label" "$gl_hui" "$desc" "$gl_bai"
+    printf '%b%02d%b  %-20s  %b%s%b\n' "$gl_bai" "$key" "$gl_bai" "$label" "$gl_hui" "$desc" "$gl_bai"
   else
-    printf '%b[%s]%b %s\n' "$gl_kjlan" "$key" "$gl_bai" "$label"
+    printf '%b%02d%b  %s\n' "$gl_bai" "$key" "$gl_bai" "$label"
   fi
 }
 
@@ -128,23 +128,23 @@ skpl_ui_menu_item_tone() {
   local label="$2"
   local desc="${3:-}"
   local tone="${4:-info}"
-  local color="$gl_kjlan"
+  local color="$gl_bai"
   case "$tone" in
     warn) color="$gl_huang" ;;
     danger) color="$gl_hong" ;;
     ok) color="$gl_lv" ;;
   esac
   if [ -n "$desc" ]; then
-    printf '%b[%s]%b %-18s %b%s%b\n' "$color" "$key" "$gl_bai" "$label" "$gl_hui" "$desc" "$gl_bai"
+    printf '%b%02d%b  %-20s  %b%s%b\n' "$color" "$key" "$gl_bai" "$label" "$gl_hui" "$desc" "$gl_bai"
   else
-    printf '%b[%s]%b %s\n' "$color" "$key" "$gl_bai" "$label"
+    printf '%b%02d%b  %s\n' "$color" "$key" "$gl_bai" "$label"
   fi
 }
 
 skpl_ui_footer_prompt() {
   local prompt="${1:-请输入选项并回车: }"
-  skpl_ui_rule "$gl_lan" "─" 54
-  printf '%b%s%b' "$gl_huang" "$prompt" "$gl_bai"
+  echo
+  printf '%b%s%b' "$gl_hui" "$prompt" "$gl_bai"
 }
 
 skpl_merge_no_proxy_csv() {
@@ -1499,9 +1499,9 @@ openclaw_panel_menu() {
     fi
 
     if [ "$local_version" != "$remote_version" ]; then
-      OPENCLAW_UPDATE_CACHE_MSG="${gl_huang}检测到新版本:$remote_version${gl_bai}"
+      OPENCLAW_UPDATE_CACHE_MSG="检测到新版本: $remote_version"
     else
-      OPENCLAW_UPDATE_CACHE_MSG="${gl_lv}当前版本已是最新:$local_version${gl_bai}"
+      OPENCLAW_UPDATE_CACHE_MSG="当前版本已是最新: $local_version"
     fi
 
     OPENCLAW_UPDATE_CACHE_TS="$now"
@@ -1532,7 +1532,7 @@ openclaw_panel_menu() {
     fi
 
     if command -v openclaw >/dev/null 2>&1; then
-      echo "${gl_hui}更新检查按需执行${gl_bai}"
+      echo "更新检查按需执行"
     fi
   }
 
@@ -1545,47 +1545,48 @@ openclaw_panel_menu() {
     local update_message=$(get_cached_openclaw_update_message)
     local install_tone="warn"
     local running_tone="warn"
-
     [ "$install_status" = "已安装" ] && install_tone="ok"
     [ "$running_status" = "运行中" ] && running_tone="ok"
 
-    skpl_ui_header "OpenClaw 控制台" "轻量终端面板 · 状态优先 · 快速操作"
-    skpl_ui_section "系统状态"
+    skpl_ui_header "OpenClaw" "控制台"
+    skpl_ui_section "摘要"
     skpl_ui_status_row "安装状态" "$install_tone" "$install_status"
     skpl_ui_status_row "网关状态" "$running_tone" "$running_status"
     [ -n "$update_message" ] && skpl_ui_kv "版本信息" "$update_message"
+
     echo
-    skpl_ui_alert "info" "当前面板已切换为轻量科技风终端 UI" "状态信息优先展示，高风险操作会有更醒目的警示。"
+    skpl_ui_section "核心"
+    skpl_ui_menu_item_tone 1 "安装 OpenClaw" "初始化环境与配置" "ok"
+    skpl_ui_menu_item_tone 2 "启动网关" "启动当前服务" "ok"
+    skpl_ui_menu_item_tone 3 "停止网关" "停止当前服务" "warn"
+    skpl_ui_menu_item 4 "状态与日志" "查看运行状态和日志"
+    skpl_ui_menu_item 5 "切换模型" "修改主模型与会话模型"
+
     echo
-    skpl_ui_section "核心操作"
-    skpl_ui_menu_item_tone "1" "安装 OpenClaw" "初始化环境与配置" "ok"
-    skpl_ui_menu_item_tone "2" "启动网关" "启动当前 OpenClaw 服务" "ok"
-    skpl_ui_menu_item_tone "3" "停止网关" "停止当前 OpenClaw 服务" "warn"
-    skpl_ui_menu_item "4" "状态与日志" "检查运行状态和实时日志"
-    skpl_ui_menu_item "5" "切换模型" "修改主模型与会话模型"
+    skpl_ui_section "配置"
+    skpl_ui_menu_item 6 "API 管理" "Provider、Key、模型同步"
+    skpl_ui_menu_item 7 "设备连接" "Telegram / WhatsApp / QQ"
+    skpl_ui_menu_item 8 "插件管理" "扩展插件"
+    skpl_ui_menu_item 9 "技能管理" "导入和管理技能"
+    skpl_ui_menu_item 10 "编辑主配置" "openclaw.json"
+    skpl_ui_menu_item 11 "配置向导" "重新进入 onboard"
+
     echo
-    skpl_ui_section "能力管理"
-    skpl_ui_menu_item "6" "API 管理" "Provider、Key、模型同步"
-    skpl_ui_menu_item "7" "设备连接" "Telegram / WhatsApp / QQ 等"
-    skpl_ui_menu_item "8" "插件管理" "安装与维护扩展插件"
-    skpl_ui_menu_item "9" "技能管理" "导入和管理技能"
-    skpl_ui_menu_item "10" "编辑主配置" "打开 openclaw.json"
-    echo
-    skpl_ui_section "高级控制"
-    skpl_ui_menu_item "11" "配置向导" "重新进入 onboard"
-    skpl_ui_menu_item "12" "健康检测与修复" "自动修复常见问题"
-    skpl_ui_menu_item "13" "WebUI 设置" "Token、域名、访问入口"
-    skpl_ui_menu_item "14" "TUI 对话" "进入命令行对话界面"
-    skpl_ui_menu_item "15" "记忆管理" "索引、方案、状态"
-    skpl_ui_menu_item "16" "权限管理" "策略与白名单"
-    skpl_ui_menu_item "17" "多智能体管理" "Agent、绑定、会话"
-    skpl_ui_menu_item "18" "备份与还原" "记忆与项目快照"
+    skpl_ui_section "控制"
+    skpl_ui_menu_item 12 "健康检测与修复" "自动修复常见问题"
+    skpl_ui_menu_item 13 "WebUI 访问设置" "Token、域名、访问入口"
+    skpl_ui_menu_item 14 "TUI 对话" "进入命令行对话界面"
+    skpl_ui_menu_item 15 "记忆管理" "索引、方案、状态"
+    skpl_ui_menu_item 16 "权限管理" "策略与白名单"
+    skpl_ui_menu_item 17 "多智能体管理" "Agent、绑定、会话"
+    skpl_ui_menu_item 18 "备份与还原" "记忆与项目快照"
+    skpl_ui_menu_item 21 "EvoMap 管理" "安装、更新、记忆"
+
     echo
     skpl_ui_section "维护"
-    skpl_ui_menu_item_tone "19" "更新 OpenClaw" "升级 CLI 和运行环境" "info"
-    skpl_ui_menu_item_tone "20" "卸载 OpenClaw" "移除 CLI 与数据目录" "danger"
-    skpl_ui_menu_item "21" "EvoMap 管理" "安装、更新、记忆"
-    skpl_ui_menu_item "0" "返回上一级"
+    skpl_ui_menu_item 19 "更新 OpenClaw" "升级 CLI 和运行环境"
+    skpl_ui_menu_item_tone 20 "卸载 OpenClaw" "移除 CLI 与数据目录" "danger"
+    skpl_ui_menu_item 0 "返回上一级"
     skpl_ui_footer_prompt "请输入选项并回车: "
   }
 
@@ -2988,19 +2989,18 @@ PY
     send_stats "OpenClaw API入口"
     while true; do
       clear
-      echo "======================================="
-      echo "OpenClaw API 管理"
-      echo "======================================="
+      skpl_ui_header "API 管理" "供应商、协议与模型同步"
       openclaw_api_manage_list
-      echo "---------------------------------------"
-      echo "1. 添加API"
-      echo "2. 同步API供应商模型列表"
-      echo "3. 切换 API 类型（completions / responses）"
-      echo "4. 删除API"
-      echo "5. API 厂商推荐"
-      echo "0. 退出"
-      echo "---------------------------------------"
-      read -erp "请输入你的选择: " api_choice
+      echo
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "添加 API" "写入新的提供商配置"
+      skpl_ui_menu_item 2 "同步模型列表" "刷新供应商可用模型"
+      skpl_ui_menu_item 3 "切换 API 类型" "completions / responses"
+      skpl_ui_menu_item 4 "删除 API" "移除现有提供商"
+      skpl_ui_menu_item 5 "厂商推荐" "查看推荐入口"
+      skpl_ui_menu_item 0 "返回上一级"
+      skpl_ui_footer_prompt "请输入你的选择: "
+      read -er api_choice
 
       case "$api_choice" in
         1)
@@ -3625,14 +3625,12 @@ PYTHON_EOF
     send_stats "插件管理"
     while true; do
       clear
-      echo "========================================"
-      echo "            插件管理 (安装/删除)            "
-      echo "========================================"
-      echo "当前插件列表:"
+      skpl_ui_header "插件管理" "安装、启用、删除与常用插件参考"
+      skpl_ui_section "当前插件列表"
       openclaw plugins list
-      echo "--------------------------------------------------------"
-      echo "推荐的常用插件 ID (直接复制括号内的 ID 即可):"
-      echo "--------------------------------------------------------"
+      echo
+      skpl_ui_section "推荐插件"
+      echo "直接复制括号内的 ID 即可："
       echo "📱 通讯渠道:"
       echo "  - [feishu]        # 飞书/Lark 集成"
       echo "  - [telegram]      # Telegram 机器人"
@@ -3650,12 +3648,14 @@ PYTHON_EOF
       echo "  - [lobster]       # 审批流 (带人工确认)"
       echo "  - [voice-call]    # 语音通话能力"
       echo "  - [nostr]         # 加密隐私聊天"
-      echo "--------------------------------------------------------"
+      echo
 
-      echo "1) 安装/启用插件"
-      echo "2) 删除/禁用插件"
-      echo "0) 返回"
-      read -e -p "请选择操作：" plugin_action
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "安装或启用插件" "支持一次输入多个插件 ID"
+      skpl_ui_menu_item 2 "删除或禁用插件" "移除现有插件"
+      skpl_ui_menu_item 0 "返回上一级"
+      skpl_ui_footer_prompt "请选择操作: "
+      read -e plugin_action
 
       [ "$plugin_action" = "0" ] && break
       [ -z "$plugin_action" ] && continue
@@ -3755,15 +3755,14 @@ PYTHON_EOF
     send_stats "技能管理"
     while true; do
       clear
-      echo "========================================"
-      echo "            技能管理 (安装/删除)            "
-      echo "========================================"
-      echo "当前已安装技能:"
+      skpl_ui_header "技能管理" "安装、删除与查看推荐技能"
+      skpl_ui_section "当前已安装技能"
       openclaw skills list
-      echo "----------------------------------------"
+      echo
 
       # 输出推荐的实用技能列表
-      echo "推荐的实用技能（可直接复制名称输入）："
+      skpl_ui_section "推荐技能"
+      echo "可直接复制名称输入："
       echo "github             # 管理 GitHub Issues/PR/CI (gh CLI)"
       echo "notion             # 操作 Notion 页面、数据库和块"
       echo "apple-notes        # macOS 原生笔记管理 (创建/编辑/搜索)"
@@ -3778,12 +3777,14 @@ PYTHON_EOF
       echo "video-frames       # 视频抽帧与短片剪辑 (ffmpeg 驱动)"
       echo "openai-whisper     # 本地音频转文字 (离线隐私保护)"
       echo "coding-agent       # 自动运行 Claude Code/Codex 等编程助手"
-      echo "----------------------------------------"
+      echo
 
-      echo "1) 安装技能"
-      echo "2) 删除技能"
-      echo "0) 返回"
-      read -e -p "请选择操作：" skill_action
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "安装技能" "输入一个或多个技能名"
+      skpl_ui_menu_item 2 "删除技能" "仅影响用户目录下的技能"
+      skpl_ui_menu_item 0 "返回上一级"
+      skpl_ui_footer_prompt "请选择操作: "
+      read -e skill_action
 
       [ "$skill_action" = "0" ] && break
       [ -z "$skill_action" ] && continue
@@ -4099,20 +4100,18 @@ openclaw_json_get_bool() {
     send_stats "机器人对接"
     while true; do
       clear
-      echo "========================================"
-      echo "            机器人连接对接            "
-      echo "========================================"
+      skpl_ui_header "机器人连接对接" "批准连接码或安装对应渠道接入"
       openclaw_show_bot_local_status_block
-      echo "----------------------------------------"
-      echo "1. Telegram 机器人对接"
-      echo "2. 飞书 (Lark) 机器人对接"
-      echo "3. WhatsApp 机器人对接"
-      echo "4. QQ 机器人对接"
-      echo "5. 微信机器人对接"
-      echo "----------------------------------------"
-      echo "0. 返回上一级选单"
-      echo "----------------------------------------"
-      read -e -p "请输入你的选择: " bot_choice
+      echo
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "Telegram 对接" "批准 Telegram 连接码"
+      skpl_ui_menu_item 2 "飞书对接" "安装 Lark 集成"
+      skpl_ui_menu_item 3 "WhatsApp 对接" "批准 WhatsApp 连接码"
+      skpl_ui_menu_item 4 "QQ 对接" "查看官方接入地址"
+      skpl_ui_menu_item 5 "微信对接" "安装 Weixin CLI"
+      skpl_ui_menu_item 0 "返回上一级"
+      skpl_ui_footer_prompt "请输入你的选择: "
+      read -e bot_choice
 
       case $bot_choice in
         1)
@@ -4375,10 +4374,10 @@ if os.path.isdir(agents_root):
       return 1
     fi
 
-    skpl_ui_header "OpenClaw 项目备份" "按模式导出当前项目状态"
-    skpl_ui_section "备份模式"
-    skpl_ui_menu_item_tone "1" "安全模式" "workspace + openclaw.json + extensions/skills/prompts/tools" "ok"
-    skpl_ui_menu_item_tone "2" "完整模式" "包含更多运行状态，敏感风险更高" "warn"
+    skpl_ui_header "项目备份" "导出当前 OpenClaw 项目状态"
+    skpl_ui_section "模式"
+    skpl_ui_menu_item 1 "安全模式" "workspace + openclaw.json + extensions / skills / prompts / tools"
+    skpl_ui_menu_item_tone 2 "完整模式" "包含更多运行状态，敏感风险更高" "warn"
     read -e -p "请选择备份模式（默认 1）: " export_mode
     [ -z "$export_mode" ] && export_mode="1"
 
@@ -4434,7 +4433,7 @@ if os.path.isdir(agents_root):
     openclaw_root=$(dirname "$config_file")
     mkdir -p "$openclaw_root"
 
-    skpl_ui_header "OpenClaw 项目还原" "高风险操作 · 会覆盖项目配置与工作区内容"
+    skpl_ui_header "项目还原" "高风险操作"
     skpl_ui_alert "danger" "项目还原会覆盖 OpenClaw 配置与工作区内容。" "还原前会执行 manifest/sha256 校验、白名单恢复、gateway 停启与健康检查。"
     read -e -p "请输入确认词【我已知晓高风险并继续还原】后继续: " confirm_text
     if [ "$confirm_text" != "我已知晓高风险并继续还原" ]; then
@@ -4930,15 +4929,15 @@ openclaw_memory_render_basic_status() {
   model_status=$(openclaw_memory_local_model_status "$model_path")
   workspace="$HOME/.openclaw/workspace"
   echo "当前显示为基础配置视图（尚未刷新运行时状态）"
-  skpl_ui_kv "Agent" "main"
-  skpl_ui_kv "底层方案" "${backend:--}"
-  skpl_ui_kv "搜索提供方" "${provider:--}"
+  echo "Agent: main"
+  echo "  底层方案: ${backend:--}"
+  echo "  搜索提供方: ${provider:--}"
   case "$model_status" in
-    ok) skpl_ui_kv "本地模型" "已就绪" ;;
-    hf) skpl_ui_kv "本地模型" "来自远端下载源" ;;
-    *) skpl_ui_kv "本地模型" "未就绪" ;;
+    ok) echo "  本地模型: 已就绪" ;;
+    hf) echo "  本地模型: 来自远端下载源" ;;
+    *) echo "  本地模型: 未就绪" ;;
   esac
-  skpl_ui_kv "工作区" "$workspace"
+  echo "  工作区: $workspace"
 }
 
 openclaw_memory_render_status() {
@@ -5241,7 +5240,7 @@ PY
   }
 
   openclaw_memory_render_auto_summary() {
-    echo "---------------------------------------"
+    skpl_ui_rule "$gl_hui" "─" 60
     echo "✅ 环境就绪"
     echo "方案: ${OPENCLAW_MEMORY_AUTO_SCHEME:-unknown}"
     if [ "$OPENCLAW_MEMORY_CONFIG_ONLY" = "true" ]; then
@@ -5271,7 +5270,7 @@ PY
     fi
     echo "最终状态:"
     openclaw_memory_render_status
-    echo "---------------------------------------"
+    skpl_ui_rule "$gl_hui" "─" 60
   }
 
   openclaw_memory_auto_confirm() {
@@ -5481,15 +5480,14 @@ EOF
   openclaw_memory_auto_setup_menu() {
     while true; do
       clear
-      echo "======================================="
-      echo "记忆方案自动部署"
-      echo "======================================="
-      echo "1. QMD"
-      echo "2. Local"
-      echo "3. Auto（自动选择）"
-      echo "0. 返回上一级"
-      echo "---------------------------------------"
-      read -e -p "请输入你的选择: " auto_choice
+      skpl_ui_header "记忆方案自动部署" "根据所选方案完成配置与依赖准备"
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "QMD" "轻量索引方案"
+      skpl_ui_menu_item 2 "Local" "本地向量检索方案"
+      skpl_ui_menu_item 3 "Auto" "自动选择推荐方案"
+      skpl_ui_menu_item 0 "返回上一级"
+      skpl_ui_footer_prompt "请输入你的选择: "
+      read -e auto_choice
       case "$auto_choice" in
         1)
           openclaw_memory_auto_setup_run "qmd"
@@ -5564,10 +5562,8 @@ EOF
       echo "   可切换 Local，或安装 bun + qmd 后再试。"
     fi
     include_dm=$(openclaw config get memory.qmd.includeDefaultMemory 2>/dev/null)
-    echo "======================================="
-    echo "索引修复诊断"
-    echo "======================================="
-    echo "当前 includeDefaultMemory: ${include_dm:-未设置}"
+    skpl_ui_header "索引修复诊断" "检查 includeDefaultMemory 与索引重建路径"
+    skpl_ui_kv "includeDefaultMemory" "${include_dm:-未设置}"
     echo ""
     if [ "$include_dm" = "false" ]; then
       echo "⚠️ 检测到 includeDefaultMemory=false"
@@ -5604,7 +5600,7 @@ EOF
   openclaw_memory_scheme_menu() {
     while true; do
       clear
-      skpl_ui_header "OpenClaw 记忆方案" "根据网络环境与模型可用性自动辅助决策"
+      skpl_ui_header "记忆方案" "QMD / Local / Auto"
       local backend current_label
       backend=$(openclaw_memory_get_backend)
       case "$backend" in
@@ -5612,18 +5608,19 @@ EOF
         builtin|local) current_label="Local" ;;
         *) current_label="未配置" ;;
       esac
+      skpl_ui_section "当前设置"
       skpl_ui_kv "当前方案" "$current_label"
       echo ""
-      skpl_ui_section "方案说明"
+      skpl_ui_section "说明"
       echo "QMD  : 轻量索引，依赖 qmd 命令（适合网络受限）"
       echo "Local: 本地向量检索，依赖 embedding 模型文件"
       echo "Auto : 自动推荐（基于可用性 + 网络探测）"
-      echo ""
-      skpl_ui_section "切换操作"
-      skpl_ui_menu_item "1" "切换 QMD" "自动部署/已装则跳过"
-      skpl_ui_menu_item "2" "切换 Local" "自动部署/已装则跳过"
-      skpl_ui_menu_item "3" "Auto" "自动推荐并部署"
-      skpl_ui_menu_item "0" "返回上一级"
+      echo
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "切换 QMD" "自动部署 / 已装则跳过"
+      skpl_ui_menu_item 2 "切换 Local" "自动部署 / 已装则跳过"
+      skpl_ui_menu_item 3 "Auto" "自动推荐并部署"
+      skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e scheme_choice
       case "$scheme_choice" in
@@ -5679,11 +5676,12 @@ EOF
   openclaw_memory_file_render_list() {
     openclaw_memory_file_collect
     if [ ${#OPENCLAW_MEMORY_FILES[@]} -eq 0 ]; then
-      echo "未找到记忆文件。"
+      skpl_ui_alert "info" "未找到记忆文件" "当前工作区下没有可浏览的 MEMORY.md 或 memory/*.md 文件。"
       return 0
     fi
+    skpl_ui_section "文件清单"
     echo "编号 | 归属 | 大小 | 修改时间"
-    echo "---------------------------------------"
+    skpl_ui_rule "$gl_hui" "─" 60
     local i file rel size mtime
     for i in "${!OPENCLAW_MEMORY_FILES[@]}"; do
       file="${OPENCLAW_MEMORY_FILES[$i]}"
@@ -5704,8 +5702,9 @@ EOF
     total_lines=$(wc -l < "$file" 2>/dev/null || echo 0)
     local default_lines=120
     local start_line count
-    echo "文件: $file"
-    echo "总行数: $total_lines"
+    skpl_ui_header "记忆文件预览" "按行号抽样查看文件内容"
+    skpl_ui_kv "文件" "$file"
+    skpl_ui_kv "总行数" "$total_lines"
     read -e -p "请输入起始行（回车默认末尾 $default_lines 行）: " start_line
     read -e -p "请输入显示行数（回车默认 $default_lines）: " count
     [ -z "$count" ] && count=$default_lines
@@ -5735,25 +5734,26 @@ EOF
       echo "(空文件)"
       return 0
     fi
-    echo "---------------------------------------"
+    echo
+    skpl_ui_section "内容"
+    skpl_ui_rule "$gl_hui" "─" 60
     sed -n "${start_line},${end_line}p" "$file"
-    echo "---------------------------------------"
+    skpl_ui_rule "$gl_hui" "─" 60
   }
 
   openclaw_memory_files_menu() {
     while true; do
       clear
-      echo "======================================="
-      echo "OpenClaw 记忆文件"
-      echo "======================================="
+      skpl_ui_header "记忆文件" "浏览 MEMORY.md 与 memory 目录内的 Markdown 内容"
       openclaw_memory_file_render_list
-      echo "---------------------------------------"
-      read -e -p "请输入文件编号查看（0 返回）: " file_choice
+      echo
+      skpl_ui_footer_prompt "请输入文件编号查看（0 返回）: "
+      read -e file_choice
       if [ "$file_choice" = "0" ]; then
         return 0
       fi
       if ! [[ "$file_choice" =~ ^[0-9]+$ ]]; then
-        echo "无效的选择，请重试。"
+        skpl_ui_alert "warn" "无效的选择" "请输入列表中的数字编号。"
         sleep 1
         continue
       fi
@@ -5764,7 +5764,7 @@ EOF
       fi
       local idx=$((file_choice-1))
       if [ "$idx" -lt 0 ] || [ "$idx" -ge ${#OPENCLAW_MEMORY_FILES[@]} ]; then
-        echo "无效的编号，请重试。"
+        skpl_ui_alert "warn" "编号超出范围" "请从当前文件列表中重新选择。"
         sleep 1
         continue
       fi
@@ -5796,19 +5796,19 @@ EOF
     send_stats "OpenClaw记忆管理"
     while true; do
       clear
-      skpl_ui_header "OpenClaw 记忆管理" "缓存优先展示 · 手动刷新运行时状态"
+      skpl_ui_header "记忆管理" "索引、方案、检索与预热"
       openclaw_memory_render_status
       echo
-      skpl_ui_section "记忆操作"
-      skpl_ui_menu_item "1" "刷新记忆状态" "读取最新运行时状态"
-      skpl_ui_menu_item "2" "更新记忆索引" "增量或全量重建"
-      skpl_ui_menu_item "3" "查看记忆文件" "浏览 MEMORY.md 与 memory/"
-      skpl_ui_menu_item "4" "索引修复" "处理 Indexed 异常"
-      skpl_ui_menu_item "5" "记忆方案" "QMD / Local / Auto"
-      skpl_ui_menu_item "6" "搜索测试" "验证索引是否工作"
-      skpl_ui_menu_item "7" "深度状态探测" "检查 embedding 模型"
-      skpl_ui_menu_item "8" "后台预热日志" "查看 bootstrap 输出"
-      skpl_ui_menu_item "0" "返回上一级"
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "刷新记忆状态" "读取最新运行时状态"
+      skpl_ui_menu_item 2 "更新记忆索引" "增量或全量重建"
+      skpl_ui_menu_item 3 "查看记忆文件" "浏览 MEMORY.md 与 memory/"
+      skpl_ui_menu_item 4 "索引修复" "处理 Indexed 异常"
+      skpl_ui_menu_item 5 "记忆方案" "QMD / Local / Auto"
+      skpl_ui_menu_item 6 "搜索测试" "验证索引是否工作"
+      skpl_ui_menu_item 7 "深度状态探测" "检查嵌入模型"
+      skpl_ui_menu_item 8 "后台预热日志" "查看 bootstrap 输出"
+      skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e memory_choice
       case "$memory_choice" in
@@ -6103,9 +6103,10 @@ print(json.dumps(data, indent=2))
   }
 
   openclaw_permission_render_status() {
-    echo "应用层配置: ~/.openclaw/openclaw.json"
-    echo "宿主机审批: ~/.openclaw/exec-approvals.json"
-    echo "---------------------------------------"
+    skpl_ui_section "配置路径"
+    skpl_ui_kv "应用层配置" "~/.openclaw/openclaw.json"
+    skpl_ui_kv "宿主机审批" "~/.openclaw/exec-approvals.json"
+    skpl_ui_rule "$gl_hui" "─" 60
     local current_profile current_sec current_ask current_elevated
     current_profile=$(openclaw config get tools.profile 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
     current_sec=$(openclaw config get tools.exec.security 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
@@ -6128,7 +6129,7 @@ print(json.dumps(data, indent=2))
       current_mode="\033[1;36m官方沙盒兜底\033[0m"
     fi
     echo -e "  当前综合安全等级: ${current_mode}"
-    echo "---------------------------------------"
+    skpl_ui_rule "$gl_hui" "─" 60
     echo -e "${gl_huang}[应用层 Tool Policy 状态]${gl_bai}"
     echo "  Profile (预设): ${current_profile:-(unset)}"
     echo "  Exec 限制: ${current_sec:-(unset)}"
@@ -6262,11 +6263,10 @@ except Exception:
   }
 
   openclaw_permission_run_audit() {
-    echo "======================================="
-    echo "运行 OpenClaw 官方安全审计与体检..."
-    echo "======================================="
+    clear
+    skpl_ui_header "安全审计与修复" "调用 OpenClaw 官方体检并按需执行修复"
     openclaw security audit
-    echo "---------------------------------------"
+    echo
     read -e -p "是否尝试自动修复发现的安全隐患？(y/n): " fix_choice
     if [[ "$fix_choice" == "y" || "$fix_choice" == "Y" || "$fix_choice" == "yes" ]]; then
       openclaw security audit --fix
@@ -6280,10 +6280,8 @@ except Exception:
   openclaw_permission_manage_allowlist() {
     while true; do
       clear
-      echo "======================================="
-      echo " Exec 命令白名单管理"
-      echo "======================================="
-      echo "当前白名单："
+      skpl_ui_header "Exec 命令白名单" "管理 allowlist 放行规则"
+      skpl_ui_section "当前白名单"
       local allowlist_json
       allowlist_json=$(openclaw approvals get --json 2>/dev/null)
       if [ -n "$allowlist_json" ]; then
@@ -6309,12 +6307,13 @@ except Exception as e:
       else
         echo "  (无法获取)"
       fi
-      echo "---------------------------------------"
-      echo "1. 添加白名单规则"
-      echo "2. 移除白名单规则"
-      echo "0. 返回"
-      echo "---------------------------------------"
-      read -e -p "请选择: " al_choice
+      echo
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "添加白名单规则" "支持 glob，如 /usr/bin/git"
+      skpl_ui_menu_item 2 "移除白名单规则" "从 allowlist 删除命令路径"
+      skpl_ui_menu_item 0 "返回上一级"
+      skpl_ui_footer_prompt "请选择: "
+      read -e al_choice
       case "$al_choice" in
         1)
           read -e -p "输入要放行的命令路径 (支持 glob，如 /usr/bin/git): " pattern
@@ -6340,17 +6339,17 @@ except Exception as e:
     send_stats "OpenClaw权限管理"
     while true; do
       clear
-      skpl_ui_header "OpenClaw 权限管理" "双层策略视图 · 审批与白名单控制"
+      skpl_ui_header "权限管理" "策略、审批与白名单"
       openclaw_permission_render_status
       echo
-      skpl_ui_section "策略切换"
-      skpl_ui_menu_item_tone "1" "标准安全模式" "日常推荐，卡片审批" "ok"
-      skpl_ui_menu_item_tone "2" "开发增强模式" "允许智能体申请提权" "warn"
-      skpl_ui_menu_item_tone "3" "完全开放模式" "高风险，解除宿主拦截" "danger"
-      skpl_ui_menu_item "4" "恢复官方默认" "回到初始沙盒策略"
-      skpl_ui_menu_item "5" "安全审计与修复" "底层检查"
-      skpl_ui_menu_item "6" "Exec 命令白名单" "管理 allowlist"
-      skpl_ui_menu_item "0" "返回上一级"
+      skpl_ui_section "模式切换"
+      skpl_ui_menu_item_tone 1 "标准安全模式" "日常推荐，弹卡片审批" "ok"
+      skpl_ui_menu_item_tone 2 "开发增强模式" "允许智能体申请提权" "warn"
+      skpl_ui_menu_item_tone 3 "完全开放模式" "高风险，解除宿主机拦截" "danger"
+      skpl_ui_menu_item 4 "恢复官方默认" "恢复初始沙盒防御策略"
+      skpl_ui_menu_item 5 "安全审计与修复" "检查并自动修复"
+      skpl_ui_menu_item 6 "Exec 命令白名单" "管理 allowlist"
+      skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e perm_choice
       case "$perm_choice" in
@@ -6367,7 +6366,7 @@ except Exception as e:
           break_end
           ;;
         3)
-          skpl_ui_alert "danger" "完全开放模式会彻底瓦解 exec 审批并自动放行高危代码。" "该模式下智能体对宿主机的限制将显著降低，仅适用于你明确知晓风险的场景。"
+          skpl_ui_alert "danger" "完全开放模式会彻底瓦解 exec 审批并自动放行高危代码。" "仅适用于你明确知晓风险并需要最高权限的场景。"
           read -e -p "输入 FULL 确认继续: " confirm
           if [ "$confirm" = "FULL" ]; then openclaw_permission_apply_full; else echo "已取消"; fi
           break_end
@@ -6856,21 +6855,21 @@ print("✅ 多智能体健康检查完成")
     send_stats "OpenClaw多智能体管理"
     while true; do
       clear
-      skpl_ui_header "OpenClaw 多智能体管理" "缓存视图优先 · 手动刷新运行时状态"
+      skpl_ui_header "多智能体管理" "智能体、绑定与会话"
       openclaw_multiagent_render_status
       echo
-      skpl_ui_section "多智能体操作"
-      skpl_ui_menu_item "1" "刷新运行时状态" "更新 agents / bindings / sessions 缓存"
-      skpl_ui_menu_item "2" "新增智能体" "创建 Agent 与工作区"
-      skpl_ui_menu_item "3" "删除智能体" "移除 Agent 配置"
-      skpl_ui_menu_item "4" "查看路由绑定" "查看当前绑定"
-      skpl_ui_menu_item "5" "新增路由绑定" "绑定入口到 Agent"
-      skpl_ui_menu_item "6" "移除路由绑定" "解除现有绑定"
-      skpl_ui_menu_item "7" "查看会话概况" "会话汇总与模型"
-      skpl_ui_menu_item "8" "健康检查" "检查配置与工作区"
-      skpl_ui_menu_item "9" "修改智能体身份" "名称 / Emoji / IDENTITY.md"
-      skpl_ui_menu_item "10" "清理过期会话" "执行 sessions cleanup"
-      skpl_ui_menu_item "0" "返回上一级"
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "刷新运行时状态" "更新 agents / bindings / sessions 缓存"
+      skpl_ui_menu_item 2 "新增智能体" "创建 Agent 与工作区"
+      skpl_ui_menu_item_tone 3 "删除智能体" "移除 Agent 配置" "danger"
+      skpl_ui_menu_item 4 "查看路由绑定" "查看当前绑定"
+      skpl_ui_menu_item 5 "新增路由绑定" "绑定入口到 Agent"
+      skpl_ui_menu_item 6 "移除路由绑定" "解除现有绑定"
+      skpl_ui_menu_item 7 "查看会话概况" "会话汇总与模型"
+      skpl_ui_menu_item 8 "健康检查" "检查配置与工作区"
+      skpl_ui_menu_item 9 "修改智能体身份" "名称 / Emoji / IDENTITY.md"
+      skpl_ui_menu_item 10 "清理过期会话" "执行 sessions cleanup"
+      skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e multi_choice
       case "$multi_choice" in
@@ -6896,16 +6895,16 @@ openclaw_backup_restore_menu() {
     send_stats "OpenClaw备份与还原"
     while true; do
       clear
-      skpl_ui_header "OpenClaw 备份与还原" "带清单和 sha256 校验的归档管理"
+      skpl_ui_header "备份与还原" "记忆与项目归档"
       openclaw_backup_render_file_list
       echo
-      skpl_ui_section "备份操作"
-      skpl_ui_menu_item "1" "备份记忆全量" "支持多智能体"
-      skpl_ui_menu_item "2" "还原记忆全量" "按包内容恢复"
-      skpl_ui_menu_item "3" "备份 OpenClaw 项目" "默认安全模式"
-      skpl_ui_menu_item "4" "还原 OpenClaw 项目" "高级 / 高风险"
-      skpl_ui_menu_item "5" "删除备份文件"
-      skpl_ui_menu_item "0" "返回上一级"
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "备份记忆全量" "支持多智能体"
+      skpl_ui_menu_item 2 "还原记忆全量" "按包内容恢复"
+      skpl_ui_menu_item 3 "备份 OpenClaw 项目" "默认安全模式"
+      skpl_ui_menu_item_tone 4 "还原 OpenClaw 项目" "高级 / 高风险" "danger"
+      skpl_ui_menu_item_tone 5 "删除备份文件" "从备份目录移除归档" "danger"
+      skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e backup_choice
 
@@ -6929,15 +6928,15 @@ openclaw_backup_restore_menu() {
   openclaw_evomap_menu() {
     while true; do
       clear
-      skpl_ui_header "EvoMap 管理" "协同进化模块 · 安装、更新与记忆目录"
+      skpl_ui_header "EvoMap 管理" "安装、更新与记忆目录"
       evomap_print_status
       echo
-      skpl_ui_section "EvoMap 操作"
-      skpl_ui_menu_item "1" "安装 EvoMap" "克隆、依赖、初始化"
-      skpl_ui_menu_item "2" "卸载 EvoMap" "保留备份后移除"
-      skpl_ui_menu_item "3" "更新 EvoMap" "拉取最新代码并重启"
-      skpl_ui_menu_item "4" "EvoMap 记忆管理" "查看目录与备份"
-      skpl_ui_menu_item "0" "返回上一级"
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "安装 EvoMap" "克隆、依赖、初始化"
+      skpl_ui_menu_item_tone 2 "卸载 EvoMap" "保留备份后移除" "danger"
+      skpl_ui_menu_item 3 "更新 EvoMap" "拉取最新代码并重启"
+      skpl_ui_menu_item 4 "EvoMap 记忆管理" "查看目录与备份"
+      skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e evomap_choice
       case "$evomap_choice" in
@@ -6970,7 +6969,9 @@ openclaw_backup_restore_menu() {
 
 
   uninstall_openclaw_panel() {
-    skpl_ui_alert "danger" "开始卸载 OpenClaw" "将移除 CLI、gateway service 与默认数据目录。"
+    clear
+    skpl_ui_header "卸载 OpenClaw" "移除 CLI、网关服务与当前用户数据目录"
+    skpl_ui_alert "danger" "该操作会删除当前用户目录下的 OpenClaw 数据" "如需保留工作区或配置，请先在备份与还原菜单中导出。"
     send_stats "卸载 OpenClaw..."
     remove_openclaw_gateway_service
     openclaw uninstall
@@ -6982,7 +6983,8 @@ openclaw_backup_restore_menu() {
     if [ -f /home/docker/appno.txt ]; then
       sed -i "/\b${app_id}\b/d" /home/docker/appno.txt
     fi
-    skpl_ui_alert "ok" "卸载完成" "OpenClaw CLI 已移除，若仍有额外目录残留可按提示手动处理。"
+    echo
+    skpl_ui_alert "ok" "卸载完成" "OpenClaw CLI、计划任务与当前用户目录已清理。"
     break_end
   }
 
@@ -7041,7 +7043,7 @@ openclaw_backup_restore_menu() {
   openclaw_show_webui_addr() {
     local local_ip token domains
 
-    skpl_ui_header "OpenClaw WebUI 访问设置" "本机访问优先 · 域名入口按需接入"
+    skpl_ui_header "WebUI 访问设置" "本机访问优先，域名入口按需接入"
     local_ip="127.0.0.1"
 
     token=$(openclaw_webui_get_cached_token 2>/dev/null || true)
@@ -7139,11 +7141,11 @@ openclaw_backup_restore_menu() {
       clear
       openclaw_show_webui_addr
       echo
-      skpl_ui_section "访问控制"
-      skpl_ui_menu_item "1" "刷新访问 Token" "重新获取 dashboard token"
-      skpl_ui_menu_item "2" "添加域名访问" "自动写入 allowedOrigins"
-      skpl_ui_menu_item "3" "删除域名访问" "移除反向代理域名"
-      skpl_ui_menu_item "0" "退出"
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "刷新访问 Token" "重新获取 dashboard token"
+      skpl_ui_menu_item 2 "添加域名访问" "自动写入 allowedOrigins"
+      skpl_ui_menu_item_tone 3 "删除域名访问" "移除反向代理域名" "danger"
+      skpl_ui_menu_item 0 "退出"
       skpl_ui_footer_prompt "请选择: "
       read -e choice
 
@@ -7421,11 +7423,11 @@ evomap_memory_menu() {
     skpl_ui_header "EvoMap 记忆管理" "查看学习目录与备份归档"
     evomap_print_status
     echo
-    skpl_ui_section "记忆操作"
-    skpl_ui_menu_item "1" "立即备份 EvoMap"
-    skpl_ui_menu_item "2" "查看记忆目录"
-    skpl_ui_menu_item "3" "查看备份目录"
-    skpl_ui_menu_item "0" "返回上一级"
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "立即备份 EvoMap"
+    skpl_ui_menu_item 2 "查看记忆目录"
+    skpl_ui_menu_item 3 "查看备份目录"
+    skpl_ui_menu_item 0 "返回上一级"
     skpl_ui_footer_prompt "请输入你的选择: "
     read -r evo_mem_choice
     case "$evo_mem_choice" in
@@ -7545,20 +7547,19 @@ skpl_wslwin_and_update_system() {
 skpl_main_panel() {
   while true; do
     clear
-    echo "==============================================="
-    echo "SKPL 控制台"
-    echo "==============================================="
-    echo "1. OpenClaw 控制台"
-    echo "2. EvoMap 管理"
-    echo "3. 从头重新执行安装流程"
-    echo "4. 更新当前面板脚本"
-    echo "5. 卸载当前面板入口"
-    echo "6. 查看最近日志"
-    echo "7. 从断点继续安装"
-    echo "8. WSL 代理同步并更新系统"
-    echo "0. 退出"
-    echo "-----------------------------------------------"
-    read -r -p "请输入你的选择: " skpl_choice
+    skpl_ui_header "SKPL 控制台" "安装、维护与 OpenClaw / EvoMap 入口"
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "OpenClaw 控制台" "进入主控制面板"
+    skpl_ui_menu_item 2 "EvoMap 管理" "记忆与进化管理"
+    skpl_ui_menu_item 3 "从头重新安装" "重置状态后重新跑全流程"
+    skpl_ui_menu_item 4 "更新当前面板脚本" "同步最新脚本到运行入口"
+    skpl_ui_menu_item 5 "卸载当前面板入口" "仅移除 SKPL 入口"
+    skpl_ui_menu_item 6 "查看最近日志" "读取安装与运行日志"
+    skpl_ui_menu_item 7 "从断点继续安装" "按当前 STEP 续跑"
+    skpl_ui_menu_item 8 "WSL 代理同步并更新系统" "执行 wslwin 与系统更新"
+    skpl_ui_menu_item 0 "退出"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -r skpl_choice
     case "$skpl_choice" in
       1) openclaw_panel_menu ;;
       2) openclaw_evomap_menu ;;
