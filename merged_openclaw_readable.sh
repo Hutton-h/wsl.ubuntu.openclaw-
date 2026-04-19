@@ -42,6 +42,8 @@ init_skpl_runtime() {
   mkdir -p "$SKPL_HOME"
   touch "$SKPL_LOG_FILE"
   touch "$SKPL_STATE_FILE"
+  write_skpl_proxy_env_script >/dev/null 2>&1 || true
+  write_openclaw_gateway_launcher >/dev/null 2>&1 || true
 }
 
 log_msg() {
@@ -78,20 +80,27 @@ resolve_active_proxy() {
 apply_detected_proxy_env() {
   local active_proxy="$1"
   local no_proxy_rule="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
+  local proxy_url=""
 
   if [ -z "$active_proxy" ]; then
-    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+    unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY ftp_proxy FTP_PROXY no_proxy NO_PROXY npm_config_proxy npm_config_https_proxy npm_config_noproxy
     return 0
   fi
 
-  export http_proxy="http://$active_proxy"
-  export https_proxy="http://$active_proxy"
-  export HTTP_PROXY="http://$active_proxy"
-  export HTTPS_PROXY="http://$active_proxy"
-  export all_proxy="socks5://$active_proxy"
-  export ALL_PROXY="socks5://$active_proxy"
+  proxy_url="http://$active_proxy"
+  export http_proxy="$proxy_url"
+  export https_proxy="$proxy_url"
+  export HTTP_PROXY="$proxy_url"
+  export HTTPS_PROXY="$proxy_url"
+  export all_proxy="$proxy_url"
+  export ALL_PROXY="$proxy_url"
+  export ftp_proxy="$proxy_url"
+  export FTP_PROXY="$proxy_url"
   export no_proxy="$no_proxy_rule"
   export NO_PROXY="$no_proxy_rule"
+  export npm_config_proxy="$proxy_url"
+  export npm_config_https_proxy="$proxy_url"
+  export npm_config_noproxy="$no_proxy_rule"
 }
 
 refresh_runtime_proxy_env() {
@@ -111,6 +120,7 @@ write_skpl_proxy_env_script() {
 #!/bin/bash
 SKPL_PROXY_PORT_VALUE="${1:-10808}"
 NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
+PROXY_URL=""
 
 check_port() {
   local ip_port="$1"
@@ -128,16 +138,22 @@ elif check_port "10.255.255.254:${SKPL_PROXY_PORT_VALUE}"; then
 fi
 
 if [ -n "$ACTIVE_PROXY" ]; then
-  export http_proxy="http://$ACTIVE_PROXY"
-  export https_proxy="http://$ACTIVE_PROXY"
-  export HTTP_PROXY="http://$ACTIVE_PROXY"
-  export HTTPS_PROXY="http://$ACTIVE_PROXY"
-  export all_proxy="socks5://$ACTIVE_PROXY"
-  export ALL_PROXY="socks5://$ACTIVE_PROXY"
+  PROXY_URL="http://$ACTIVE_PROXY"
+  export http_proxy="$PROXY_URL"
+  export https_proxy="$PROXY_URL"
+  export HTTP_PROXY="$PROXY_URL"
+  export HTTPS_PROXY="$PROXY_URL"
+  export all_proxy="$PROXY_URL"
+  export ALL_PROXY="$PROXY_URL"
+  export ftp_proxy="$PROXY_URL"
+  export FTP_PROXY="$PROXY_URL"
   export no_proxy="$NO_PROXY_RULE"
   export NO_PROXY="$NO_PROXY_RULE"
+  export npm_config_proxy="$PROXY_URL"
+  export npm_config_https_proxy="$PROXY_URL"
+  export npm_config_noproxy="$NO_PROXY_RULE"
 else
-  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY ftp_proxy FTP_PROXY no_proxy NO_PROXY npm_config_proxy npm_config_https_proxy npm_config_noproxy
 fi
 EOF_PROXY_ENV
   chmod +x "$SKPL_PROXY_ENV_SCRIPT"
@@ -917,17 +933,23 @@ else
 fi
 
 if [ -n "$ACTIVE_PROXY" ]; then
-  export http_proxy="http://$ACTIVE_PROXY"
-  export https_proxy="http://$ACTIVE_PROXY"
-  export HTTP_PROXY="http://$ACTIVE_PROXY"
-  export HTTPS_PROXY="http://$ACTIVE_PROXY"
-  export all_proxy="socks5://$ACTIVE_PROXY"
-  export ALL_PROXY="socks5://$ACTIVE_PROXY"
+  PROXY_URL="http://$ACTIVE_PROXY"
+  export http_proxy="$PROXY_URL"
+  export https_proxy="$PROXY_URL"
+  export HTTP_PROXY="$PROXY_URL"
+  export HTTPS_PROXY="$PROXY_URL"
+  export all_proxy="$PROXY_URL"
+  export ALL_PROXY="$PROXY_URL"
+  export ftp_proxy="$PROXY_URL"
+  export FTP_PROXY="$PROXY_URL"
   export no_proxy="$NO_PROXY_RULE"
   export NO_PROXY="$NO_PROXY_RULE"
+  export npm_config_proxy="$PROXY_URL"
+  export npm_config_https_proxy="$PROXY_URL"
+  export npm_config_noproxy="$NO_PROXY_RULE"
   echo "自动同步：代理已开启 ($ACTIVE_PROXY)"
 else
-  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY ftp_proxy FTP_PROXY no_proxy NO_PROXY npm_config_proxy npm_config_https_proxy npm_config_noproxy
   echo "自动同步：未检测到代理监听，请检查 Windows 代理是否已开启"
 fi
 EOF
