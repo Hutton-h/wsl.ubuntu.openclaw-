@@ -25,6 +25,8 @@ SKPL_MULTIAGENT_AGENTS_CACHE_FILE="${SKPL_HOME}/multiagent-agents.json"
 SKPL_MULTIAGENT_BINDINGS_CACHE_FILE="${SKPL_HOME}/multiagent-bindings.json"
 SKPL_MULTIAGENT_SESSIONS_CACHE_FILE="${SKPL_HOME}/multiagent-sessions.json"
 SKPL_WEBUI_TOKEN_CACHE_FILE="${SKPL_HOME}/webui-token.txt"
+SKPL_REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Hutton-h/wsl.ubuntu.openclaw-/main/merged_openclaw_readable.sh"
+SKPL_REMOTE_SCRIPT_PROXIES="https://gh-proxy.com/ https://ghproxy.net/ https://github.moeyy.xyz/ https://gh-proxy.llyke.com/ https://ghproxy.cc/"
 SKPL_BASE_NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
 SKPL_DOMESTIC_MODEL_DIRECT_RULE="model-square.app.baizhi.cloud,.baizhi.cloud,.aliyuncs.com,.modelscope.cn,.deepseek.com,.moonshot.cn,.bigmodel.cn,.siliconflow.cn,.stepfun.com,.minimax.chat,.baichuan-ai.com,.ppinfra.com,.volces.com,.ark.cn-beijing.volces.com,.qianfan.baidubce.com,.xf-yun.com,.spark-api.xf-yun.com,.hunyuan.cloud.tencent.com,.tencentcloudapi.com"
 
@@ -1282,6 +1284,80 @@ exec bash /root/.skpl/merged_openclaw_readable.sh panel "$@"
 EOF_SKPL_CMD
   chmod +x "${SKPL_CMD_PATH}"
   hash -r 2>/dev/null || true
+}
+
+skpl_try_download_file() {
+  local url="$1"
+  local target="$2"
+
+  if command -v curl >/dev/null 2>&1; then
+    if curl -fsSL --connect-timeout 10 --max-time 90 "$url" -o "$target" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  if command -v wget >/dev/null 2>&1; then
+    if wget -q --timeout=90 -O "$target" "$url" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+skpl_sync_remote_panel() {
+  init_skpl_runtime
+  mkdir -p "${SKPL_HOME}"
+
+  local tmp_file downloaded_url proxy_url proxy
+  tmp_file=$(mktemp)
+
+  if skpl_try_download_file "$SKPL_REMOTE_SCRIPT_URL" "$tmp_file"; then
+    downloaded_url="$SKPL_REMOTE_SCRIPT_URL"
+  else
+    for proxy in $SKPL_REMOTE_SCRIPT_PROXIES; do
+      proxy_url="${proxy}${SKPL_REMOTE_SCRIPT_URL}"
+      if skpl_try_download_file "$proxy_url" "$tmp_file"; then
+        downloaded_url="$proxy_url"
+        break
+      fi
+    done
+  fi
+
+  if [ -z "$downloaded_url" ]; then
+    echo "远程更新失败：无法从 GitHub 或代理下载最新面板脚本。"
+    return 1
+  fi
+
+  local size
+  size=$(wc -c < "$tmp_file" 2>/dev/null || echo 0)
+  if [ "$size" -lt 1000 ]; then
+    echo "远程更新失败：下载文件异常。"
+    return 1
+  fi
+
+  if ! bash -n "$tmp_file"; then
+    echo "远程更新失败：下载到的脚本语法校验未通过。"
+    return 1
+  fi
+
+  install -m 755 "$tmp_file" "${SKPL_SCRIPT_PATH}"
+
+  cat > "${SKPL_CMD_PATH}" <<'EOF_SKPL_CMD'
+#!/bin/bash
+set -e
+if [ ! -f /root/.skpl/merged_openclaw_readable.sh ]; then
+  echo "未找到 /root/.skpl/merged_openclaw_readable.sh，请先运行安装脚本。"
+  exit 1
+fi
+exec bash /root/.skpl/merged_openclaw_readable.sh panel "$@"
+EOF_SKPL_CMD
+  chmod +x "${SKPL_CMD_PATH}"
+  hash -r 2>/dev/null || true
+
+  echo "已从远程更新面板脚本。"
+  echo "来源: $downloaded_url"
+  return 0
 }
 
 remove_skpl_panel_only() {
@@ -7514,8 +7590,18 @@ rerun_full_pipeline_from_start() {
 }
 
 skpl_update_panel() {
-  save_self_to_skpl
-  echo "SKPL 面板已更新。"
+  clear
+  skpl_ui_header "面板更新"
+  skpl_ui_kv "更新来源" "GitHub main"
+  skpl_ui_kv "远程脚本" "$SKPL_REMOTE_SCRIPT_URL"
+  echo
+  if ! skpl_sync_remote_panel; then
+    break_end
+    return 1
+  fi
+  echo
+  echo "正在重新载入最新面板..."
+  exec bash "${SKPL_SCRIPT_PATH}" panel
 }
 
 skpl_update_system() {
@@ -7557,6 +7643,11 @@ skpl_main_panel() {
   while true; do
     clear
     skpl_ui_header "SKPL-OpenClaw管理面板"
+    skpl_ui_section "概览"
+    skpl_ui_kv "运行脚本" "$SKPL_SCRIPT_PATH"
+    skpl_ui_kv "更新来源" "GitHub main"
+
+    echo
     skpl_ui_section "核心入口"
     skpl_ui_menu_item 1 "OpenClaw 面板" "进入 OpenClaw 主控制台"
     skpl_ui_menu_item 2 "EvoMap 管理" "管理记忆、进化与同步"
@@ -7565,7 +7656,7 @@ skpl_main_panel() {
     skpl_ui_section "安装与维护"
     skpl_ui_menu_item 3 "重新执行完整安装流程" "重置状态后从头运行"
     skpl_ui_menu_item 7 "从中断点继续安装" "按当前步骤续跑"
-    skpl_ui_menu_item 4 "SKPL 面板更新" "同步最新脚本到运行入口"
+    skpl_ui_menu_item 4 "SKPL 面板更新" "从 GitHub 拉取最新脚本"
     skpl_ui_menu_item 6 "查看最近日志" "读取安装与运行日志"
     skpl_ui_menu_item 8 "WSL 代理同步并更新系统" "执行 wslwin 与系统更新"
     skpl_ui_menu_item 5 "SKPL 面板卸载" "仅移除 SKPL 入口"
