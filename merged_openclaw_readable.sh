@@ -44,7 +44,7 @@ fi
 
 skpl_ui_rule() {
   local color="${1:-$gl_hui}"
-  local char="${2:-─}"
+  local char="-"
   local width="${3:-60}"
   printf '%b' "$color"
   printf '%*s' "$width" '' | tr ' ' "$char"
@@ -54,12 +54,12 @@ skpl_ui_rule() {
 skpl_ui_header() {
   local title="$1"
   local subtitle="${2:-}"
-  skpl_ui_rule "$gl_hui" "─" 60
+  skpl_ui_rule "$gl_hui" "-" 60
   printf '%b%s%b\n' "$gl_bai" "${title}" "$gl_bai"
   if [ -n "$subtitle" ]; then
     printf '%b%s%b\n' "$gl_hui" "$subtitle" "$gl_bai"
   fi
-  skpl_ui_rule "$gl_hui" "─" 60
+  skpl_ui_rule "$gl_hui" "-" 60
 }
 
 skpl_ui_section() {
@@ -117,9 +117,9 @@ skpl_ui_menu_item() {
   local label="$2"
   local desc="${3:-}"
   if [ -n "$desc" ]; then
-    printf '%b%02d%b  %-20s  %b%s%b\n' "$gl_bai" "$key" "$gl_bai" "$label" "$gl_hui" "$desc" "$gl_bai"
+    printf '%b%s.%b %-20s  %b%s%b\n' "$gl_bai" "$key" "$gl_bai" "$label" "$gl_hui" "$desc" "$gl_bai"
   else
-    printf '%b%02d%b  %s\n' "$gl_bai" "$key" "$gl_bai" "$label"
+    printf '%b%s.%b %s\n' "$gl_bai" "$key" "$gl_bai" "$label"
   fi
 }
 
@@ -135,9 +135,9 @@ skpl_ui_menu_item_tone() {
     ok) color="$gl_lv" ;;
   esac
   if [ -n "$desc" ]; then
-    printf '%b%02d%b  %-20s  %b%s%b\n' "$color" "$key" "$gl_bai" "$label" "$gl_hui" "$desc" "$gl_bai"
+    printf '%b%s.%b %-20s  %b%s%b\n' "$color" "$key" "$gl_bai" "$label" "$gl_hui" "$desc" "$gl_bai"
   else
-    printf '%b%02d%b  %s\n' "$color" "$key" "$gl_bai" "$label"
+    printf '%b%s.%b %s\n' "$color" "$key" "$gl_bai" "$label"
   fi
 }
 
@@ -1536,23 +1536,32 @@ openclaw_panel_menu() {
     fi
   }
 
+  get_local_openclaw_version() {
+    local version_text=""
+    if command -v openclaw >/dev/null 2>&1; then
+      version_text=$(openclaw --version 2>/dev/null | head -n 1)
+      [ -z "$version_text" ] && version_text=$(openclaw version 2>/dev/null | head -n 1)
+    fi
+    printf '%s\n' "${version_text:-未检测到}"
+  }
+
 
   show_menu() {
     clear
 
     local install_status=$(get_install_status)
     local running_status=$(get_running_status)
-    local update_message=$(get_cached_openclaw_update_message)
+    local local_version=$(get_local_openclaw_version)
     local install_tone="warn"
     local running_tone="warn"
     [ "$install_status" = "已安装" ] && install_tone="ok"
     [ "$running_status" = "运行中" ] && running_tone="ok"
 
-    skpl_ui_header "OpenClaw" "控制台"
+    skpl_ui_header "OpenClaw 控制台"
     skpl_ui_section "摘要"
     skpl_ui_status_row "安装状态" "$install_tone" "$install_status"
     skpl_ui_status_row "网关状态" "$running_tone" "$running_status"
-    [ -n "$update_message" ] && skpl_ui_kv "版本信息" "$update_message"
+    skpl_ui_kv "版本信息" "$local_version"
 
     echo
     skpl_ui_section "核心"
@@ -7547,15 +7556,15 @@ skpl_wslwin_and_update_system() {
 skpl_main_panel() {
   while true; do
     clear
-    skpl_ui_header "SKPL 控制台" "安装、维护与 OpenClaw / EvoMap 入口"
-    skpl_ui_section "操作"
-    skpl_ui_menu_item 1 "OpenClaw 控制台" "进入主控制面板"
+    skpl_ui_header "SKPL"
+    skpl_ui_section "入口"
+    skpl_ui_menu_item 1 "OpenClaw 面板" "进入主控制面板"
     skpl_ui_menu_item 2 "EvoMap 管理" "记忆与进化管理"
-    skpl_ui_menu_item 3 "从头重新安装" "重置状态后重新跑全流程"
-    skpl_ui_menu_item 4 "更新当前面板脚本" "同步最新脚本到运行入口"
-    skpl_ui_menu_item 5 "卸载当前面板入口" "仅移除 SKPL 入口"
+    skpl_ui_menu_item 3 "重新执行完整安装流程" "重置状态后从头运行"
+    skpl_ui_menu_item 4 "SKPL 面板更新" "同步最新脚本到运行入口"
+    skpl_ui_menu_item 5 "SKPL 面板卸载" "仅移除 SKPL 入口"
     skpl_ui_menu_item 6 "查看最近日志" "读取安装与运行日志"
-    skpl_ui_menu_item 7 "从断点继续安装" "按当前 STEP 续跑"
+    skpl_ui_menu_item 7 "从中断点继续安装" "按当前步骤续跑"
     skpl_ui_menu_item 8 "WSL 代理同步并更新系统" "执行 wslwin 与系统更新"
     skpl_ui_menu_item 0 "退出"
     skpl_ui_footer_prompt "请输入你的选择: "
