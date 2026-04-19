@@ -6982,7 +6982,7 @@ run_openclaw_install_step() {
 
 run_openclaw2_network_optimization() {
   set +e
-  echo "执行 openclaw2 网络优化（稳定模式）..."
+  echo "执行 openclaw 网络优化（稳定模式）..."
 
   local npm_global openclaw_js
   refresh_runtime_proxy_env
