@@ -1305,6 +1305,42 @@ skpl_try_download_file() {
   return 1
 }
 
+skpl_try_sync_local_panel() {
+  local local_script="/workspace/merged_openclaw_readable.sh"
+  local tmp_file
+
+  if [ ! -f "$local_script" ]; then
+    return 1
+  fi
+
+  tmp_file=$(mktemp)
+  cp "$local_script" "$tmp_file"
+
+  if ! bash -n "$tmp_file"; then
+    echo "本地工作区脚本语法校验未通过，跳过本地同步。"
+    return 1
+  fi
+
+  install -m 755 "$tmp_file" "${SKPL_SCRIPT_PATH}"
+  echo "已从本地工作区同步面板脚本。"
+  echo "来源: $local_script"
+  return 0
+}
+
+skpl_refresh_cmd_entry() {
+  cat > "${SKPL_CMD_PATH}" <<'EOF_SKPL_CMD'
+#!/bin/bash
+set -e
+if [ ! -f /root/.skpl/merged_openclaw_readable.sh ]; then
+  echo "未找到 /root/.skpl/merged_openclaw_readable.sh，请先运行安装脚本。"
+  exit 1
+fi
+exec bash /root/.skpl/merged_openclaw_readable.sh panel "$@"
+EOF_SKPL_CMD
+  chmod +x "${SKPL_CMD_PATH}"
+  hash -r 2>/dev/null || true
+}
+
 skpl_sync_remote_panel() {
   init_skpl_runtime
   mkdir -p "${SKPL_HOME}"
@@ -1342,22 +1378,23 @@ skpl_sync_remote_panel() {
   fi
 
   install -m 755 "$tmp_file" "${SKPL_SCRIPT_PATH}"
-
-  cat > "${SKPL_CMD_PATH}" <<'EOF_SKPL_CMD'
-#!/bin/bash
-set -e
-if [ ! -f /root/.skpl/merged_openclaw_readable.sh ]; then
-  echo "未找到 /root/.skpl/merged_openclaw_readable.sh，请先运行安装脚本。"
-  exit 1
-fi
-exec bash /root/.skpl/merged_openclaw_readable.sh panel "$@"
-EOF_SKPL_CMD
-  chmod +x "${SKPL_CMD_PATH}"
-  hash -r 2>/dev/null || true
+  skpl_refresh_cmd_entry
 
   echo "已从远程更新面板脚本。"
   echo "来源: $downloaded_url"
   return 0
+}
+
+skpl_sync_panel() {
+  init_skpl_runtime
+  mkdir -p "${SKPL_HOME}"
+
+  if skpl_try_sync_local_panel; then
+    skpl_refresh_cmd_entry
+    return 0
+  fi
+
+  skpl_sync_remote_panel
 }
 
 remove_skpl_panel_only() {
@@ -7434,11 +7471,12 @@ evomap_print_status() {
     evomap_hub_url=$(grep -E '^A2A_HUB_URL=' "$EVOMAP_DIR/.env" 2>/dev/null | head -n 1 | cut -d= -f2-)
     evomap_strategy=$(grep -E '^EVOLVE_STRATEGY=' "$EVOMAP_DIR/.env" 2>/dev/null | head -n 1 | cut -d= -f2-)
     evomap_worker=$(grep -E '^WORKER_ENABLED=' "$EVOMAP_DIR/.env" 2>/dev/null | head -n 1 | cut -d= -f2-)
-    [ -n "$evomap_node_id" ] && skpl_ui_kv "Node ID" "$evomap_node_id"
-    [ -n "$evomap_hub_url" ] && skpl_ui_kv "Hub" "$evomap_hub_url"
-    [ -n "$evomap_strategy" ] && skpl_ui_kv "策略" "$evomap_strategy"
-    [ -n "$evomap_worker" ] && skpl_ui_kv "Worker" "$evomap_worker"
+    skpl_ui_kv "Node ID" "${evomap_node_id:-未设置}"
+    skpl_ui_kv "Hub" "${evomap_hub_url:-未设置}"
+    skpl_ui_kv "策略" "${evomap_strategy:-balanced}"
+    skpl_ui_kv "Worker" "${evomap_worker:-未设置}"
   fi
+  return 0
 }
 
 evomap_require_installed() {
@@ -7834,10 +7872,10 @@ rerun_full_pipeline_from_start() {
 skpl_update_panel() {
   clear
   skpl_ui_header "面板更新"
-  skpl_ui_kv "更新来源" "GitHub main"
+  skpl_ui_kv "更新策略" "优先本地工作区，其次 GitHub main"
   skpl_ui_kv "远程脚本" "$SKPL_REMOTE_SCRIPT_URL"
   echo
-  if ! skpl_sync_remote_panel; then
+  if ! skpl_sync_panel; then
     break_end
     return 1
   fi
