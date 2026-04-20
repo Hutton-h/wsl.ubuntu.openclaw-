@@ -19,6 +19,8 @@ SKPL_NPM_COUNTRY=""
 SKPL_NPM_REGISTRIES=""
 SKPL_PROXY_ENV_SCRIPT="${SKPL_HOME}/proxy-env.sh"
 SKPL_OPENCLAW_LAUNCHER="${SKPL_HOME}/openclaw-gateway-launch.sh"
+SKPL_OPENCLAW_GATEWAY_PID_FILE="${SKPL_HOME}/openclaw-gateway.pid"
+SKPL_OPENCLAW_GATEWAY_LOG_FILE="${SKPL_HOME}/openclaw-gateway.log"
 SKPL_MEMORY_STATUS_CACHE_FILE="${SKPL_HOME}/memory-status.json"
 SKPL_MEMORY_AGENTS_CACHE_FILE="${SKPL_HOME}/memory-agents.tsv"
 SKPL_MULTIAGENT_AGENTS_CACHE_FILE="${SKPL_HOME}/multiagent-agents.json"
@@ -524,6 +526,25 @@ set -e
 OPENCLAW_JS="$1"
 PROXY_PORT="$2"
 shift 2
+NODE_BIN="$(command -v node 2>/dev/null || true)"
+
+if [ -z "$NODE_BIN" ]; then
+  for candidate in /usr/local/bin/node /usr/bin/node /bin/node; do
+    if [ -x "$candidate" ]; then
+      NODE_BIN="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ -z "$NODE_BIN" ]; then
+  echo "未找到 node 可执行文件，无法启动 OpenClaw gateway。" >&2
+  exit 127
+fi
+
+export OPENCLAW_NO_RESPAWN=1
+export NODE_COMPILE_CACHE="${NODE_COMPILE_CACHE:-/var/tmp/openclaw-compile-cache}"
+mkdir -p "$NODE_COMPILE_CACHE" 2>/dev/null || true
 
 merge_no_proxy_csv() {
   python3 - "$1" "$2" <<'PY'
@@ -605,7 +626,7 @@ if [ -n "$DYNAMIC_NO_PROXY" ]; then
   export npm_config_noproxy
 fi
 
-exec /usr/bin/node "$OPENCLAW_JS" "$@"
+exec "$NODE_BIN" "$OPENCLAW_JS" "$@"
 EOF_OPENCLAW_LAUNCHER
   chmod +x "$SKPL_OPENCLAW_LAUNCHER"
 }
@@ -1032,9 +1053,103 @@ install_node_and_tools() {
   ensure_node_runtime
 }
 
+openclaw_gateway_prepare_runtime() {
+  mkdir -p /root/.openclaw/agents/main/sessions "$SKPL_HOME"
+  openclaw config set gateway.mode local >/dev/null 2>&1 || true
+}
+
+openclaw_gateway_find_listener_pid() {
+  timeout 3 bash -lc "ss -ltnp '( sport = :18789 )' 2>/dev/null | awk 'match(\$0, /pid=[0-9]+/) { print substr(\$0, RSTART + 4, RLENGTH - 4); exit }'"
+}
+
+openclaw_gateway_pid_alive() {
+  local pid="${1:-}"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+openclaw_gateway_cleanup_pidfile() {
+  if [ -f "$SKPL_OPENCLAW_GATEWAY_PID_FILE" ]; then
+    local pid
+    pid=$(cat "$SKPL_OPENCLAW_GATEWAY_PID_FILE" 2>/dev/null || true)
+    if ! openclaw_gateway_pid_alive "$pid"; then
+      rm -f "$SKPL_OPENCLAW_GATEWAY_PID_FILE"
+    fi
+  fi
+}
+
+openclaw_gateway_sync_pidfile() {
+  local pid=""
+  openclaw_gateway_cleanup_pidfile
+  if [ -f "$SKPL_OPENCLAW_GATEWAY_PID_FILE" ]; then
+    pid=$(cat "$SKPL_OPENCLAW_GATEWAY_PID_FILE" 2>/dev/null || true)
+    if openclaw_gateway_pid_alive "$pid"; then
+      return 0
+    fi
+  fi
+
+  pid=$(openclaw_gateway_find_listener_pid 2>/dev/null || true)
+  if openclaw_gateway_pid_alive "$pid"; then
+    echo "$pid" > "$SKPL_OPENCLAW_GATEWAY_PID_FILE"
+    return 0
+  fi
+  return 1
+}
+
+openclaw_gateway_stop_fallback() {
+  openclaw_gateway_sync_pidfile >/dev/null 2>&1 || openclaw_gateway_cleanup_pidfile
+  if [ -f "$SKPL_OPENCLAW_GATEWAY_PID_FILE" ]; then
+    local pid
+    pid=$(cat "$SKPL_OPENCLAW_GATEWAY_PID_FILE" 2>/dev/null || true)
+    if openclaw_gateway_pid_alive "$pid"; then
+      kill "$pid" >/dev/null 2>&1 || true
+      sleep 1
+      if openclaw_gateway_pid_alive "$pid"; then
+        kill -9 "$pid" >/dev/null 2>&1 || true
+      fi
+    fi
+    rm -f "$SKPL_OPENCLAW_GATEWAY_PID_FILE"
+  fi
+}
+
+openclaw_gateway_start_fallback() {
+  local openclaw_js=""
+  local i
+  openclaw_js=$(resolve_openclaw_js_entry 2>/dev/null || true)
+  [ -n "$openclaw_js" ] || return 1
+
+  write_skpl_proxy_env_script >/dev/null 2>&1 || true
+  write_openclaw_gateway_launcher >/dev/null 2>&1 || true
+  openclaw_gateway_stop_fallback
+
+  nohup "$SKPL_OPENCLAW_LAUNCHER" "$openclaw_js" "${SKPL_PROXY_PORT:-10808}" gateway --port 18789 >"$SKPL_OPENCLAW_GATEWAY_LOG_FILE" 2>&1 &
+  echo $! > "$SKPL_OPENCLAW_GATEWAY_PID_FILE"
+
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if timeout 1 bash -c 'echo > /dev/tcp/127.0.0.1/18789' 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
+openclaw_gateway_restart_safe() {
+  start_gateway
+}
+
 start_gateway() {
+  openclaw_gateway_prepare_runtime
   openclaw gateway stop >/dev/null 2>&1 || true
-  openclaw gateway start >/dev/null 2>&1 || true
+  openclaw_gateway_stop_fallback
+  if ! openclaw gateway start >/dev/null 2>&1; then
+    openclaw_gateway_start_fallback >/dev/null 2>&1 || true
+  fi
+  if ! timeout 1 bash -c 'echo > /dev/tcp/127.0.0.1/18789' 2>/dev/null; then
+    openclaw_gateway_start_fallback >/dev/null 2>&1 || true
+  fi
+  openclaw_gateway_sync_pidfile >/dev/null 2>&1 || true
   if [ "${SKPL_BATCH_MODE:-0}" != "1" ]; then
     sleep 3
   fi
@@ -1110,7 +1225,7 @@ openclaw_memory_prepare_prefetch() {
 
 openclaw_memory_finalize() {
   openclaw memory index --force >/dev/null 2>&1 || true
-  openclaw gateway restart >/dev/null 2>&1 || true
+  openclaw_gateway_restart_safe >/dev/null 2>&1 || true
 }
 
 openclaw_memory_bootstrap() {
@@ -1126,7 +1241,6 @@ openclaw_memory_bootstrap() {
       curl -L --retry 3 --connect-timeout 10 --max-time 900 -C - -o "$model_path" "$model_url" || true
     fi
     openclaw memory index --force >/dev/null 2>&1 || true
-    openclaw gateway restart >/dev/null 2>&1 || true
   ' _ "$model_path" >"$bootstrap_log" 2>&1 &
   disown 2>/dev/null || true
   echo "$bootstrap_log"
@@ -1204,6 +1318,11 @@ server {
   location / {
     proxy_pass http://${target_host}:${target_port};
     proxy_http_version 1.1;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    proxy_connect_timeout 30s;
+    proxy_buffering off;
+    proxy_request_buffering off;
     proxy_set_header Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -2115,13 +2234,14 @@ PY
     break_end
   }
 
-  stop_bot() {
-    echo "停止 OpenClaw..."
-    send_stats "停止 OpenClaw..."
-    tmux kill-session -t gateway > /dev/null 2>&1
-    openclaw gateway stop
-    break_end
-  }
+stop_bot() {
+  echo "停止 OpenClaw..."
+  send_stats "停止 OpenClaw..."
+  tmux kill-session -t gateway > /dev/null 2>&1
+  openclaw gateway stop
+  openclaw_gateway_stop_fallback
+  break_end
+}
 
   view_logs() {
     echo "查看 OpenClaw 状态日志"
@@ -7226,7 +7346,7 @@ openclaw_backup_restore_menu() {
         tmp_json=$(mktemp)
         if jq 'if .gateway.controlUi == null then .gateway.controlUi = {"allowedOrigins": ["http://127.0.0.1"]} else . end | if (.gateway.controlUi.allowedOrigins | contains([$origin]) | not) then .gateway.controlUi.allowedOrigins += [$origin] else . end' --arg origin "$new_origin" "$config_file" > "$tmp_json" && mv "$tmp_json" "$config_file"; then
           echo -e "${gl_kjlan}已将域名 ${yuming} 加入 allowedOrigins 配置${gl_bai}"
-          openclaw gateway restart >/dev/null 2>&1
+          openclaw_gateway_restart_safe >/dev/null 2>&1
         else
           rm -f "$tmp_json"
           echo "❌ 写入 allowedOrigins 失败，请检查 OpenClaw 配置文件是否为合法 JSON。"
