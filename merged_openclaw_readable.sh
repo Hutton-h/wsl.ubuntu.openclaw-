@@ -7565,10 +7565,11 @@ evomap_set_strategy_menu() {
   local current strategy_choice strategy_value
   current=$(evomap_env_get "EVOLVE_STRATEGY")
   echo "当前策略: ${current:-balanced}"
-  echo "1. balanced"
-  echo "2. innovate"
-  echo "3. harden"
-  echo "4. repair-only"
+  echo "推荐: balanced（适合 OpenClaw，兼顾稳定修复与持续改进）"
+  echo "1. balanced    稳定优先，适合日常长期运行"
+  echo "2. innovate    更偏向新功能和探索"
+  echo "3. harden      更偏向稳固和质量收敛"
+  echo "4. repair-only 仅聚焦修复与止损"
   read -e -p "请选择策略: " strategy_choice
   case "$strategy_choice" in
     1) strategy_value="balanced" ;;
