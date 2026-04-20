@@ -291,8 +291,35 @@ init_skpl_runtime() {
   mkdir -p "$SKPL_HOME"
   touch "$SKPL_LOG_FILE"
   touch "$SKPL_STATE_FILE"
+  skpl_load_saved_proxy_port
   write_skpl_proxy_env_script >/dev/null 2>&1 || true
   write_openclaw_gateway_launcher >/dev/null 2>&1 || true
+}
+
+skpl_load_saved_proxy_port() {
+  local port=""
+  local candidate=""
+
+  if [ -s "$HOME/.auto_proxy_sync.sh" ]; then
+    candidate=$(sed -n 's/^SKPL_PROXY_PORT_VALUE="\([0-9][0-9]*\)"$/\1/p' "$HOME/.auto_proxy_sync.sh" | sed -n '1p')
+    if [ -z "$candidate" ]; then
+      candidate=$(sed -n 's/^PROXY_MIRRORED="127\.0\.0\.1:\([0-9][0-9]*\)"$/\1/p' "$HOME/.auto_proxy_sync.sh" | sed -n '1p')
+    fi
+    if [ -n "$candidate" ]; then
+      port="$candidate"
+    fi
+  fi
+
+  if [ -z "$port" ] && [ -s "$SKPL_PROXY_ENV_SCRIPT" ]; then
+    candidate=$(sed -n 's/^SKPL_PROXY_PORT_VALUE="${1:-\([0-9][0-9]*\)}"$/\1/p' "$SKPL_PROXY_ENV_SCRIPT" | sed -n '1p')
+    if [ -n "$candidate" ]; then
+      port="$candidate"
+    fi
+  fi
+
+  if [ -n "$port" ] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+    SKPL_PROXY_PORT="$port"
+  fi
 }
 
 skpl_openclaw_gateway_service_path() {
@@ -1096,6 +1123,27 @@ openclaw_gateway_prepare_runtime() {
   openclaw config set gateway.mode local >/dev/null 2>&1 || true
 }
 
+openclaw_whatsapp_proxy_tuning_apply() {
+  if ! command -v openclaw >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local config_file
+  config_file=$(openclaw_get_config_path_quick)
+  mkdir -p "$(dirname "$config_file")"
+
+  # WhatsApp Web 在必须走代理的环境里更容易遇到短断线；这里收紧心跳并缩短重连退避，减少卡住等待时间。
+  openclaw config set web.heartbeatSeconds 30 >/dev/null 2>&1 || true
+  openclaw config set web.reconnect.initialMs 1000 >/dev/null 2>&1 || true
+  openclaw config set web.reconnect.maxMs 10000 >/dev/null 2>&1 || true
+  openclaw config set web.reconnect.factor 1.4 >/dev/null 2>&1 || true
+  openclaw config set web.reconnect.jitter 0.2 >/dev/null 2>&1 || true
+  openclaw config set web.reconnect.maxAttempts 30 >/dev/null 2>&1 || true
+  openclaw config set channels.whatsapp.debounceMs 0 >/dev/null 2>&1 || true
+  openclaw config set channels.whatsapp.blockStreaming true --json >/dev/null 2>&1 || true
+  openclaw config set channels.whatsapp.healthMonitor.enabled true --json >/dev/null 2>&1 || true
+}
+
 openclaw_gateway_find_listener_pid() {
   timeout 3 bash -lc "ss -ltnp '( sport = :18789 )' 2>/dev/null | awk 'match(\$0, /pid=[0-9]+/) { print substr(\$0, RSTART + 4, RLENGTH - 4); exit }'"
 }
@@ -1179,6 +1227,7 @@ openclaw_gateway_restart_safe() {
 
 start_gateway() {
   openclaw_gateway_prepare_runtime
+  openclaw_whatsapp_proxy_tuning_apply >/dev/null 2>&1 || true
   refresh_openclaw_gateway_service >/dev/null 2>&1 || true
   openclaw gateway stop >/dev/null 2>&1 || true
   openclaw_gateway_stop_fallback
@@ -4423,6 +4472,7 @@ openclaw_json_get_bool() {
           read -e -p "请输入WhatsApp收到的连接码 (例如 NYA99R2F)（输入 0 退出）： " code
           if [ "$code" = "0" ]; then continue; fi
           if [ -z "$code" ]; then echo "错误：连接码不能为空。"; sleep 1; continue; fi
+          openclaw_whatsapp_proxy_tuning_apply >/dev/null 2>&1 || true
           openclaw pairing approve whatsapp "$code"
           break_end
           ;;
@@ -7316,10 +7366,32 @@ openclaw_backup_restore_menu() {
   }
 
   openclaw_webui_refresh_token_cache() {
-    local token
-    token=$(timeout 8 openclaw dashboard 2>/dev/null \
-      | sed -n 's/.*:18789\/#token=\([^[:space:]"&]\+\).*/\1/p' \
-      | head -n 1)
+    local token config_file
+
+    config_file=$(openclaw_get_config_file 2>/dev/null || true)
+    if [ -f "$config_file" ]; then
+      token=$(python3 - "$config_file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    token = (((data or {}).get('gateway') or {}).get('auth') or {}).get('token') or ''
+    if isinstance(token, str):
+        print(token.strip())
+except Exception:
+    pass
+PY
+)
+    fi
+
+    if [ -z "$token" ]; then
+      token=$(timeout 8 openclaw dashboard 2>/dev/null \
+        | sed -n 's/.*:18789\/#token=\([^[:space:]"&]\+\).*/\1/p' \
+        | head -n 1)
+    fi
+
     if [ -n "$token" ]; then
       printf '%s' "$token" > "$SKPL_WEBUI_TOKEN_CACHE_FILE"
       echo "$token"
