@@ -31,6 +31,11 @@ SKPL_REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Hutton-h/wsl.ubuntu.op
 SKPL_REMOTE_SCRIPT_PROXIES="https://gh-proxy.com/ https://ghproxy.net/ https://github.moeyy.xyz/ https://gh-proxy.llyke.com/ https://ghproxy.cc/"
 SKPL_BASE_NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
 SKPL_DOMESTIC_MODEL_DIRECT_RULE="model-square.app.baizhi.cloud,.baizhi.cloud,.aliyuncs.com,.modelscope.cn,.deepseek.com,.moonshot.cn,.bigmodel.cn,.siliconflow.cn,.stepfun.com,.minimax.chat,.baichuan-ai.com,.ppinfra.com,.volces.com,.ark.cn-beijing.volces.com,.qianfan.baidubce.com,.xf-yun.com,.spark-api.xf-yun.com,.hunyuan.cloud.tencent.com,.tencentcloudapi.com"
+SKPL_NODE_COMPILE_CACHE="/var/tmp/openclaw-compile-cache"
+
+export OPENCLAW_NO_RESPAWN="${OPENCLAW_NO_RESPAWN:-1}"
+export NODE_COMPILE_CACHE="${NODE_COMPILE_CACHE:-$SKPL_NODE_COMPILE_CACHE}"
+mkdir -p "$NODE_COMPILE_CACHE" 2>/dev/null || true
 
 gl_bai='\033[0m'
 gl_lv='\033[32m'
@@ -294,6 +299,10 @@ skpl_openclaw_gateway_service_path() {
   echo "/root/.config/systemd/user/openclaw-gateway.service"
 }
 
+skpl_openclaw_service_path_env() {
+  printf '%s\n' "/root/.local/bin:/root/.npm-global/bin:/root/bin:/root/.volta/bin:/root/.asdf/shims:/root/.bun/bin:/root/.nvm/current/bin:/root/.fnm/current/bin:/root/.local/share/pnpm:/usr/local/bin:/usr/bin:/bin"
+}
+
 resolve_openclaw_js_entry() {
   local npm_global openclaw_js=""
   npm_global=$(npm root -g 2>/dev/null || true)
@@ -309,10 +318,11 @@ resolve_openclaw_js_entry() {
 }
 
 refresh_openclaw_gateway_service() {
-  local service_file openclaw_js active_state=1
+  local service_file openclaw_js active_state=1 path_env
   service_file=$(skpl_openclaw_gateway_service_path)
   openclaw_js=$(resolve_openclaw_js_entry 2>/dev/null || true)
   [ -n "$openclaw_js" ] || return 0
+  path_env=$(skpl_openclaw_service_path_env)
 
   mkdir -p /root/.config/systemd/user
   write_skpl_proxy_env_script
@@ -321,6 +331,7 @@ refresh_openclaw_gateway_service() {
   cat > "$service_file" <<EOF_SKPL_GATEWAY_SERVICE
 [Unit]
 Description=OpenClaw Gateway
+Wants=network-online.target
 After=network-online.target
 
 [Service]
@@ -329,7 +340,9 @@ Restart=always
 RestartSec=5
 Environment=HOME=/root
 Environment=TMPDIR=/tmp
-Environment=PATH=/usr/bin:/usr/local/bin:/bin
+Environment=PATH=${path_env}
+Environment=OPENCLAW_NO_RESPAWN=1
+Environment=NODE_COMPILE_CACHE=${SKPL_NODE_COMPILE_CACHE}
 Environment=OPENCLAW_GATEWAY_PORT=18789
 
 [Install]
@@ -1049,6 +1062,31 @@ openclaw_default_memory_model_path() {
   echo "/root/.openclaw/models/embedding/embeddinggemma-300M-Q8_0.gguf"
 }
 
+openclaw_auth_status_quick() {
+  python3 - <<'PY'
+import glob
+import json
+from pathlib import Path
+
+config_path = Path('/root/.openclaw/openclaw.json')
+provider_count = 0
+if config_path.exists():
+    try:
+        data = json.loads(config_path.read_text(encoding='utf-8'))
+        provider_count = len((((data or {}).get('models') or {}).get('providers') or {}))
+    except Exception:
+        pass
+
+auth_files = [p for p in glob.glob('/root/.openclaw/**/auth-profiles.json', recursive=True) if Path(p).is_file()]
+if provider_count > 0:
+    print('已配置 Provider')
+elif auth_files:
+    print('已存在 Auth Profile')
+else:
+    print('未检测到认证')
+PY
+}
+
 install_node_and_tools() {
   ensure_node_runtime
 }
@@ -1141,6 +1179,7 @@ openclaw_gateway_restart_safe() {
 
 start_gateway() {
   openclaw_gateway_prepare_runtime
+  refresh_openclaw_gateway_service >/dev/null 2>&1 || true
   openclaw gateway stop >/dev/null 2>&1 || true
   openclaw_gateway_stop_fallback
   if ! openclaw gateway start >/dev/null 2>&1; then
@@ -1618,6 +1657,10 @@ PY
 SKPL_PROXY_PORT_VALUE="__PORT__"
 NO_PROXY_RULE="__NO_PROXY_RULE__"
 
+export OPENCLAW_NO_RESPAWN=1
+export NODE_COMPILE_CACHE="${NODE_COMPILE_CACHE:-/var/tmp/openclaw-compile-cache}"
+mkdir -p "$NODE_COMPILE_CACHE" 2>/dev/null || true
+
 proxy_candidates() {
   local port="$SKPL_PROXY_PORT_VALUE"
   local host=""
@@ -1784,15 +1827,19 @@ openclaw_panel_menu() {
     local install_status=$(get_install_status)
     local running_status=$(get_running_status)
     local local_version=$(get_local_openclaw_version)
+    local auth_status=$(openclaw_auth_status_quick)
     local install_tone="warn"
     local running_tone="warn"
+    local auth_tone="warn"
     [ "$install_status" = "已安装" ] && install_tone="ok"
     [ "$running_status" = "运行中" ] && running_tone="ok"
+    [ "$auth_status" != "未检测到认证" ] && auth_tone="ok"
 
     skpl_ui_header "OpenClaw管理面板"
     skpl_ui_section "概览"
     skpl_ui_status_row "安装状态" "$install_tone" "$install_status"
     skpl_ui_status_row "网关状态" "$running_tone" "$running_status"
+    skpl_ui_status_row "认证状态" "$auth_tone" "$auth_status"
     skpl_ui_kv "版本信息" "$local_version"
 
     echo
@@ -2246,6 +2293,10 @@ stop_bot() {
   view_logs() {
     echo "查看 OpenClaw 状态日志"
     send_stats "查看 OpenClaw 日志"
+    if [ "$(openclaw_auth_status_quick)" = "未检测到认证" ]; then
+      echo "提示: 当前未检测到 API Provider 或 Auth Profile。模型请求可能会先等待 1-2 秒后再失败。"
+      echo
+    fi
     openclaw status
     openclaw gateway status
     openclaw logs
