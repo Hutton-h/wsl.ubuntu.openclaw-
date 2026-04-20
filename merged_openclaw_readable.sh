@@ -1665,7 +1665,6 @@ openclaw_panel_menu() {
     skpl_ui_menu_item 16 "权限管理" "策略与白名单"
     skpl_ui_menu_item 17 "多智能体管理" "Agent、绑定、会话"
     skpl_ui_menu_item 18 "备份与还原" "记忆与项目快照"
-    skpl_ui_menu_item 21 "EvoMap 管理" "安装、更新与记忆"
 
     echo
     skpl_ui_section "维护"
@@ -7010,10 +7009,10 @@ openclaw_backup_restore_menu() {
 
 
 
-  openclaw_evomap_menu() {
+  skpl_evomap_menu() {
     while true; do
       clear
-      skpl_ui_header "EvoMap 管理" "安装、更新与记忆目录"
+      skpl_ui_header "EvoMap 管理" "安装、运行控制、网络配置与记忆目录"
       evomap_print_status
       echo
       skpl_ui_section "操作"
@@ -7021,6 +7020,9 @@ openclaw_backup_restore_menu() {
       skpl_ui_menu_item_tone 2 "卸载 EvoMap" "保留备份后移除" "danger"
       skpl_ui_menu_item 3 "更新 EvoMap" "拉取最新代码并重启"
       skpl_ui_menu_item 4 "EvoMap 记忆管理" "查看目录与备份"
+      skpl_ui_menu_item 5 "运行控制" "单次运行、Review、Loop 生命周期"
+      skpl_ui_menu_item 6 "网络与策略" "Node ID、Hub、Worker、Strategy"
+      skpl_ui_menu_item 7 "技能商店" "按 skill id 下载技能"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e evomap_choice
@@ -7029,6 +7031,9 @@ openclaw_backup_restore_menu() {
         2) evomap_uninstall; break_end ;;
         3) evomap_update; break_end ;;
         4) evomap_memory_menu ;;
+        5) evomap_runtime_menu ;;
+        6) evomap_config_menu ;;
+        7) evomap_fetch_skill_interactive; break_end ;;
         0) return 0 ;;
         *) echo "无效的选择，请重试。"; sleep 1 ;;
       esac
@@ -7306,7 +7311,6 @@ openclaw_backup_restore_menu() {
       18) openclaw_backup_restore_menu ;;
       19) update_openclaw_panel ;;
       20) uninstall_openclaw_panel ;;
-      21) openclaw_evomap_menu ;;
       *) break ;;
     esac
   done
@@ -7419,6 +7423,213 @@ evomap_print_status() {
   fi
   skpl_ui_kv "记忆目录" "$EVOMAP_MEMORY_DIR"
   skpl_ui_kv "备份目录" "$EVOMAP_BACKUP_DIR"
+  if [ -f "$EVOMAP_DIR/package.json" ]; then
+    local evomap_version
+    evomap_version=$(cd "$EVOMAP_DIR" 2>/dev/null && node -p "require('./package.json').version" 2>/dev/null < /dev/null)
+    [ -n "$evomap_version" ] && skpl_ui_kv "版本" "$evomap_version"
+  fi
+  if [ -f "$EVOMAP_DIR/.env" ]; then
+    local evomap_node_id evomap_strategy evomap_worker evomap_hub_url
+    evomap_node_id=$(grep -E '^A2A_NODE_ID=' "$EVOMAP_DIR/.env" 2>/dev/null | head -n 1 | cut -d= -f2-)
+    evomap_hub_url=$(grep -E '^A2A_HUB_URL=' "$EVOMAP_DIR/.env" 2>/dev/null | head -n 1 | cut -d= -f2-)
+    evomap_strategy=$(grep -E '^EVOLVE_STRATEGY=' "$EVOMAP_DIR/.env" 2>/dev/null | head -n 1 | cut -d= -f2-)
+    evomap_worker=$(grep -E '^WORKER_ENABLED=' "$EVOMAP_DIR/.env" 2>/dev/null | head -n 1 | cut -d= -f2-)
+    [ -n "$evomap_node_id" ] && skpl_ui_kv "Node ID" "$evomap_node_id"
+    [ -n "$evomap_hub_url" ] && skpl_ui_kv "Hub" "$evomap_hub_url"
+    [ -n "$evomap_strategy" ] && skpl_ui_kv "策略" "$evomap_strategy"
+    [ -n "$evomap_worker" ] && skpl_ui_kv "Worker" "$evomap_worker"
+  fi
+}
+
+evomap_require_installed() {
+  if [ ! -d "$EVOMAP_DIR" ] || [ ! -f "$EVOMAP_DIR/index.js" ]; then
+    echo "EvoMap 未安装，先执行安装。"
+    return 1
+  fi
+  return 0
+}
+
+evomap_env_get() {
+  local key="$1"
+  [ -f "$EVOMAP_DIR/.env" ] || return 0
+  grep -E "^${key}=" "$EVOMAP_DIR/.env" 2>/dev/null | head -n 1 | cut -d= -f2-
+}
+
+evomap_env_set() {
+  local key="$1"
+  local value="$2"
+  mkdir -p "$EVOMAP_DIR"
+  [ -f "$EVOMAP_DIR/.env" ] || touch "$EVOMAP_DIR/.env"
+  local tmp_file
+  tmp_file=$(mktemp)
+  awk -v key="$key" -v value="$value" 'BEGIN{done=0} $0 ~ "^" key "=" {print key "=" value; done=1; next} {print} END{if(!done) print key "=" value}' "$EVOMAP_DIR/.env" > "$tmp_file"
+  mv "$tmp_file" "$EVOMAP_DIR/.env"
+}
+
+evomap_run_in_dir() {
+  evomap_require_installed || return 1
+  (
+    cd "$EVOMAP_DIR"
+    "$@"
+  )
+}
+
+evomap_single_run() {
+  evomap_run_in_dir node index.js
+}
+
+evomap_review_pending() {
+  evomap_run_in_dir node index.js review
+}
+
+evomap_loop_lifecycle() {
+  local action="$1"
+  evomap_run_in_dir node src/ops/lifecycle.js "$action"
+}
+
+evomap_show_loop_log() {
+  evomap_require_installed || return 1
+  if [ -f "$EVOMAP_DIR/nohup.out" ]; then
+    sed -n '1,160p' "$EVOMAP_DIR/nohup.out"
+  else
+    echo "尚未找到 nohup.out 日志。"
+  fi
+}
+
+evomap_fetch_skill_interactive() {
+  evomap_require_installed || return 1
+  local skill_id
+  read -e -p "请输入 skill id: " skill_id
+  [ -z "$skill_id" ] && {
+    echo "skill id 不能为空。"
+    return 1
+  }
+  evomap_run_in_dir node index.js fetch --skill "$skill_id"
+}
+
+evomap_set_node_id() {
+  evomap_require_installed || return 1
+  local current node_id confirm
+  current=$(evomap_env_get "A2A_NODE_ID")
+  if [ -n "$current" ]; then
+    echo "当前 Node ID: $current"
+  fi
+  if ! node_id=$(prompt_evomap_node_id "" "$current"); then
+    return 1
+  fi
+  evomap_env_set "A2A_NODE_ID" "$node_id"
+  state_set EVOMAP_NODE_ID "$node_id"
+  echo "已更新 EvoMap Node ID。"
+}
+
+evomap_set_strategy_menu() {
+  evomap_require_installed || return 1
+  local current strategy_choice strategy_value
+  current=$(evomap_env_get "EVOLVE_STRATEGY")
+  echo "当前策略: ${current:-balanced}"
+  echo "1. balanced"
+  echo "2. innovate"
+  echo "3. harden"
+  echo "4. repair-only"
+  read -e -p "请选择策略: " strategy_choice
+  case "$strategy_choice" in
+    1) strategy_value="balanced" ;;
+    2) strategy_value="innovate" ;;
+    3) strategy_value="harden" ;;
+    4) strategy_value="repair-only" ;;
+    *) echo "无效选择。"; return 1 ;;
+  esac
+  evomap_env_set "EVOLVE_STRATEGY" "$strategy_value"
+  echo "已更新策略为: $strategy_value"
+}
+
+evomap_set_hub_url() {
+  evomap_require_installed || return 1
+  local current hub_url
+  current=$(evomap_env_get "A2A_HUB_URL")
+  echo "当前 Hub URL: ${current:-未设置}"
+  read -e -p "请输入新的 Hub URL（留空使用 https://evomap.ai）: " hub_url
+  hub_url=${hub_url:-https://evomap.ai}
+  evomap_env_set "A2A_HUB_URL" "$hub_url"
+  echo "已更新 A2A_HUB_URL=$hub_url"
+}
+
+evomap_set_worker_enabled() {
+  evomap_require_installed || return 1
+  local enabled="$1"
+  evomap_env_set "WORKER_ENABLED" "$enabled"
+  echo "已更新 WORKER_ENABLED=$enabled"
+}
+
+evomap_show_env() {
+  evomap_require_installed || return 1
+  if [ -f "$EVOMAP_DIR/.env" ]; then
+    sed -n '1,120p' "$EVOMAP_DIR/.env"
+  else
+    echo ".env 不存在。"
+  fi
+}
+
+evomap_runtime_menu() {
+  while true; do
+    clear
+    skpl_ui_header "EvoMap 运行控制" "单次运行、Review 与 Loop 生命周期"
+    evomap_print_status
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "单次运行" "执行 node index.js"
+    skpl_ui_menu_item 2 "Review 待处理变更" "执行 node index.js review"
+    skpl_ui_menu_item 3 "启动 Loop" "lifecycle start"
+    skpl_ui_menu_item 4 "停止 Loop" "lifecycle stop"
+    skpl_ui_menu_item 5 "重启 Loop" "lifecycle restart"
+    skpl_ui_menu_item 6 "查看 Loop 状态" "lifecycle status"
+    skpl_ui_menu_item 7 "健康检查并自愈" "lifecycle check"
+    skpl_ui_menu_item 8 "查看 Loop 日志" "读取 nohup.out"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -r evo_run_choice
+    case "$evo_run_choice" in
+      1) evomap_single_run; break_end ;;
+      2) evomap_review_pending; break_end ;;
+      3) evomap_loop_lifecycle start; break_end ;;
+      4) evomap_loop_lifecycle stop; break_end ;;
+      5) evomap_loop_lifecycle restart; break_end ;;
+      6) evomap_loop_lifecycle status; break_end ;;
+      7) evomap_loop_lifecycle check; break_end ;;
+      8) evomap_show_loop_log; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+evomap_config_menu() {
+  while true; do
+    clear
+    skpl_ui_header "EvoMap 网络与策略" "Hub、Node ID、Strategy 与 Worker 配置"
+    evomap_print_status
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "设置 Node ID" "更新 A2A_NODE_ID"
+    skpl_ui_menu_item 2 "设置 Hub URL" "更新 A2A_HUB_URL"
+    skpl_ui_menu_item 3 "设置演化策略" "balanced / innovate / harden / repair-only"
+    skpl_ui_menu_item 4 "启用 Worker" "设置 WORKER_ENABLED=1"
+    skpl_ui_menu_item 5 "禁用 Worker" "设置 WORKER_ENABLED=0"
+    skpl_ui_menu_item 6 "查看 .env" "显示当前网络配置"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -r evo_cfg_choice
+    case "$evo_cfg_choice" in
+      1) evomap_set_node_id; break_end ;;
+      2) evomap_set_hub_url; break_end ;;
+      3) evomap_set_strategy_menu; break_end ;;
+      4) evomap_set_worker_enabled 1; break_end ;;
+      5) evomap_set_worker_enabled 0; break_end ;;
+      6) evomap_show_env; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
 }
 
 evomap_backup_current() {
@@ -7519,6 +7730,37 @@ evomap_memory_menu() {
       1) evomap_backup_current; break_end ;;
       2) ls -la "$EVOMAP_MEMORY_DIR" 2>/dev/null || echo "记忆目录不存在。"; break_end ;;
       3) ls -la "$EVOMAP_BACKUP_DIR" 2>/dev/null || echo "备份目录不存在。"; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+skpl_evomap_menu() {
+  while true; do
+    clear
+    skpl_ui_header "EvoMap 管理" "安装、运行控制、网络配置与记忆目录"
+    evomap_print_status
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "安装 EvoMap" "克隆、依赖、初始化"
+    skpl_ui_menu_item_tone 2 "卸载 EvoMap" "保留备份后移除" "danger"
+    skpl_ui_menu_item 3 "更新 EvoMap" "拉取最新代码并重启"
+    skpl_ui_menu_item 4 "EvoMap 记忆管理" "查看目录与备份"
+    skpl_ui_menu_item 5 "运行控制" "单次运行、Review、Loop 生命周期"
+    skpl_ui_menu_item 6 "网络与策略" "Node ID、Hub、Worker、Strategy"
+    skpl_ui_menu_item 7 "技能商店" "按 skill id 下载技能"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e evomap_choice
+    case "$evomap_choice" in
+      1) evomap_install; break_end ;;
+      2) evomap_uninstall; break_end ;;
+      3) evomap_update; break_end ;;
+      4) evomap_memory_menu ;;
+      5) evomap_runtime_menu ;;
+      6) evomap_config_menu ;;
+      7) evomap_fetch_skill_interactive; break_end ;;
       0) return 0 ;;
       *) echo "无效的选择，请重试。"; sleep 1 ;;
     esac
@@ -7655,11 +7897,11 @@ skpl_main_panel() {
     echo
     skpl_ui_section "安装与维护"
     skpl_ui_menu_item 3 "重新执行完整安装流程" "重置状态后从头运行"
-    skpl_ui_menu_item 7 "从中断点继续安装" "按当前步骤续跑"
     skpl_ui_menu_item 4 "SKPL 面板更新" "从 GitHub 拉取最新脚本"
-    skpl_ui_menu_item 6 "查看最近日志" "读取安装与运行日志"
-    skpl_ui_menu_item 8 "WSL 代理同步并更新系统" "执行 wslwin 与系统更新"
     skpl_ui_menu_item 5 "SKPL 面板卸载" "仅移除 SKPL 入口"
+    skpl_ui_menu_item 6 "查看最近日志" "读取安装与运行日志"
+    skpl_ui_menu_item 7 "从中断点继续安装" "按当前步骤续跑"
+    skpl_ui_menu_item 8 "WSL 代理同步并更新系统" "执行 wslwin 与系统更新"
 
     echo
     skpl_ui_section "退出"
@@ -7668,7 +7910,7 @@ skpl_main_panel() {
     read -r skpl_choice
     case "$skpl_choice" in
       1) openclaw_panel_menu ;;
-      2) openclaw_evomap_menu ;;
+      2) skpl_evomap_menu ;;
       3) rerun_full_pipeline_from_start; break_end ;;
       4) skpl_update_panel; break_end ;;
       5) remove_skpl_panel_only; break_end ;;
@@ -7705,7 +7947,7 @@ main() {
     evomap)
       save_self_to_skpl
       load_openclaw_panel
-      openclaw_evomap_menu
+      skpl_evomap_menu
       ;;
     *)
       echo "用法: bash $0 [install|panel|openclaw|evomap]"
