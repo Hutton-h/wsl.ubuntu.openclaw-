@@ -19,6 +19,8 @@ SKPL_NPM_COUNTRY=""
 SKPL_NPM_REGISTRIES=""
 SKPL_PROXY_ENV_SCRIPT="${SKPL_HOME}/proxy-env.sh"
 SKPL_OPENCLAW_LAUNCHER="${SKPL_HOME}/openclaw-gateway-launch.sh"
+SKPL_OPENCLAW_GATEWAY_PID_FILE="${SKPL_HOME}/openclaw-gateway.pid"
+SKPL_OPENCLAW_GATEWAY_LOG_FILE="${SKPL_HOME}/openclaw-gateway.log"
 SKPL_MEMORY_STATUS_CACHE_FILE="${SKPL_HOME}/memory-status.json"
 SKPL_MEMORY_AGENTS_CACHE_FILE="${SKPL_HOME}/memory-agents.tsv"
 SKPL_MULTIAGENT_AGENTS_CACHE_FILE="${SKPL_HOME}/multiagent-agents.json"
@@ -29,6 +31,11 @@ SKPL_REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Hutton-h/wsl.ubuntu.op
 SKPL_REMOTE_SCRIPT_PROXIES="https://gh-proxy.com/ https://ghproxy.net/ https://github.moeyy.xyz/ https://gh-proxy.llyke.com/ https://ghproxy.cc/"
 SKPL_BASE_NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
 SKPL_DOMESTIC_MODEL_DIRECT_RULE="model-square.app.baizhi.cloud,.baizhi.cloud,.aliyuncs.com,.modelscope.cn,.deepseek.com,.moonshot.cn,.bigmodel.cn,.siliconflow.cn,.stepfun.com,.minimax.chat,.baichuan-ai.com,.ppinfra.com,.volces.com,.ark.cn-beijing.volces.com,.qianfan.baidubce.com,.xf-yun.com,.spark-api.xf-yun.com,.hunyuan.cloud.tencent.com,.tencentcloudapi.com"
+SKPL_NODE_COMPILE_CACHE="/var/tmp/openclaw-compile-cache"
+
+export OPENCLAW_NO_RESPAWN="${OPENCLAW_NO_RESPAWN:-1}"
+export NODE_COMPILE_CACHE="${NODE_COMPILE_CACHE:-$SKPL_NODE_COMPILE_CACHE}"
+mkdir -p "$NODE_COMPILE_CACHE" 2>/dev/null || true
 
 gl_bai='\033[0m'
 gl_lv='\033[32m'
@@ -284,12 +291,43 @@ init_skpl_runtime() {
   mkdir -p "$SKPL_HOME"
   touch "$SKPL_LOG_FILE"
   touch "$SKPL_STATE_FILE"
+  skpl_load_saved_proxy_port
   write_skpl_proxy_env_script >/dev/null 2>&1 || true
   write_openclaw_gateway_launcher >/dev/null 2>&1 || true
 }
 
+skpl_load_saved_proxy_port() {
+  local port=""
+  local candidate=""
+
+  if [ -s "$HOME/.auto_proxy_sync.sh" ]; then
+    candidate=$(sed -n 's/^SKPL_PROXY_PORT_VALUE="\([0-9][0-9]*\)"$/\1/p' "$HOME/.auto_proxy_sync.sh" | sed -n '1p')
+    if [ -z "$candidate" ]; then
+      candidate=$(sed -n 's/^PROXY_MIRRORED="127\.0\.0\.1:\([0-9][0-9]*\)"$/\1/p' "$HOME/.auto_proxy_sync.sh" | sed -n '1p')
+    fi
+    if [ -n "$candidate" ]; then
+      port="$candidate"
+    fi
+  fi
+
+  if [ -z "$port" ] && [ -s "$SKPL_PROXY_ENV_SCRIPT" ]; then
+    candidate=$(sed -n 's/^SKPL_PROXY_PORT_VALUE="${1:-\([0-9][0-9]*\)}"$/\1/p' "$SKPL_PROXY_ENV_SCRIPT" | sed -n '1p')
+    if [ -n "$candidate" ]; then
+      port="$candidate"
+    fi
+  fi
+
+  if [ -n "$port" ] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
+    SKPL_PROXY_PORT="$port"
+  fi
+}
+
 skpl_openclaw_gateway_service_path() {
   echo "/root/.config/systemd/user/openclaw-gateway.service"
+}
+
+skpl_openclaw_service_path_env() {
+  printf '%s\n' "/root/.local/bin:/root/.npm-global/bin:/root/bin:/root/.volta/bin:/root/.asdf/shims:/root/.bun/bin:/root/.nvm/current/bin:/root/.fnm/current/bin:/root/.local/share/pnpm:/usr/local/bin:/usr/bin:/bin"
 }
 
 resolve_openclaw_js_entry() {
@@ -307,10 +345,11 @@ resolve_openclaw_js_entry() {
 }
 
 refresh_openclaw_gateway_service() {
-  local service_file openclaw_js active_state=1
+  local service_file openclaw_js active_state=1 path_env
   service_file=$(skpl_openclaw_gateway_service_path)
   openclaw_js=$(resolve_openclaw_js_entry 2>/dev/null || true)
   [ -n "$openclaw_js" ] || return 0
+  path_env=$(skpl_openclaw_service_path_env)
 
   mkdir -p /root/.config/systemd/user
   write_skpl_proxy_env_script
@@ -319,6 +358,7 @@ refresh_openclaw_gateway_service() {
   cat > "$service_file" <<EOF_SKPL_GATEWAY_SERVICE
 [Unit]
 Description=OpenClaw Gateway
+Wants=network-online.target
 After=network-online.target
 
 [Service]
@@ -327,7 +367,9 @@ Restart=always
 RestartSec=5
 Environment=HOME=/root
 Environment=TMPDIR=/tmp
-Environment=PATH=/usr/bin:/usr/local/bin:/bin
+Environment=PATH=${path_env}
+Environment=OPENCLAW_NO_RESPAWN=1
+Environment=NODE_COMPILE_CACHE=${SKPL_NODE_COMPILE_CACHE}
 Environment=OPENCLAW_GATEWAY_PORT=18789
 
 [Install]
@@ -524,6 +566,25 @@ set -e
 OPENCLAW_JS="$1"
 PROXY_PORT="$2"
 shift 2
+NODE_BIN="$(command -v node 2>/dev/null || true)"
+
+if [ -z "$NODE_BIN" ]; then
+  for candidate in /usr/local/bin/node /usr/bin/node /bin/node; do
+    if [ -x "$candidate" ]; then
+      NODE_BIN="$candidate"
+      break
+    fi
+  done
+fi
+
+if [ -z "$NODE_BIN" ]; then
+  echo "未找到 node 可执行文件，无法启动 OpenClaw gateway。" >&2
+  exit 127
+fi
+
+export OPENCLAW_NO_RESPAWN=1
+export NODE_COMPILE_CACHE="${NODE_COMPILE_CACHE:-/var/tmp/openclaw-compile-cache}"
+mkdir -p "$NODE_COMPILE_CACHE" 2>/dev/null || true
 
 merge_no_proxy_csv() {
   python3 - "$1" "$2" <<'PY'
@@ -605,7 +666,7 @@ if [ -n "$DYNAMIC_NO_PROXY" ]; then
   export npm_config_noproxy
 fi
 
-exec /usr/bin/node "$OPENCLAW_JS" "$@"
+exec "$NODE_BIN" "$OPENCLAW_JS" "$@"
 EOF_OPENCLAW_LAUNCHER
   chmod +x "$SKPL_OPENCLAW_LAUNCHER"
 }
@@ -1028,13 +1089,155 @@ openclaw_default_memory_model_path() {
   echo "/root/.openclaw/models/embedding/embeddinggemma-300M-Q8_0.gguf"
 }
 
+openclaw_auth_status_quick() {
+  python3 - <<'PY'
+import glob
+import json
+from pathlib import Path
+
+config_path = Path('/root/.openclaw/openclaw.json')
+provider_count = 0
+if config_path.exists():
+    try:
+        data = json.loads(config_path.read_text(encoding='utf-8'))
+        provider_count = len((((data or {}).get('models') or {}).get('providers') or {}))
+    except Exception:
+        pass
+
+auth_files = [p for p in glob.glob('/root/.openclaw/**/auth-profiles.json', recursive=True) if Path(p).is_file()]
+if provider_count > 0:
+    print('已配置 Provider')
+elif auth_files:
+    print('已存在 Auth Profile')
+else:
+    print('未检测到认证')
+PY
+}
+
 install_node_and_tools() {
   ensure_node_runtime
 }
 
+openclaw_gateway_prepare_runtime() {
+  mkdir -p /root/.openclaw/agents/main/sessions "$SKPL_HOME"
+  openclaw config set gateway.mode local >/dev/null 2>&1 || true
+}
+
+openclaw_whatsapp_proxy_tuning_apply() {
+  if ! command -v openclaw >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local config_file
+  config_file=$(openclaw_get_config_path_quick)
+  mkdir -p "$(dirname "$config_file")"
+
+  # WhatsApp Web 在必须走代理的环境里更容易遇到短断线；这里收紧心跳并缩短重连退避，减少卡住等待时间。
+  openclaw config set web.heartbeatSeconds 30 >/dev/null 2>&1 || true
+  openclaw config set web.reconnect.initialMs 1000 >/dev/null 2>&1 || true
+  openclaw config set web.reconnect.maxMs 10000 >/dev/null 2>&1 || true
+  openclaw config set web.reconnect.factor 1.4 >/dev/null 2>&1 || true
+  openclaw config set web.reconnect.jitter 0.2 >/dev/null 2>&1 || true
+  openclaw config set web.reconnect.maxAttempts 30 >/dev/null 2>&1 || true
+  openclaw config set channels.whatsapp.debounceMs 0 >/dev/null 2>&1 || true
+  openclaw config set channels.whatsapp.blockStreaming true --json >/dev/null 2>&1 || true
+  openclaw config set channels.whatsapp.healthMonitor.enabled true --json >/dev/null 2>&1 || true
+}
+
+openclaw_gateway_find_listener_pid() {
+  timeout 3 bash -lc "ss -ltnp '( sport = :18789 )' 2>/dev/null | awk 'match(\$0, /pid=[0-9]+/) { print substr(\$0, RSTART + 4, RLENGTH - 4); exit }'"
+}
+
+openclaw_gateway_pid_alive() {
+  local pid="${1:-}"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+openclaw_gateway_cleanup_pidfile() {
+  if [ -f "$SKPL_OPENCLAW_GATEWAY_PID_FILE" ]; then
+    local pid
+    pid=$(cat "$SKPL_OPENCLAW_GATEWAY_PID_FILE" 2>/dev/null || true)
+    if ! openclaw_gateway_pid_alive "$pid"; then
+      rm -f "$SKPL_OPENCLAW_GATEWAY_PID_FILE"
+    fi
+  fi
+}
+
+openclaw_gateway_sync_pidfile() {
+  local pid=""
+  openclaw_gateway_cleanup_pidfile
+  if [ -f "$SKPL_OPENCLAW_GATEWAY_PID_FILE" ]; then
+    pid=$(cat "$SKPL_OPENCLAW_GATEWAY_PID_FILE" 2>/dev/null || true)
+    if openclaw_gateway_pid_alive "$pid"; then
+      return 0
+    fi
+  fi
+
+  pid=$(openclaw_gateway_find_listener_pid 2>/dev/null || true)
+  if openclaw_gateway_pid_alive "$pid"; then
+    echo "$pid" > "$SKPL_OPENCLAW_GATEWAY_PID_FILE"
+    return 0
+  fi
+  return 1
+}
+
+openclaw_gateway_stop_fallback() {
+  openclaw_gateway_sync_pidfile >/dev/null 2>&1 || openclaw_gateway_cleanup_pidfile
+  if [ -f "$SKPL_OPENCLAW_GATEWAY_PID_FILE" ]; then
+    local pid
+    pid=$(cat "$SKPL_OPENCLAW_GATEWAY_PID_FILE" 2>/dev/null || true)
+    if openclaw_gateway_pid_alive "$pid"; then
+      kill "$pid" >/dev/null 2>&1 || true
+      sleep 1
+      if openclaw_gateway_pid_alive "$pid"; then
+        kill -9 "$pid" >/dev/null 2>&1 || true
+      fi
+    fi
+    rm -f "$SKPL_OPENCLAW_GATEWAY_PID_FILE"
+  fi
+}
+
+openclaw_gateway_start_fallback() {
+  local openclaw_js=""
+  local i
+  openclaw_js=$(resolve_openclaw_js_entry 2>/dev/null || true)
+  [ -n "$openclaw_js" ] || return 1
+
+  write_skpl_proxy_env_script >/dev/null 2>&1 || true
+  write_openclaw_gateway_launcher >/dev/null 2>&1 || true
+  openclaw_gateway_stop_fallback
+
+  nohup "$SKPL_OPENCLAW_LAUNCHER" "$openclaw_js" "${SKPL_PROXY_PORT:-10808}" gateway --port 18789 >"$SKPL_OPENCLAW_GATEWAY_LOG_FILE" 2>&1 &
+  echo $! > "$SKPL_OPENCLAW_GATEWAY_PID_FILE"
+
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if timeout 1 bash -c 'echo > /dev/tcp/127.0.0.1/18789' 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  return 1
+}
+
+openclaw_gateway_restart_safe() {
+  start_gateway
+}
+
 start_gateway() {
+  openclaw_gateway_prepare_runtime
+  openclaw_whatsapp_proxy_tuning_apply >/dev/null 2>&1 || true
+  refresh_openclaw_gateway_service >/dev/null 2>&1 || true
   openclaw gateway stop >/dev/null 2>&1 || true
-  openclaw gateway start >/dev/null 2>&1 || true
+  openclaw_gateway_stop_fallback
+  if ! openclaw gateway start >/dev/null 2>&1; then
+    openclaw_gateway_start_fallback >/dev/null 2>&1 || true
+  fi
+  if ! timeout 1 bash -c 'echo > /dev/tcp/127.0.0.1/18789' 2>/dev/null; then
+    openclaw_gateway_start_fallback >/dev/null 2>&1 || true
+  fi
+  openclaw_gateway_sync_pidfile >/dev/null 2>&1 || true
   if [ "${SKPL_BATCH_MODE:-0}" != "1" ]; then
     sleep 3
   fi
@@ -1110,7 +1313,7 @@ openclaw_memory_prepare_prefetch() {
 
 openclaw_memory_finalize() {
   openclaw memory index --force >/dev/null 2>&1 || true
-  openclaw gateway restart >/dev/null 2>&1 || true
+  openclaw_gateway_restart_safe >/dev/null 2>&1 || true
 }
 
 openclaw_memory_bootstrap() {
@@ -1126,7 +1329,6 @@ openclaw_memory_bootstrap() {
       curl -L --retry 3 --connect-timeout 10 --max-time 900 -C - -o "$model_path" "$model_url" || true
     fi
     openclaw memory index --force >/dev/null 2>&1 || true
-    openclaw gateway restart >/dev/null 2>&1 || true
   ' _ "$model_path" >"$bootstrap_log" 2>&1 &
   disown 2>/dev/null || true
   echo "$bootstrap_log"
@@ -1204,6 +1406,11 @@ server {
   location / {
     proxy_pass http://${target_host}:${target_port};
     proxy_http_version 1.1;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    proxy_connect_timeout 30s;
+    proxy_buffering off;
+    proxy_request_buffering off;
     proxy_set_header Host \$host;
     proxy_set_header X-Real-IP \$remote_addr;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
@@ -1305,6 +1512,42 @@ skpl_try_download_file() {
   return 1
 }
 
+skpl_try_sync_local_panel() {
+  local local_script="/workspace/merged_openclaw_readable.sh"
+  local tmp_file
+
+  if [ ! -f "$local_script" ]; then
+    return 1
+  fi
+
+  tmp_file=$(mktemp)
+  cp "$local_script" "$tmp_file"
+
+  if ! bash -n "$tmp_file"; then
+    echo "本地工作区脚本语法校验未通过，跳过本地同步。"
+    return 1
+  fi
+
+  install -m 755 "$tmp_file" "${SKPL_SCRIPT_PATH}"
+  echo "已从本地工作区同步面板脚本。"
+  echo "来源: $local_script"
+  return 0
+}
+
+skpl_refresh_cmd_entry() {
+  cat > "${SKPL_CMD_PATH}" <<'EOF_SKPL_CMD'
+#!/bin/bash
+set -e
+if [ ! -f /root/.skpl/merged_openclaw_readable.sh ]; then
+  echo "未找到 /root/.skpl/merged_openclaw_readable.sh，请先运行安装脚本。"
+  exit 1
+fi
+exec bash /root/.skpl/merged_openclaw_readable.sh panel "$@"
+EOF_SKPL_CMD
+  chmod +x "${SKPL_CMD_PATH}"
+  hash -r 2>/dev/null || true
+}
+
 skpl_sync_remote_panel() {
   init_skpl_runtime
   mkdir -p "${SKPL_HOME}"
@@ -1342,22 +1585,23 @@ skpl_sync_remote_panel() {
   fi
 
   install -m 755 "$tmp_file" "${SKPL_SCRIPT_PATH}"
-
-  cat > "${SKPL_CMD_PATH}" <<'EOF_SKPL_CMD'
-#!/bin/bash
-set -e
-if [ ! -f /root/.skpl/merged_openclaw_readable.sh ]; then
-  echo "未找到 /root/.skpl/merged_openclaw_readable.sh，请先运行安装脚本。"
-  exit 1
-fi
-exec bash /root/.skpl/merged_openclaw_readable.sh panel "$@"
-EOF_SKPL_CMD
-  chmod +x "${SKPL_CMD_PATH}"
-  hash -r 2>/dev/null || true
+  skpl_refresh_cmd_entry
 
   echo "已从远程更新面板脚本。"
   echo "来源: $downloaded_url"
   return 0
+}
+
+skpl_sync_panel() {
+  init_skpl_runtime
+  mkdir -p "${SKPL_HOME}"
+
+  if skpl_try_sync_local_panel; then
+    skpl_refresh_cmd_entry
+    return 0
+  fi
+
+  skpl_sync_remote_panel
 }
 
 remove_skpl_panel_only() {
@@ -1461,6 +1705,10 @@ PY
 #!/bin/bash
 SKPL_PROXY_PORT_VALUE="__PORT__"
 NO_PROXY_RULE="__NO_PROXY_RULE__"
+
+export OPENCLAW_NO_RESPAWN=1
+export NODE_COMPILE_CACHE="${NODE_COMPILE_CACHE:-/var/tmp/openclaw-compile-cache}"
+mkdir -p "$NODE_COMPILE_CACHE" 2>/dev/null || true
 
 proxy_candidates() {
   local port="$SKPL_PROXY_PORT_VALUE"
@@ -1628,15 +1876,19 @@ openclaw_panel_menu() {
     local install_status=$(get_install_status)
     local running_status=$(get_running_status)
     local local_version=$(get_local_openclaw_version)
+    local auth_status=$(openclaw_auth_status_quick)
     local install_tone="warn"
     local running_tone="warn"
+    local auth_tone="warn"
     [ "$install_status" = "已安装" ] && install_tone="ok"
     [ "$running_status" = "运行中" ] && running_tone="ok"
+    [ "$auth_status" != "未检测到认证" ] && auth_tone="ok"
 
     skpl_ui_header "OpenClaw管理面板"
     skpl_ui_section "概览"
     skpl_ui_status_row "安装状态" "$install_tone" "$install_status"
     skpl_ui_status_row "网关状态" "$running_tone" "$running_status"
+    skpl_ui_status_row "认证状态" "$auth_tone" "$auth_status"
     skpl_ui_kv "版本信息" "$local_version"
 
     echo
@@ -1665,7 +1917,6 @@ openclaw_panel_menu() {
     skpl_ui_menu_item 16 "权限管理" "策略与白名单"
     skpl_ui_menu_item 17 "多智能体管理" "Agent、绑定、会话"
     skpl_ui_menu_item 18 "备份与还原" "记忆与项目快照"
-    skpl_ui_menu_item 21 "EvoMap 管理" "安装、更新与记忆"
 
     echo
     skpl_ui_section "维护"
@@ -2079,17 +2330,22 @@ PY
     break_end
   }
 
-  stop_bot() {
-    echo "停止 OpenClaw..."
-    send_stats "停止 OpenClaw..."
-    tmux kill-session -t gateway > /dev/null 2>&1
-    openclaw gateway stop
-    break_end
-  }
+stop_bot() {
+  echo "停止 OpenClaw..."
+  send_stats "停止 OpenClaw..."
+  tmux kill-session -t gateway > /dev/null 2>&1
+  openclaw gateway stop
+  openclaw_gateway_stop_fallback
+  break_end
+}
 
   view_logs() {
     echo "查看 OpenClaw 状态日志"
     send_stats "查看 OpenClaw 日志"
+    if [ "$(openclaw_auth_status_quick)" = "未检测到认证" ]; then
+      echo "提示: 当前未检测到 API Provider 或 Auth Profile。模型请求可能会先等待 1-2 秒后再失败。"
+      echo
+    fi
     openclaw status
     openclaw gateway status
     openclaw logs
@@ -4216,6 +4472,7 @@ openclaw_json_get_bool() {
           read -e -p "请输入WhatsApp收到的连接码 (例如 NYA99R2F)（输入 0 退出）： " code
           if [ "$code" = "0" ]; then continue; fi
           if [ -z "$code" ]; then echo "错误：连接码不能为空。"; sleep 1; continue; fi
+          openclaw_whatsapp_proxy_tuning_apply >/dev/null 2>&1 || true
           openclaw pairing approve whatsapp "$code"
           break_end
           ;;
@@ -7010,10 +7267,10 @@ openclaw_backup_restore_menu() {
 
 
 
-  openclaw_evomap_menu() {
+  skpl_evomap_menu() {
     while true; do
       clear
-      skpl_ui_header "EvoMap 管理" "安装、更新与记忆目录"
+      skpl_ui_header "EvoMap 管理" "安装、运行控制、网络配置与记忆目录"
       evomap_print_status
       echo
       skpl_ui_section "操作"
@@ -7021,6 +7278,9 @@ openclaw_backup_restore_menu() {
       skpl_ui_menu_item_tone 2 "卸载 EvoMap" "保留备份后移除" "danger"
       skpl_ui_menu_item 3 "更新 EvoMap" "拉取最新代码并重启"
       skpl_ui_menu_item 4 "EvoMap 记忆管理" "查看目录与备份"
+      skpl_ui_menu_item 5 "运行控制" "单次运行、Review、Loop 生命周期"
+      skpl_ui_menu_item 6 "网络与策略" "Node ID、Hub、Worker、Strategy"
+      skpl_ui_menu_item 7 "技能商店" "按 skill id 下载技能"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e evomap_choice
@@ -7029,6 +7289,9 @@ openclaw_backup_restore_menu() {
         2) evomap_uninstall; break_end ;;
         3) evomap_update; break_end ;;
         4) evomap_memory_menu ;;
+        5) evomap_runtime_menu ;;
+        6) evomap_config_menu ;;
+        7) evomap_fetch_skill_interactive; break_end ;;
         0) return 0 ;;
         *) echo "无效的选择，请重试。"; sleep 1 ;;
       esac
@@ -7103,10 +7366,32 @@ openclaw_backup_restore_menu() {
   }
 
   openclaw_webui_refresh_token_cache() {
-    local token
-    token=$(timeout 8 openclaw dashboard 2>/dev/null \
-      | sed -n 's/.*:18789\/#token=\([^[:space:]"&]\+\).*/\1/p' \
-      | head -n 1)
+    local token config_file
+
+    config_file=$(openclaw_get_config_file 2>/dev/null || true)
+    if [ -f "$config_file" ]; then
+      token=$(python3 - "$config_file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    token = (((data or {}).get('gateway') or {}).get('auth') or {}).get('token') or ''
+    if isinstance(token, str):
+        print(token.strip())
+except Exception:
+    pass
+PY
+)
+    fi
+
+    if [ -z "$token" ]; then
+      token=$(timeout 8 openclaw dashboard 2>/dev/null \
+        | sed -n 's/.*:18789\/#token=\([^[:space:]"&]\+\).*/\1/p' \
+        | head -n 1)
+    fi
+
     if [ -n "$token" ]; then
       printf '%s' "$token" > "$SKPL_WEBUI_TOKEN_CACHE_FILE"
       echo "$token"
@@ -7184,7 +7469,7 @@ openclaw_backup_restore_menu() {
         tmp_json=$(mktemp)
         if jq 'if .gateway.controlUi == null then .gateway.controlUi = {"allowedOrigins": ["http://127.0.0.1"]} else . end | if (.gateway.controlUi.allowedOrigins | contains([$origin]) | not) then .gateway.controlUi.allowedOrigins += [$origin] else . end' --arg origin "$new_origin" "$config_file" > "$tmp_json" && mv "$tmp_json" "$config_file"; then
           echo -e "${gl_kjlan}已将域名 ${yuming} 加入 allowedOrigins 配置${gl_bai}"
-          openclaw gateway restart >/dev/null 2>&1
+          openclaw_gateway_restart_safe >/dev/null 2>&1
         else
           rm -f "$tmp_json"
           echo "❌ 写入 allowedOrigins 失败，请检查 OpenClaw 配置文件是否为合法 JSON。"
@@ -7306,7 +7591,6 @@ openclaw_backup_restore_menu() {
       18) openclaw_backup_restore_menu ;;
       19) update_openclaw_panel ;;
       20) uninstall_openclaw_panel ;;
-      21) openclaw_evomap_menu ;;
       *) break ;;
     esac
   done
@@ -7419,6 +7703,215 @@ evomap_print_status() {
   fi
   skpl_ui_kv "记忆目录" "$EVOMAP_MEMORY_DIR"
   skpl_ui_kv "备份目录" "$EVOMAP_BACKUP_DIR"
+  if [ -f "$EVOMAP_DIR/package.json" ]; then
+    local evomap_version
+    evomap_version=$(cd "$EVOMAP_DIR" 2>/dev/null && node -p "require('./package.json').version" 2>/dev/null < /dev/null)
+    [ -n "$evomap_version" ] && skpl_ui_kv "版本" "$evomap_version"
+  fi
+  if [ -f "$EVOMAP_DIR/.env" ]; then
+    local evomap_node_id evomap_strategy evomap_worker evomap_hub_url
+    evomap_node_id=$(grep -E '^A2A_NODE_ID=' "$EVOMAP_DIR/.env" 2>/dev/null | head -n 1 | cut -d= -f2-)
+    evomap_hub_url=$(grep -E '^A2A_HUB_URL=' "$EVOMAP_DIR/.env" 2>/dev/null | head -n 1 | cut -d= -f2-)
+    evomap_strategy=$(grep -E '^EVOLVE_STRATEGY=' "$EVOMAP_DIR/.env" 2>/dev/null | head -n 1 | cut -d= -f2-)
+    evomap_worker=$(grep -E '^WORKER_ENABLED=' "$EVOMAP_DIR/.env" 2>/dev/null | head -n 1 | cut -d= -f2-)
+    skpl_ui_kv "Node ID" "${evomap_node_id:-未设置}"
+    skpl_ui_kv "Hub" "${evomap_hub_url:-未设置}"
+    skpl_ui_kv "策略" "${evomap_strategy:-balanced}"
+    skpl_ui_kv "Worker" "${evomap_worker:-未设置}"
+  fi
+  return 0
+}
+
+evomap_require_installed() {
+  if [ ! -d "$EVOMAP_DIR" ] || [ ! -f "$EVOMAP_DIR/index.js" ]; then
+    echo "EvoMap 未安装，先执行安装。"
+    return 1
+  fi
+  return 0
+}
+
+evomap_env_get() {
+  local key="$1"
+  [ -f "$EVOMAP_DIR/.env" ] || return 0
+  grep -E "^${key}=" "$EVOMAP_DIR/.env" 2>/dev/null | head -n 1 | cut -d= -f2-
+}
+
+evomap_env_set() {
+  local key="$1"
+  local value="$2"
+  mkdir -p "$EVOMAP_DIR"
+  [ -f "$EVOMAP_DIR/.env" ] || touch "$EVOMAP_DIR/.env"
+  local tmp_file
+  tmp_file=$(mktemp)
+  awk -v key="$key" -v value="$value" 'BEGIN{done=0} $0 ~ "^" key "=" {print key "=" value; done=1; next} {print} END{if(!done) print key "=" value}' "$EVOMAP_DIR/.env" > "$tmp_file"
+  mv "$tmp_file" "$EVOMAP_DIR/.env"
+}
+
+evomap_run_in_dir() {
+  evomap_require_installed || return 1
+  (
+    cd "$EVOMAP_DIR"
+    "$@"
+  )
+}
+
+evomap_single_run() {
+  evomap_run_in_dir node index.js
+}
+
+evomap_review_pending() {
+  evomap_run_in_dir node index.js review
+}
+
+evomap_loop_lifecycle() {
+  local action="$1"
+  evomap_run_in_dir node src/ops/lifecycle.js "$action"
+}
+
+evomap_show_loop_log() {
+  evomap_require_installed || return 1
+  if [ -f "$EVOMAP_DIR/nohup.out" ]; then
+    sed -n '1,160p' "$EVOMAP_DIR/nohup.out"
+  else
+    echo "尚未找到 nohup.out 日志。"
+  fi
+}
+
+evomap_fetch_skill_interactive() {
+  evomap_require_installed || return 1
+  local skill_id
+  read -e -p "请输入 skill id: " skill_id
+  [ -z "$skill_id" ] && {
+    echo "skill id 不能为空。"
+    return 1
+  }
+  evomap_run_in_dir node index.js fetch --skill "$skill_id"
+}
+
+evomap_set_node_id() {
+  evomap_require_installed || return 1
+  local current node_id confirm
+  current=$(evomap_env_get "A2A_NODE_ID")
+  if [ -n "$current" ]; then
+    echo "当前 Node ID: $current"
+  fi
+  if ! node_id=$(prompt_evomap_node_id "" "$current"); then
+    return 1
+  fi
+  evomap_env_set "A2A_NODE_ID" "$node_id"
+  state_set EVOMAP_NODE_ID "$node_id"
+  echo "已更新 EvoMap Node ID。"
+}
+
+evomap_set_strategy_menu() {
+  evomap_require_installed || return 1
+  local current strategy_choice strategy_value
+  current=$(evomap_env_get "EVOLVE_STRATEGY")
+  echo "当前策略: ${current:-balanced}"
+  echo "推荐: balanced（适合 OpenClaw，兼顾稳定修复与持续改进）"
+  echo "1. balanced    稳定优先，适合日常长期运行"
+  echo "2. innovate    更偏向新功能和探索"
+  echo "3. harden      更偏向稳固和质量收敛"
+  echo "4. repair-only 仅聚焦修复与止损"
+  read -e -p "请选择策略: " strategy_choice
+  case "$strategy_choice" in
+    1) strategy_value="balanced" ;;
+    2) strategy_value="innovate" ;;
+    3) strategy_value="harden" ;;
+    4) strategy_value="repair-only" ;;
+    *) echo "无效选择。"; return 1 ;;
+  esac
+  evomap_env_set "EVOLVE_STRATEGY" "$strategy_value"
+  echo "已更新策略为: $strategy_value"
+}
+
+evomap_set_hub_url() {
+  evomap_require_installed || return 1
+  local current hub_url
+  current=$(evomap_env_get "A2A_HUB_URL")
+  echo "当前 Hub URL: ${current:-未设置}"
+  read -e -p "请输入新的 Hub URL（留空使用 https://evomap.ai）: " hub_url
+  hub_url=${hub_url:-https://evomap.ai}
+  evomap_env_set "A2A_HUB_URL" "$hub_url"
+  echo "已更新 A2A_HUB_URL=$hub_url"
+}
+
+evomap_set_worker_enabled() {
+  evomap_require_installed || return 1
+  local enabled="$1"
+  evomap_env_set "WORKER_ENABLED" "$enabled"
+  echo "已更新 WORKER_ENABLED=$enabled"
+}
+
+evomap_show_env() {
+  evomap_require_installed || return 1
+  if [ -f "$EVOMAP_DIR/.env" ]; then
+    sed -n '1,120p' "$EVOMAP_DIR/.env"
+  else
+    echo ".env 不存在。"
+  fi
+}
+
+evomap_runtime_menu() {
+  while true; do
+    clear
+    skpl_ui_header "EvoMap 运行控制" "单次运行、Review 与 Loop 生命周期"
+    evomap_print_status
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "单次运行" "执行 node index.js"
+    skpl_ui_menu_item 2 "Review 待处理变更" "执行 node index.js review"
+    skpl_ui_menu_item 3 "启动 Loop" "lifecycle start"
+    skpl_ui_menu_item 4 "停止 Loop" "lifecycle stop"
+    skpl_ui_menu_item 5 "重启 Loop" "lifecycle restart"
+    skpl_ui_menu_item 6 "查看 Loop 状态" "lifecycle status"
+    skpl_ui_menu_item 7 "健康检查并自愈" "lifecycle check"
+    skpl_ui_menu_item 8 "查看 Loop 日志" "读取 nohup.out"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -r evo_run_choice
+    case "$evo_run_choice" in
+      1) evomap_single_run; break_end ;;
+      2) evomap_review_pending; break_end ;;
+      3) evomap_loop_lifecycle start; break_end ;;
+      4) evomap_loop_lifecycle stop; break_end ;;
+      5) evomap_loop_lifecycle restart; break_end ;;
+      6) evomap_loop_lifecycle status; break_end ;;
+      7) evomap_loop_lifecycle check; break_end ;;
+      8) evomap_show_loop_log; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+evomap_config_menu() {
+  while true; do
+    clear
+    skpl_ui_header "EvoMap 网络与策略" "Hub、Node ID、Strategy 与 Worker 配置"
+    evomap_print_status
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "设置 Node ID" "更新 A2A_NODE_ID"
+    skpl_ui_menu_item 2 "设置 Hub URL" "更新 A2A_HUB_URL"
+    skpl_ui_menu_item 3 "设置演化策略" "balanced / innovate / harden / repair-only"
+    skpl_ui_menu_item 4 "启用 Worker" "设置 WORKER_ENABLED=1"
+    skpl_ui_menu_item 5 "禁用 Worker" "设置 WORKER_ENABLED=0"
+    skpl_ui_menu_item 6 "查看 .env" "显示当前网络配置"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -r evo_cfg_choice
+    case "$evo_cfg_choice" in
+      1) evomap_set_node_id; break_end ;;
+      2) evomap_set_hub_url; break_end ;;
+      3) evomap_set_strategy_menu; break_end ;;
+      4) evomap_set_worker_enabled 1; break_end ;;
+      5) evomap_set_worker_enabled 0; break_end ;;
+      6) evomap_show_env; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
 }
 
 evomap_backup_current() {
@@ -7525,6 +8018,37 @@ evomap_memory_menu() {
   done
 }
 
+skpl_evomap_menu() {
+  while true; do
+    clear
+    skpl_ui_header "EvoMap 管理" "安装、运行控制、网络配置与记忆目录"
+    evomap_print_status
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "安装 EvoMap" "克隆、依赖、初始化"
+    skpl_ui_menu_item_tone 2 "卸载 EvoMap" "保留备份后移除" "danger"
+    skpl_ui_menu_item 3 "更新 EvoMap" "拉取最新代码并重启"
+    skpl_ui_menu_item 4 "EvoMap 记忆管理" "查看目录与备份"
+    skpl_ui_menu_item 5 "运行控制" "单次运行、Review、Loop 生命周期"
+    skpl_ui_menu_item 6 "网络与策略" "Node ID、Hub、Worker、Strategy"
+    skpl_ui_menu_item 7 "技能商店" "按 skill id 下载技能"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e evomap_choice
+    case "$evomap_choice" in
+      1) evomap_install; break_end ;;
+      2) evomap_uninstall; break_end ;;
+      3) evomap_update; break_end ;;
+      4) evomap_memory_menu ;;
+      5) evomap_runtime_menu ;;
+      6) evomap_config_menu ;;
+      7) evomap_fetch_skill_interactive; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
 run_evomap_install_step() {
   evomap_install
 }
@@ -7592,10 +8116,10 @@ rerun_full_pipeline_from_start() {
 skpl_update_panel() {
   clear
   skpl_ui_header "面板更新"
-  skpl_ui_kv "更新来源" "GitHub main"
+  skpl_ui_kv "更新策略" "优先本地工作区，其次 GitHub main"
   skpl_ui_kv "远程脚本" "$SKPL_REMOTE_SCRIPT_URL"
   echo
-  if ! skpl_sync_remote_panel; then
+  if ! skpl_sync_panel; then
     break_end
     return 1
   fi
@@ -7655,11 +8179,11 @@ skpl_main_panel() {
     echo
     skpl_ui_section "安装与维护"
     skpl_ui_menu_item 3 "重新执行完整安装流程" "重置状态后从头运行"
-    skpl_ui_menu_item 7 "从中断点继续安装" "按当前步骤续跑"
     skpl_ui_menu_item 4 "SKPL 面板更新" "从 GitHub 拉取最新脚本"
-    skpl_ui_menu_item 6 "查看最近日志" "读取安装与运行日志"
-    skpl_ui_menu_item 8 "WSL 代理同步并更新系统" "执行 wslwin 与系统更新"
     skpl_ui_menu_item 5 "SKPL 面板卸载" "仅移除 SKPL 入口"
+    skpl_ui_menu_item 6 "查看最近日志" "读取安装与运行日志"
+    skpl_ui_menu_item 7 "从中断点继续安装" "按当前步骤续跑"
+    skpl_ui_menu_item 8 "WSL 代理同步并更新系统" "执行 wslwin 与系统更新"
 
     echo
     skpl_ui_section "退出"
@@ -7668,7 +8192,7 @@ skpl_main_panel() {
     read -r skpl_choice
     case "$skpl_choice" in
       1) openclaw_panel_menu ;;
-      2) openclaw_evomap_menu ;;
+      2) skpl_evomap_menu ;;
       3) rerun_full_pipeline_from_start; break_end ;;
       4) skpl_update_panel; break_end ;;
       5) remove_skpl_panel_only; break_end ;;
@@ -7705,7 +8229,7 @@ main() {
     evomap)
       save_self_to_skpl
       load_openclaw_panel
-      openclaw_evomap_menu
+      skpl_evomap_menu
       ;;
     *)
       echo "用法: bash $0 [install|panel|openclaw|evomap]"
