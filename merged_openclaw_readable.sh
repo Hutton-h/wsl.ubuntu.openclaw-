@@ -1296,31 +1296,11 @@ openclaw_memory_prepare() {
 
   mkdir -p "${model_dir}" /root/.openclaw/workspace/memory
   openclaw config set memory.backend builtin >/dev/null 2>&1 || true
+  openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
   openclaw config set memory.qmd.includeDefaultMemory true --json >/dev/null 2>&1 || true
-  if openclaw_memory_local_runtime_ready; then
-    openclaw config set agents.defaults.memorySearch.enabled true --strict-json >/dev/null 2>&1 || true
-    openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
-    openclaw config set agents.defaults.memorySearch.local.modelPath "${model_path}" >/dev/null 2>&1 || true
-  else
-    openclaw config set agents.defaults.memorySearch.enabled false --strict-json >/dev/null 2>&1 || true
-  fi
+  openclaw config set agents.defaults.memorySearch.local.modelPath "${model_path}" >/dev/null 2>&1 || true
 
   printf '%s\n' "$model_path"
-}
-
-openclaw_memory_local_runtime_ready() {
-  local npm_root=""
-
-  npm_root=$(npm root -g 2>/dev/null || true)
-  if [ -n "$npm_root" ] && [ -d "$npm_root/openclaw/node_modules/node-llama-cpp" ]; then
-    return 0
-  fi
-
-  if [ -d "/usr/local/lib/node_modules/openclaw/node_modules/node-llama-cpp" ]; then
-    return 0
-  fi
-
-  return 1
 }
 
 openclaw_memory_prepare_prefetch() {
@@ -1889,60 +1869,6 @@ openclaw_panel_menu() {
     printf '%s\n' "${version_text:-未检测到}"
   }
 
-  openclaw_default_model_quick() {
-    local config_file
-    config_file=$(openclaw_get_config_file 2>/dev/null || true)
-    [ -s "$config_file" ] || return 1
-    jq -r '.agents.defaults.model.primary // (if (.agents.defaults.model | type) == "string" then .agents.defaults.model else empty end) // empty' "$config_file" 2>/dev/null | head -n 1
-  }
-
-  openclaw_codex_auth_runtime_status() {
-    local default_model codex_home auth_file session_index latest_session_file
-    default_model=$(openclaw_default_model_quick 2>/dev/null || true)
-    if [ -z "$default_model" ] || [ "${default_model#codex/}" = "$default_model" ]; then
-      echo "未启用"
-      return 0
-    fi
-
-    codex_home="${CODEX_HOME:-$HOME/.codex}"
-    auth_file="${codex_home}/auth.json"
-    if [ ! -f "$auth_file" ]; then
-      echo "缺少登录"
-      return 0
-    fi
-
-    session_index="/root/.openclaw/agents/main/sessions/sessions.json"
-    latest_session_file=""
-    if [ -s "$session_index" ] && command -v jq >/dev/null 2>&1; then
-      latest_session_file=$(jq -r 'to_entries | max_by(.value.updatedAt // 0) | .value.sessionFile // empty' "$session_index" 2>/dev/null | head -n 1)
-    fi
-    if [ -n "$latest_session_file" ] && [ -f "$latest_session_file" ] && grep -q 'Failed to extract accountId from token' "$latest_session_file" 2>/dev/null; then
-      echo "认证异常"
-      return 0
-    fi
-
-    if [ -f "/root/.openclaw/agents/main/agent/auth-profiles.json" ]; then
-      echo "已配置"
-    else
-      echo "运行时导入"
-    fi
-  }
-
-  openclaw_codex_auth_hint_line() {
-    local status="$1"
-    case "$status" in
-      缺少登录)
-        echo "Codex 当前依赖 ~/.codex/auth.json；如未登录，请执行 openclaw models auth login --provider openai-codex。"
-        ;;
-      认证异常)
-        echo "最近一次 Codex 调用命中过 Failed to extract accountId from token；建议重新执行 openclaw models auth login --provider openai-codex。"
-        ;;
-      运行时导入)
-        echo "Codex 当前依赖 runtime-only 导入；若再次出现 accountId 错误，优先重新登录 openai-codex。"
-        ;;
-    esac
-  }
-
 
   show_menu() {
     clear
@@ -1951,32 +1877,19 @@ openclaw_panel_menu() {
     local running_status=$(get_running_status)
     local local_version=$(get_local_openclaw_version)
     local auth_status=$(openclaw_auth_status_quick)
-    local codex_auth_status=$(openclaw_codex_auth_runtime_status)
     local install_tone="warn"
     local running_tone="warn"
     local auth_tone="warn"
-    local codex_auth_tone="info"
     [ "$install_status" = "已安装" ] && install_tone="ok"
     [ "$running_status" = "运行中" ] && running_tone="ok"
     [ "$auth_status" != "未检测到认证" ] && auth_tone="ok"
-    case "$codex_auth_status" in
-      已配置) codex_auth_tone="ok" ;;
-      运行时导入) codex_auth_tone="warn" ;;
-      缺少登录|认证异常) codex_auth_tone="danger" ;;
-    esac
 
     skpl_ui_header "OpenClaw管理面板"
     skpl_ui_section "概览"
     skpl_ui_status_row "安装状态" "$install_tone" "$install_status"
     skpl_ui_status_row "网关状态" "$running_tone" "$running_status"
     skpl_ui_status_row "认证状态" "$auth_tone" "$auth_status"
-    if [ "$codex_auth_status" != "未启用" ]; then
-      skpl_ui_status_row "Codex认证" "$codex_auth_tone" "$codex_auth_status"
-    fi
     skpl_ui_kv "版本信息" "$local_version"
-    if [ "$codex_auth_status" = "认证异常" ] || [ "$codex_auth_status" = "缺少登录" ] || [ "$codex_auth_status" = "运行时导入" ]; then
-      printf '%b%s%b\n' "$gl_hui" "$(openclaw_codex_auth_hint_line "$codex_auth_status")" "$gl_bai"
-    fi
 
     echo
     skpl_ui_section "服务"
@@ -5793,13 +5706,6 @@ EOF
   openclaw_memory_auto_setup_local() {
     echo "🔍 检测 Local 环境"
     openclaw_memory_cleanup_legacy_keys
-    if ! openclaw_memory_local_runtime_ready; then
-      openclaw_memory_config_set "agents.defaults.memorySearch.enabled" false >/dev/null 2>&1 || true
-      echo "⚠️ 当前 OpenClaw 缺少 node-llama-cpp，Local memorySearch 暂不可用。"
-      echo "   已自动关闭 memorySearch，避免每次状态检查和请求都撞到坏配置。"
-      echo "   如需恢复 Local，请先修复 OpenClaw 的本地 embeddings 依赖。"
-      return 1
-    fi
     local backend provider
     backend=$(openclaw_memory_get_backend)
     if [ "$backend" = "builtin" ] || [ "$backend" = "local" ]; then
@@ -5815,7 +5721,6 @@ EOF
       openclaw_memory_config_set "agents.defaults.memorySearch.provider" "local"
       echo "✅ 已设置 agents.defaults.memorySearch.provider=local"
     fi
-    openclaw_memory_config_set "agents.defaults.memorySearch.enabled" true >/dev/null 2>&1 || true
 
     local model_path model_status
     model_path=$(openclaw_memory_get_local_model_path)
@@ -5962,18 +5867,11 @@ EOF
         openclaw_memory_config_set "memory.qmd.command" "qmd" >/dev/null 2>&1
         ;;
       local)
-        if ! openclaw_memory_local_runtime_ready; then
-          openclaw_memory_config_set "agents.defaults.memorySearch.enabled" false >/dev/null 2>&1 || true
-          echo "⚠️ 当前 OpenClaw 缺少 node-llama-cpp，无法启用 Local memorySearch。"
-          echo "   已关闭 memorySearch，避免继续触发本地 embeddings 初始化失败。"
-          return 1
-        fi
         openclaw_memory_config_set "memory.backend" "builtin"
         if [ $? -ne 0 ]; then
           echo "❌ 写入配置失败"
           return 1
         fi
-        openclaw_memory_config_set "agents.defaults.memorySearch.enabled" true >/dev/null 2>&1 || true
         openclaw_memory_config_set "agents.defaults.memorySearch.provider" "local" >/dev/null 2>&1
         ;;
       *)
@@ -7674,11 +7572,6 @@ PY
         ;;
       12) send_stats "健康检测与修复"
         openclaw doctor --fix
-        codex_auth_status=$(openclaw_codex_auth_runtime_status)
-        if [ "$codex_auth_status" = "认证异常" ] || [ "$codex_auth_status" = "缺少登录" ] || [ "$codex_auth_status" = "运行时导入" ]; then
-          echo "⚠️ Codex 认证状态: $codex_auth_status"
-          echo "   $(openclaw_codex_auth_hint_line "$codex_auth_status")"
-        fi
         send_stats "OpenClaw API同步触发"
         if sync_openclaw_api_models; then
           start_gateway
@@ -7689,11 +7582,6 @@ PY
         ;;
       13) openclaw_webui_menu ;;
       14) send_stats "TUI命令行对话"
-        codex_auth_status=$(openclaw_codex_auth_runtime_status)
-        if [ "$codex_auth_status" = "认证异常" ] || [ "$codex_auth_status" = "缺少登录" ] || [ "$codex_auth_status" = "运行时导入" ]; then
-          echo "⚠️ Codex 认证状态: $codex_auth_status"
-          echo "   $(openclaw_codex_auth_hint_line "$codex_auth_status")"
-        fi
         openclaw tui
         break_end
         ;;
