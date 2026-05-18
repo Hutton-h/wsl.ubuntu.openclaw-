@@ -49,6 +49,8 @@ SKPL_MULTIAGENT_SESSIONS_CACHE_FILE="${SKPL_HOME}/multiagent-sessions.json"
 SKPL_WEBUI_TOKEN_CACHE_FILE="${SKPL_HOME}/webui-token.txt"
 SKPL_WEBUI_DOMAIN_CACHE_FILE="${SKPL_HOME}/webui-domains.txt"
 SKPL_GATEWAY_RESTART_STAMP_FILE="${SKPL_HOME}/gateway-restart.stamp"
+SKPL_BOT_STATUS_CACHE_FILE="${SKPL_HOME}/bot-status.txt"
+SKPL_PLUGIN_LIST_CACHE_FILE="${SKPL_HOME}/plugins-list.txt"
 SKPL_REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Hutton-h/wsl.ubuntu.openclaw-/main/merged_openclaw_readable.sh"
 SKPL_REMOTE_SCRIPT_PROXIES="https://gh-proxy.com/ https://ghproxy.net/ https://github.moeyy.xyz/ https://gh-proxy.llyke.com/ https://ghproxy.cc/"
 SKPL_BASE_NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
@@ -4976,7 +4978,7 @@ PYTHON_EOF
       clear
       skpl_ui_header "插件管理" "安装、启用、删除与常用插件参考"
       skpl_ui_section "当前插件列表"
-      openclaw plugins list
+      openclaw_get_plugins_list_cached
       echo
       skpl_ui_section "推荐插件"
       echo "直接复制括号内的 ID 即可："
@@ -5029,7 +5031,7 @@ PYTHON_EOF
         if [ "$plugin_action" = "1" ]; then
           echo "🔍 正在检查插件状态: $plugin_id"
           local plugin_list
-          plugin_list=$(openclaw plugins list 2>/dev/null)
+          plugin_list=$(openclaw_get_plugins_list_cached)
 
           if echo "$plugin_list" | grep -qw "$plugin_id" && echo "$plugin_list" | grep "$plugin_id" | grep -q "disabled"; then
             echo "💡 插件 [$plugin_id] 已预装，正在激活..."
@@ -5092,6 +5094,7 @@ PYTHON_EOF
       [ -n "$skipped_list" ] && echo "⏭️ 跳过:$skipped_list"
 
       if [ "$changed" = true ]; then
+        openclaw_get_plugins_list_cached true >/dev/null 2>&1 || true
         echo "🔄 正在重启 OpenClaw 服务以加载变更..."
         start_gateway
       fi
@@ -5257,7 +5260,7 @@ openclaw_json_get_bool() {
     [ -d "$dir" ] && find "$dir" -type f -print -quit 2>/dev/null | grep -q .
   }
 
-  openclaw_plugin_local_installed() {
+openclaw_plugin_local_installed() {
     local plugin="$1"
     local config_file
     config_file=$(openclaw_get_config_file)
@@ -5273,6 +5276,71 @@ openclaw_json_get_bool() {
       || [ -d "${HOME}/.openclaw/extensions/openclaw-${plugin}" ] \
       || [ -d "/usr/lib/node_modules/openclaw/extensions/${plugin}" ] \
       || [ -d "/usr/lib/node_modules/openclaw/extensions/openclaw-${plugin}" ]
+  }
+
+  openclaw_get_plugins_list_cached() {
+    local force_refresh="${1:-false}"
+    local plugin_list=""
+    if [ "$force_refresh" != "true" ] && openclaw_memory_cache_fresh "$SKPL_PLUGIN_LIST_CACHE_FILE" 20 && [ -s "$SKPL_PLUGIN_LIST_CACHE_FILE" ]; then
+      cat "$SKPL_PLUGIN_LIST_CACHE_FILE"
+      return 0
+    fi
+    plugin_list=$(openclaw plugins list 2>/dev/null || true)
+    if [ -n "$plugin_list" ]; then
+      printf '%s\n' "$plugin_list" > "$SKPL_PLUGIN_LIST_CACHE_FILE"
+      printf '%s\n' "$plugin_list"
+      return 0
+    fi
+    [ -s "$SKPL_PLUGIN_LIST_CACHE_FILE" ] && cat "$SKPL_PLUGIN_LIST_CACHE_FILE"
+    return 0
+  }
+
+  openclaw_ensure_channel_plugin_enabled() {
+    local plugin_id="$1"
+    local plugin_list
+    [ -z "$plugin_id" ] && return 1
+
+    plugin_list=$(openclaw_get_plugins_list_cached)
+
+    if echo "$plugin_list" | grep -qw "$plugin_id" && echo "$plugin_list" | grep "$plugin_id" | grep -q "disabled"; then
+      openclaw plugins enable "$plugin_id" || return 1
+      sync_openclaw_plugin_allowlist "$plugin_id" || true
+      return 0
+    fi
+
+    if openclaw_plugin_local_installed "$plugin_id"; then
+      openclaw plugins enable "$plugin_id" >/dev/null 2>&1 || true
+      sync_openclaw_plugin_allowlist "$plugin_id" || true
+      return 0
+    fi
+
+    openclaw plugins install "$plugin_id" || return 1
+    sync_openclaw_plugin_allowlist "$plugin_id" || true
+    return 0
+  }
+
+  openclaw_prepare_whatsapp_channel() {
+    if ! openclaw_ensure_channel_plugin_enabled "whatsapp"; then
+      if ! openclaw_ensure_channel_plugin_enabled "openclaw-whatsapp"; then
+        echo "❌ WhatsApp 插件安装或启用失败。"
+        return 1
+      fi
+    fi
+    openclaw config set channels.whatsapp.enabled true --json >/dev/null 2>&1 || true
+    start_gateway nosleep 5 >/dev/null 2>&1 || true
+    return 0
+  }
+
+  openclaw_prepare_telegram_channel() {
+    if ! openclaw_ensure_channel_plugin_enabled "telegram"; then
+      if ! openclaw_ensure_channel_plugin_enabled "openclaw-telegram"; then
+        echo "❌ Telegram 插件安装或启用失败。"
+        return 1
+      fi
+    fi
+    openclaw config set channels.telegram.enabled true --json >/dev/null 2>&1 || true
+    start_gateway nosleep 5 >/dev/null 2>&1 || true
+    return 0
   }
 
   openclaw_bot_status_text() {
@@ -5310,6 +5378,17 @@ openclaw_json_get_bool() {
   }
 
   openclaw_show_bot_local_status_block() {
+    if openclaw_memory_cache_fresh "$SKPL_BOT_STATUS_CACHE_FILE" 20 && [ -s "$SKPL_BOT_STATUS_CACHE_FILE" ]; then
+      sed -n '1,80p' "$SKPL_BOT_STATUS_CACHE_FILE"
+      return 0
+    fi
+    local output
+    output=$(openclaw_render_bot_local_status_block_raw)
+    printf '%s\n' "$output" > "$SKPL_BOT_STATUS_CACHE_FILE"
+    printf '%s\n' "$output"
+  }
+
+  openclaw_render_bot_local_status_block_raw() {
     local config_file
     config_file=$(openclaw_get_config_file)
     local json_ok="false"
@@ -5464,6 +5543,11 @@ openclaw_json_get_bool() {
 
       case $bot_choice in
         1)
+          echo "正在准备 Telegram 通道..."
+          if ! openclaw_prepare_telegram_channel; then
+            break_end
+            continue
+          fi
           read -e -p "请输入TG机器人收到的连接码 (例如 NYA99R2F)（输入 0 退出）： " code
           if [ "$code" = "0" ]; then continue; fi
           if [ -z "$code" ]; then echo "错误：连接码不能为空。"; sleep 1; continue; fi
@@ -5474,9 +5558,15 @@ openclaw_json_get_bool() {
           npx -y @larksuite/openclaw-lark install
           openclaw config set channels.feishu.streaming true
           openclaw config set channels.feishu.requireMention true --json
+          start_gateway nosleep 5 >/dev/null 2>&1 || true
           break_end
           ;;
         3)
+          echo "正在准备 WhatsApp 通道..."
+          if ! openclaw_prepare_whatsapp_channel; then
+            break_end
+            continue
+          fi
           read -e -p "请输入WhatsApp收到的连接码 (例如 NYA99R2F)（输入 0 退出）： " code
           if [ "$code" = "0" ]; then continue; fi
           if [ -z "$code" ]; then echo "错误：连接码不能为空。"; sleep 1; continue; fi
@@ -5490,6 +5580,7 @@ openclaw_json_get_bool() {
           ;;
         5)
           npx -y @tencent-weixin/openclaw-weixin-cli@latest install
+          start_gateway nosleep 5 >/dev/null 2>&1 || true
           break_end
           ;;
         0)
@@ -6291,6 +6382,9 @@ openclaw_memory_render_basic_status() {
 
 openclaw_memory_render_status() {
   local json_output cache_note=""
+  if ! openclaw_memory_cache_fresh "$SKPL_MEMORY_STATUS_CACHE_FILE" 60; then
+    openclaw_memory_refresh_status_cache >/dev/null 2>&1 || true
+  fi
   if ! openclaw_memory_cache_fresh "$SKPL_MEMORY_STATUS_CACHE_FILE" 60 && [ -s "$SKPL_MEMORY_STATUS_CACHE_FILE" ]; then
     cache_note="当前显示缓存状态，可手动刷新获取最新结果。"
   fi
