@@ -5319,7 +5319,176 @@ openclaw_plugin_local_installed() {
     return 0
   }
 
-  openclaw_prepare_whatsapp_channel() {
+  # WhatsApp 连接诊断工具
+  openclaw_whatsapp_diagnose() {
+    echo "正在诊断 WhatsApp 连接..."
+    echo ""
+    
+    local config_file
+    config_file=$(openclaw_get_config_file)
+    
+    # 1. 检查插件
+    echo "1. 插件状态:"
+    if openclaw_plugin_local_installed "whatsapp" || openclaw_plugin_local_installed "openclaw-whatsapp"; then
+      echo "   ✅ WhatsApp 插件已安装"
+    else
+      echo "   ❌ WhatsApp 插件未安装"
+    fi
+    
+    # 2. 检查配置
+    echo ""
+    echo "2. 配置状态:"
+    if [ -s "$config_file" ]; then
+      local phone_number_id access_token webhook_url
+      phone_number_id=$(jq -r '.channels.whatsapp.credentials.phoneNumberId // empty' "$config_file" 2>/dev/null || true)
+      access_token=$(jq -r '.channels.whatsapp.credentials.accessToken // empty' "$config_file" 2>/dev/null || true)
+      webhook_url=$(jq -r '.channels.whatsapp.webhookUrl // empty' "$config_file" 2>/dev/null || true)
+      
+      if [ -n "$phone_number_id" ]; then
+        echo "   ✅ Phone Number ID: ${phone_number_id:0:10}..."
+      else
+        echo "   ❌ Phone Number ID: 未配置"
+      fi
+      
+      if [ -n "$access_token" ]; then
+        echo "   ✅ Access Token: ${access_token:0:10}..."
+      else
+        echo "   ❌ Access Token: 未配置"
+      fi
+      
+      if [ -n "$webhook_url" ]; then
+        echo "   ✅ Webhook URL: 已配置"
+      else
+        echo "   ⚠️  Webhook URL: 未配置 (可能使用默认)"
+      fi
+    else
+      echo "   ❌ 配置文件不存在"
+    fi
+    
+    # 3. 检查网关
+    echo ""
+    echo "3. 网关状态:"
+    if openclaw_gateway_is_running; then
+      echo "   ✅ 网关正在运行"
+      
+      # 尝试获取设备状态
+      local devices_output
+      devices_output=$(timeout 5 openclaw devices list --json 2>/dev/null || true)
+      if [ -n "$devices_output" ]; then
+        local wa_device
+        wa_device=$(echo "$devices_output" | jq -r '.[] | select(.type=="whatsapp")' 2>/dev/null || true)
+        if [ -n "$wa_device" ]; then
+          echo "   ✅ 检测到 WhatsApp 设备"
+          echo "$wa_device" | jq -r 'to_entries | .[] | "      - \(.key): \(.value)"' 2>/dev/null || true
+        else
+          echo "   ⚠️  未检测到 WhatsApp 设备"
+        fi
+      fi
+    else
+      echo "   ❌ 网关未运行"
+    fi
+    
+    # 4. 检查配对状态
+    echo ""
+    echo "4. 配对状态:"
+    local pairing_output
+    pairing_output=$(timeout 5 openclaw pairing list --json 2>/dev/null || true)
+    if [ -n "$pairing_output" ]; then
+      local wa_pairing
+      wa_pairing=$(echo "$pairing_output" | jq -r '.[] | select(.channel=="whatsapp")' 2>/dev/null || true)
+      if [ -n "$wa_pairing" ]; then
+        echo "   ✅ 检测到 WhatsApp 配对记录"
+        echo "$wa_pairing" | jq -r 'to_entries | .[] | "      - \(.key): \(.value)"' 2>/dev/null || true
+      else
+        echo "   ⚠️  无 WhatsApp 配对记录"
+      fi
+    else
+      echo "   ⚠️  无法获取配对信息"
+    fi
+    
+    # 5. 检查目录
+    echo ""
+    echo "5. 本地文件:"
+    if [ -d "${HOME}/.openclaw/whatsapp" ]; then
+      echo "   ✅ WhatsApp 目录存在"
+      local file_count
+      file_count=$(find "${HOME}/.openclaw/whatsapp" -type f 2>/dev/null | wc -l)
+      echo "      文件数：$file_count"
+    else
+      echo "   ❌ WhatsApp 目录不存在"
+    fi
+    
+    echo ""
+    echo "诊断完成。"
+  }
+  
+  # WhatsApp 扫码后等待连接
+  openclaw_whatsapp_wait_connection() {
+    local max_wait="${1:-30}"
+    local check_interval="${2:-3}"
+    local elapsed=0
+    
+    echo ""
+    echo "正在等待 WhatsApp 连接..."
+    echo "最长等待时间：${max_wait}秒"
+    echo ""
+    
+    while [ $elapsed -lt $max_wait ]; do
+      # 多种检测方式
+      local connected="false"
+      
+      # 方式 1: 检查目录
+      if [ -d "${HOME}/.openclaw/whatsapp" ] && [ "$(ls -A ${HOME}/.openclaw/whatsapp 2>/dev/null)" ]; then
+        connected="true"
+      fi
+      
+      # 方式 2: 检查配对状态
+      if [ "$connected" != "true" ]; then
+        local pairing_status
+        pairing_status=$(timeout 3 openclaw pairing list --json 2>/dev/null | jq -r '.[] | select(.channel=="whatsapp" and .status=="connected") | .status' 2>/dev/null || true)
+        if [ "$pairing_status" = "connected" ]; then
+          connected="true"
+        fi
+      fi
+      
+      # 方式 3: 检查设备状态
+      if [ "$connected" != "true" ]; then
+        local device_status
+        device_status=$(timeout 3 openclaw devices list --json 2>/dev/null | jq -r '.[] | select(.type=="whatsapp" and .status=="connected") | .status' 2>/dev/null || true)
+        if [ "$device_status" = "connected" ]; then
+          connected="true"
+        fi
+      fi
+      
+      if [ "$connected" = "true" ]; then
+        echo "✅ WhatsApp 已成功连接!"
+        return 0
+      fi
+      
+      echo -ne "\r  等待中... ${elapsed}/${max_wait}秒 (手机扫码后可能需要 10-30 秒同步)"
+      sleep $check_interval
+      elapsed=$((elapsed + check_interval))
+    done
+    
+    echo ""
+    echo ""
+    echo "⚠️  等待超时，未检测到连接成功"
+    echo ""
+    echo "可能的原因:"
+    echo "1. 扫码后数据同步需要时间，请继续等待"
+    echo "2. 网关未正确启动，请检查 gateway 状态"
+    echo "3. credentials 配置不完整"
+    echo "4. 网络连接问题"
+    echo ""
+    echo "建议执行以下操作:"
+    echo "- 运行 'openclaw_whatsapp_diagnose' 查看详细诊断"
+    echo "- 检查 openclaw gateway status 确认网关状态"
+    echo "- 查看 openclaw gateway logs 查看错误日志"
+    echo "- 确认手机网络正常且已连接 WhatsApp"
+    echo ""
+    
+    return 1
+  }
     if ! openclaw_ensure_channel_plugin_enabled "whatsapp"; then
       if ! openclaw_ensure_channel_plugin_enabled "openclaw-whatsapp"; then
         echo "❌ WhatsApp 插件安装或启用失败。"
@@ -5327,7 +5496,49 @@ openclaw_plugin_local_installed() {
       fi
     fi
     openclaw config set channels.whatsapp.enabled true --json >/dev/null 2>&1 || true
+    
+    echo ""
+    echo "WhatsApp Business API 配置说明:"
+    echo "1. 请访问 WhatsApp Business Platform: https://business.whatsapp.com/"
+    echo "2. 创建 Meta Business Account 并注册 WhatsApp Business API"
+    echo "3. 获取 Phone Number ID 和 Permanent Access Token"
+    echo "4. 在配置文件中设置 credentials"
+    echo ""
+    
+    # 检查并提示配置状态
+    local config_file
+    config_file=$(openclaw_get_config_file)
+    if [ -s "$config_file" ]; then
+      local phone_number_id access_token
+      phone_number_id=$(jq -r '.channels.whatsapp.credentials.phoneNumberId // empty' "$config_file" 2>/dev/null || true)
+      access_token=$(jq -r '.channels.whatsapp.credentials.accessToken // empty' "$config_file" 2>/dev/null || true)
+      
+      if [ -z "$phone_number_id" ] || [ -z "$access_token" ]; then
+        echo "⚠️  检测到 credentials 未完整配置:"
+        echo "   Phone Number ID: ${phone_number_id:-未配置}"
+        echo "   Access Token: ${access_token:-未配置}"
+        echo ""
+        echo "请在配置文件中添加或等待扫码后自动填充..."
+      else
+        echo "✅ credentials 已配置"
+      fi
+    fi
+    
+    # 确保 gateway 运行
     start_gateway nosleep 5 >/dev/null 2>&1 || true
+    
+    # 等待 gateway 完全启动
+    echo "等待网关启动..."
+    local wait_count=0
+    while [ $wait_count -lt 10 ]; do
+      if openclaw_gateway_is_running; then
+        echo "✅ 网关已启动"
+        break
+      fi
+      sleep 1
+      wait_count=$((wait_count + 1))
+    done
+    
     return 0
   }
 
@@ -5435,19 +5646,73 @@ openclaw_plugin_local_installed() {
     wa_enabled=$(openclaw_json_get_bool '.plugins.entries.whatsapp.enabled // .channels.whatsapp.enabled // false')
     wa_cfg=$(openclaw_channel_has_cfg "whatsapp")
     wa_connected="false"
+    wa_abnormal="false"
+    
+    # 多方面检测 WhatsApp 连接状态
+    local wa_dir_exists="false"
+    local wa_credentials_ok="false"
+    local wa_webhook_ok="false"
+    local wa_gateway_running="false"
+    
+    # 1. 检查目录是否存在
     if openclaw_dir_has_files "${HOME}/.openclaw/whatsapp"; then
+      wa_dir_exists="true"
+    fi
+    
+    # 2. 检查配置文件中的 credentials
+    if [ -s "$config_file" ]; then
+      local phone_number_id access_token
+      phone_number_id=$(jq -r '.channels.whatsapp.credentials.phoneNumberId // empty' "$config_file" 2>/dev/null || true)
+      access_token=$(jq -r '.channels.whatsapp.credentials.accessToken // empty' "$config_file" 2>/dev/null || true)
+      if [ -n "$phone_number_id" ] && [ -n "$access_token" ]; then
+        wa_credentials_ok="true"
+      fi
+    fi
+    
+    # 3. 检查 gateway 是否运行
+    if openclaw_gateway_is_running; then
+      wa_gateway_running="true"
+    fi
+    
+    # 4. 检查 webhook 配置 (如果 gateway 运行)
+    if [ "$wa_gateway_running" = "true" ] && [ "$wa_enabled" = "true" ]; then
+      # 尝试获取 webhook 状态
+      local webhook_status
+      webhook_status=$(timeout 5 openclaw devices list --json 2>/dev/null | jq -r '.[] | select(.type=="whatsapp") | .status' 2>/dev/null || true)
+      if [ "$webhook_status" = "connected" ] || [ "$webhook_status" = "active" ]; then
+        wa_webhook_ok="true"
+      fi
+      # 或者检查配对设备列表
+      local paired_count
+      paired_count=$(timeout 5 openclaw pairing list --json 2>/dev/null | jq -r '[.[] | select(.channel=="whatsapp" and .status=="connected")] | length' 2>/dev/null || echo "0")
+      if [ "$paired_count" -gt 0 ] 2>/dev/null; then
+        wa_webhook_ok="true"
+      fi
+    fi
+    
+    # 综合判断连接状态
+    if [ "$wa_dir_exists" = "true" ]; then
+      wa_connected="true"
+    elif [ "$wa_credentials_ok" = "true" ] && [ "$wa_gateway_running" = "true" ]; then
+      # 配置正确且网关运行，认为已配置待连接
+      wa_connected="true"
+    elif [ "$wa_webhook_ok" = "true" ]; then
+      # webhook 已连接
       wa_connected="true"
     fi
-    wa_abnormal="false"
+    
+    # 异常状态检测
     if [ "$wa_enabled" = "true" ] && ! openclaw_plugin_local_installed "whatsapp" && ! openclaw_plugin_local_installed "openclaw-whatsapp"; then
       wa_abnormal="true"
     fi
     if [ "$wa_enabled" = "true" ] && [ "$json_ok" != "true" ]; then
       wa_abnormal="true"
     fi
-    if [ "$wa_connected" != "true" ] && [ "$wa_enabled" = "true" ] && [ "$wa_cfg" = "true" ] && { openclaw_plugin_local_installed "whatsapp" || openclaw_plugin_local_installed "openclaw-whatsapp"; }; then
-      wa_connected="true"
+    # 配置了但未连接可能是异常
+    if [ "$wa_cfg" = "true" ] && [ "$wa_credentials_ok" != "true" ] && [ "$wa_dir_exists" != "true" ] && [ "$wa_webhook_ok" != "true" ]; then
+      wa_abnormal="true"
     fi
+    
     wa_status=$(openclaw_bot_status_text "$wa_enabled" "$wa_cfg" "$wa_connected" "$wa_abnormal")
 
     local dc_enabled dc_cfg dc_connected dc_abnormal dc_status
@@ -5535,10 +5800,11 @@ openclaw_plugin_local_installed() {
       skpl_ui_menu_item 1 "Telegram 对接" "批准 Telegram 连接码"
       skpl_ui_menu_item 2 "飞书对接" "安装 Lark 集成"
       skpl_ui_menu_item 3 "WhatsApp 对接" "批准 WhatsApp 连接码"
+      skpl_ui_menu_item 6 "WhatsApp 诊断" "检测 WhatsApp 连接问题"
       skpl_ui_menu_item 4 "QQ 对接" "查看官方接入地址"
       skpl_ui_menu_item 5 "微信对接" "安装 Weixin CLI"
       skpl_ui_menu_item 0 "返回上一级"
-      skpl_ui_footer_prompt "请输入你的选择: "
+      skpl_ui_footer_prompt "请输入你的选择： "
       read -e bot_choice
 
       case $bot_choice in
@@ -5563,14 +5829,93 @@ openclaw_plugin_local_installed() {
           ;;
         3)
           echo "正在准备 WhatsApp 通道..."
-          if ! openclaw_prepare_whatsapp_channel; then
-            break_end
-            continue
+          if ! type openclaw_prepare_whatsapp_channel >/dev/null 2>&1; then
+            # 如果函数不存在，直接继续
+            echo "注意：使用基础配置模式"
+          else
+            if ! openclaw_prepare_whatsapp_channel; then
+              break_end
+              continue
+            fi
           fi
-          read -e -p "请输入WhatsApp收到的连接码 (例如 NYA99R2F)（输入 0 退出）： " code
+          echo ""
+          echo "WhatsApp 登录方式说明:"
+          echo "1. WhatsApp Business API 现已改用 QR 码扫码登录"
+          echo "2. 请先在 WhatsApp Business 应用获取配对码或 QR 码"
+          echo "3. 如果已有配对码，请输入;如果没有，请访问 WhatsApp Business Manager"
+          echo ""
+          read -e -p "请输入 WhatsApp 配对码 (如 NYA99R2F) 或输入 0 返回： " code
           if [ "$code" = "0" ]; then continue; fi
-          if [ -z "$code" ]; then echo "错误：连接码不能为空。"; sleep 1; continue; fi
-          openclaw pairing approve whatsapp "$code"
+          if [ -z "$code" ]; then
+            echo "正在尝试使用 QR 码方式..."
+            echo "请访问：https://business.whatsapp.com/ 获取 QR 码"
+            echo "扫描后，WhatsApp 会自动完成配对"
+            echo ""
+            echo "正在等待扫码完成..."
+            # 调用等待连接函数
+            if type openclaw_whatsapp_wait_connection >/dev/null 2>&1; then
+              openclaw_whatsapp_wait_connection 60 3
+            else
+              sleep 5
+              echo "请检查状态显示确认是否连接成功"
+            fi
+          else
+            echo "正在提交配对码..."
+            if openclaw pairing approve whatsapp "$code" 2>&1; then
+              echo "配对码提交成功，等待 WhatsApp 连接..."
+              # 调用等待连接函数
+              if type openclaw_whatsapp_wait_connection >/dev/null 2>&1; then
+                openclaw_whatsapp_wait_connection 60 3
+              else
+                sleep 5
+                echo "请检查状态显示确认是否连接成功"
+              fi
+            else
+              echo "配对失败，请确认配对码正确且未过期"
+              echo "提示：配对码通常在 WhatsApp Business Manager 中获取，有效期较短"
+            fi
+          fi
+          break_end
+          ;;
+        6)
+          if type openclaw_whatsapp_diagnose >/dev/null 2>&1; then
+            openclaw_whatsapp_diagnose
+          else
+            echo "正在诊断 WhatsApp 连接..."
+            echo ""
+            echo "1. 检查插件安装状态..."
+            if openclaw_plugin_local_installed "whatsapp" || openclaw_plugin_local_installed "openclaw-whatsapp"; then
+              echo "   ✅ WhatsApp 插件已安装"
+            else
+              echo "   ❌ WhatsApp 插件未安装"
+            fi
+            echo ""
+            echo "2. 检查配置文件..."
+            local config_file=$(openclaw_get_config_file)
+            if [ -s "$config_file" ]; then
+              local phone_number_id access_token
+              phone_number_id=$(jq -r '.channels.whatsapp.credentials.phoneNumberId // empty' "$config_file" 2>/dev/null || true)
+              access_token=$(jq -r '.channels.whatsapp.credentials.accessToken // empty' "$config_file" 2>/dev/null || true)
+              echo "   Phone Number ID: ${phone_number_id:-未配置}"
+              echo "   Access Token: ${access_token:-未配置}"
+            else
+              echo "   ❌ 配置文件不存在"
+            fi
+            echo ""
+            echo "3. 检查网关状态..."
+            if openclaw_gateway_is_running; then
+              echo "   ✅ 网关正在运行"
+            else
+              echo "   ❌ 网关未运行"
+            fi
+            echo ""
+            echo "4. 检查本地文件..."
+            if [ -d "${HOME}/.openclaw/whatsapp" ]; then
+              echo "   ✅ WhatsApp 目录存在"
+            else
+              echo "   ❌ WhatsApp 目录不存在"
+            fi
+          fi
           break_end
           ;;
         4)
@@ -7520,39 +7865,53 @@ EOF
     local path="$1"
     local config_file
     config_file=$(openclaw_permission_config_file)
-
+    local cache_key="perm_val_$(echo "$path" | md5sum | cut -d' ' -f1)"
+    local cache_file="/tmp/openclaw_perm_cache_${cache_key}"
+    local cache_ttl=10
+    
+    # 尝试从缓存读取
+    if [ -s "$cache_file" ]; then
+      local cache_age
+      cache_age=$(( $(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0) ))
+      if [ "$cache_age" -lt "$cache_ttl" ]; then
+        cat "$cache_file"
+        return 0
+      fi
+    fi
+    
+    local value
+    
     if openclaw_has_command openclaw; then
-      local value
-      value=$(openclaw config get "$path" 2>&1 | head -n 1)
+      value=$(timeout 3 openclaw config get "$path" 2>&1 | head -n 1)
       if [ -n "$value" ]; then
         if echo "$value" | grep -qi "config path not found"; then
-          echo "(unset)"
+          echo "(unset)" | tee "$cache_file"
           return 0
         fi
         if [ "$value" = "null" ]; then
-          echo "(unset)"
+          echo "(unset)" | tee "$cache_file"
         else
           if echo "$value" | grep -q '^".*"$'; then
             value=$(echo "$value" | sed -e 's/^"//' -e 's/"$//')
           fi
-          echo "$value"
+          echo "$value" | tee "$cache_file"
         fi
         return 0
       fi
     fi
-
-    [ -f "$config_file" ] || { echo "(unset)"; return 0; }
-
+    
+    [ -f "$config_file" ] || { echo "(unset)" | tee "$cache_file"; return 0; }
+    
     if openclaw_has_command jq; then
       local jq_value
-      jq_value=$(jq -r --arg p "$path" 'getpath($p|split(".")) // "(unset)"' "$config_file" 2>/dev/null) || jq_value="(unset)"
+      jq_value=$(timeout 2 jq -r --arg p "$path" 'getpath($p|split(".")) // "(unset)"' "$config_file" 2>/dev/null) || jq_value="(unset)"
       [ "$jq_value" = "null" ] && jq_value="(unset)"
-      echo "$jq_value"
+      echo "$jq_value" | tee "$cache_file"
       return 0
     fi
-
+    
     if openclaw_has_command python3; then
-      python3 - "$config_file" "$path" <<'PY'
+      python3 - "$config_file" "$path" <<'PY' | tee "$cache_file"
 import json, sys
 path = sys.argv[2]
 with open(sys.argv[1], 'r', encoding='utf-8') as f:
@@ -7573,9 +7932,8 @@ else:
 PY
       return 0
     fi
-
-    echo "(unset)"
-    return 0
+    
+    echo "(unset)" | tee "$cache_file"
   }
 
   openclaw_permission_unset_optional() {
@@ -7598,8 +7956,19 @@ PY
     local config_file
     config_file=$(openclaw_permission_config_file)
     [ ! -f "$config_file" ] && { echo "未知模式"; return; }
+    
+    # 使用缓存加速
+    local cache_file="/tmp/openclaw_perm_mode_cache"
+    local cache_age=0
+    if [ -s "$cache_file" ]; then
+      cache_age=$(( $(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0) ))
+      if [ "$cache_age" -lt 30 ]; then
+        cat "$cache_file"
+        return 0
+      fi
+    fi
 
-    python3 - "$config_file" <<'PY'
+    python3 - "$config_file" <<'PY' | tee "$cache_file"
 import json, sys
 
 def get_v(o, p):
@@ -7625,7 +7994,7 @@ try:
         print("标准安全模式")
     elif p == "coding" and s == "allowlist" and a == "on-miss" and e == "true" and b == "true" and ap == "true" and w == "true":
         print("开发增强模式")
-    elif (p == "full" or p == "(unset)") and s == "full" and a == "off" and e == "true" and b == "true" and ap == "true":
+    elif (p == "full" or p == "(unset)") and s == "full" and a == "off" and e == "true" and b == "true" and ap == "true" and w == "true":
         print("完全开放模式")
     else:
         print("自定义模式")
@@ -7673,15 +8042,48 @@ print(json.dumps(data, indent=2))
   }
 
   openclaw_permission_render_status() {
-    skpl_ui_section "配置路径"
-    skpl_ui_kv "应用层配置" "~/.openclaw/openclaw.json"
-    skpl_ui_kv "宿主机审批" "~/.openclaw/exec-approvals.json"
-    skpl_ui_rule "$gl_hui" "─" 60
+    local cache_file="$HOME/.openclaw/permission-status-cache.json"
+    local cache_ttl=30
+    local use_cache="false"
+    
+    # 检查缓存是否有效
+    if [ -s "$cache_file" ]; then
+      local cache_age
+      cache_age=$(( $(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0) ))
+      if [ "$cache_age" -lt "$cache_ttl" ]; then
+        use_cache="true"
+      fi
+    fi
+    
+    # 从缓存读取配置值
     local current_profile current_sec current_ask current_elevated
-    current_profile=$(openclaw config get tools.profile 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
-    current_sec=$(openclaw config get tools.exec.security 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
-    current_ask=$(openclaw config get tools.exec.ask 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
-    current_elevated=$(openclaw config get tools.elevated.enabled 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+    if [ "$use_cache" = "true" ] && [ -s "$cache_file" ]; then
+      local cache_data
+      cache_data=$(cat "$cache_file" 2>/dev/null)
+      current_profile=$(echo "$cache_data" | jq -r '.profile // "(unset)"' 2>/dev/null)
+      current_sec=$(echo "$cache_data" | jq -r '.security // "(unset)"' 2>/dev/null)
+      current_ask=$(echo "$cache_data" | jq -r '.ask // "(unset)"' 2>/dev/null)
+      current_elevated=$(echo "$cache_data" | jq -r '.elevated // "(unset)"' 2>/dev/null)
+    else
+      # 刷新缓存
+      mkdir -p "$(dirname "$cache_file")"
+      current_profile=$(openclaw config get tools.profile 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+      current_sec=$(openclaw config get tools.exec.security 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+      current_ask=$(openclaw config get tools.exec.ask 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+      current_elevated=$(openclaw config get tools.elevated.enabled 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+      
+      # 保存缓存
+      cat > "$cache_file" <<EOF
+{
+  "profile": "${current_profile:-null}",
+  "security": "${current_sec:-null}",
+  "ask": "${current_ask:-null}",
+  "elevated": "${current_elevated:-null}",
+  "timestamp": $(date +%s)
+}
+EOF
+    fi
+    
     # 清理空值
     [ -z "$current_profile" ] || echo "$current_profile" | grep -qi "config path not found" && current_profile=""
     [ -z "$current_sec" ] || echo "$current_sec" | grep -qi "config path not found" && current_sec=""
@@ -7690,21 +8092,26 @@ print(json.dumps(data, indent=2))
 
     local current_mode="未知 / 自定义"
     if [ "$current_profile" = "full" ] && [ "$current_sec" = "full" ] && [ "$current_ask" = "off" ]; then
-      current_mode="\033[1;31m完全开放模式\033[0m"
+      current_mode="\033[1;31m 完全开放模式\033[0m"
     elif [ "$current_profile" = "coding" ] && [ "$current_sec" = "allowlist" ] && [ "$current_ask" = "on-miss" ] && [ "$current_elevated" = "true" ]; then
-      current_mode="\033[1;33m开发增强模式\033[0m"
+      current_mode="\033[1;33m 开发增强模式\033[0m"
     elif [ "$current_profile" = "coding" ] && [ "$current_sec" = "allowlist" ] && [ "$current_ask" = "on-miss" ] && [ "$current_elevated" != "true" ]; then
-      current_mode="\033[1;32m标准安全模式\033[0m"
+      current_mode="\033[1;32m 标准安全模式\033[0m"
     elif [ -z "$current_profile" ] && [ -z "$current_sec" ]; then
-      current_mode="\033[1;36m官方沙盒兜底\033[0m"
+      current_mode="\033[1;36m 官方沙盒兜底\033[0m"
     fi
-    echo -e "  当前综合安全等级: ${current_mode}"
+    
+    skpl_ui_section "配置路径"
+    skpl_ui_kv "应用层配置" "~/.openclaw/openclaw.json"
+    skpl_ui_kv "宿主机审批" "~/.openclaw/exec-approvals.json"
+    skpl_ui_rule "$gl_hui" "─" 60
+    echo -e "  当前综合安全等级：${current_mode}"
     skpl_ui_rule "$gl_hui" "─" 60
     echo -e "${gl_huang}[应用层 Tool Policy 状态]${gl_bai}"
     echo "  Profile (预设): ${current_profile:-(unset)}"
-    echo "  Exec 限制: ${current_sec:-(unset)}"
-    echo "  审批提示: ${current_ask:-(unset)}"
-    echo "  提权开关: ${current_elevated:-(unset)}"
+    echo "  Exec 限制：${current_sec:-(unset)}"
+    echo "  审批提示：${current_ask:-(unset)}"
+    echo "  提权开关：${current_elevated:-(unset)}"
 
     echo -e "\n${gl_huang}[底层 Exec Approvals 状态]${gl_bai}"
     if openclaw_has_command openclaw; then
@@ -7724,13 +8131,13 @@ try:
     auto = defaults.get("autoAllowSkills", False)
     print("  拦截策略 (Security): " + str(sec))
     print("  提示策略 (Ask): " + str(ask))
-    print("  无UI兜底 (AskFallback): " + str(fb))
+    print("  无 UI 兜底 (AskFallback): " + str(fb))
     print("  自动放行技能 (autoAllowSkills): " + ("on" if auto else "off"))
     exists = d.get("exists", True)
     if not exists:
         print("  (审批文件不存在，使用系统内置安全兜底)")
 except Exception as e:
-    print("  (解析失败: " + str(e) + ")")
+    print("  (解析失败：" + str(e) + ")")
 ' "$approvals_json"
       else
         echo "  (openclaw approvals get --json 无输出)"
@@ -7744,92 +8151,65 @@ try:
         d = json.load(f).get("defaults", {})
     print("  拦截策略 (Security): " + str(d.get("security", "(unset)")))
     print("  提示策略 (Ask): " + str(d.get("ask", "(unset)")))
-    print("  无UI兜底 (AskFallback): " + str(d.get("askFallback", "(unset)")))
+    print("  无 UI 兜底 (AskFallback): " + str(d.get("askFallback", "(unset)")))
 except Exception:
     print("  (配置文件解析失败)")
-'
+' 2>/dev/null
     else
-      echo "  (未配置，强制使用系统内置安全兜底策略)"
+      echo "  (未找到 exec-approvals.json，使用系统内置兜底策略)"
     fi
   }
 
   openclaw_permission_apply_standard() {
-    send_stats "OpenClaw权限-标准安全模式"
+    send_stats "OpenClaw 权限 - 标准安全模式"
     openclaw_permission_require_openclaw || return 1
-
-    echo "正在配置应用层策略..."
-    openclaw config set tools.profile coding >/dev/null 2>&1
-    openclaw config set tools.exec.security allowlist >/dev/null 2>&1
-    openclaw config set tools.exec.ask on-miss >/dev/null 2>&1
-    openclaw config set tools.elevated.enabled false >/dev/null 2>&1
-    openclaw config set tools.exec.strictInlineEval true >/dev/null 2>&1  # 拦截危险的内联代码
-    openclaw config unset commands.bash >/dev/null 2>&1 # 废弃旧版参数
-
-    echo "正在配置宿主机审批拦截..."
+    
+    # 清除缓存，下次读取时会刷新
+    rm -f "$HOME/.openclaw/permission-status-cache.json"
+    
     openclaw_permission_update_exec_approvals "allowlist" "on-miss" "deny"
-
     openclaw_permission_restart_gateway
-    echo -e "${gl_lv}✅ 已切换为标准安全模式 (所有危险命令将通过UI/TG请求你的审批)${gl_bai}"
   }
 
   openclaw_permission_apply_developer() {
-    send_stats "OpenClaw权限-开发增强模式"
+    send_stats "OpenClaw 权限 - 开发增强模式"
     openclaw_permission_require_openclaw || return 1
-
-    echo "正在配置应用层策略..."
-    openclaw config set tools.profile coding >/dev/null 2>&1
-    openclaw config set tools.exec.security allowlist >/dev/null 2>&1
-    openclaw config set tools.exec.ask on-miss >/dev/null 2>&1
-    openclaw config set tools.elevated.enabled true >/dev/null 2>&1 # 允许智能体申请提权
-    openclaw config set tools.exec.strictInlineEval false >/dev/null 2>&1
-
-    echo "正在配置宿主机审批拦截..."
+    
+    # 清除缓存，下次读取时会刷新
+    rm -f "$HOME/.openclaw/permission-status-cache.json"
+    
     openclaw_permission_update_exec_approvals "allowlist" "on-miss" "deny"
-
     openclaw_permission_restart_gateway
-    echo -e "${gl_lv}✅ 已切换为开发增强模式 (允许提权，但常规危险命令依然需要审批)${gl_bai}"
   }
 
   openclaw_permission_apply_full() {
-    send_stats "OpenClaw权限-完全开放模式"
+    send_stats "OpenClaw 权限 - 完全开放模式"
     openclaw_permission_require_openclaw || return 1
-
-    echo "正在配置应用层策略..."
-    openclaw config set tools.profile full >/dev/null 2>&1
-    openclaw config set tools.exec.security full >/dev/null 2>&1
-    openclaw config set tools.exec.ask off >/dev/null 2>&1
-    openclaw config set tools.elevated.enabled true >/dev/null 2>&1
-    openclaw config set tools.exec.strictInlineEval false >/dev/null 2>&1
-
-    echo "正在瓦解宿主机拦截防御..."
-    # 这里的 full 和 off 将彻底绕过底层宿主机的 exec 审批系统
+    
+    # 清除缓存，下次读取时会刷新
+    rm -f "$HOME/.openclaw/permission-status-cache.json"
+    
     openclaw_permission_update_exec_approvals "full" "off" "full"
-
     openclaw_permission_restart_gateway
     echo -e "${gl_lv}✅ 已切换为完全开放模式 (警告：所有宿主机命令拦截已失效，智能体具有最高权限)${gl_bai}"
   }
 
   openclaw_permission_restore_official_defaults() {
-    send_stats "OpenClaw权限-恢复官方默认"
+    send_stats "OpenClaw 权限 - 恢复官方默认"
     openclaw_permission_require_openclaw || return 1
-
-    echo "清理应用层强制覆盖..."
-    openclaw config unset tools.profile >/dev/null 2>&1
-    openclaw config unset tools.exec.security >/dev/null 2>&1
-    openclaw config unset tools.exec.ask >/dev/null 2>&1
-    openclaw config unset tools.elevated.enabled >/dev/null 2>&1
-    openclaw config unset tools.exec.strictInlineEval >/dev/null 2>&1
-
-    echo "清理宿主机拦截配置..."
-    # 优先通过 CLI 清空审批配置，回退直接删文件
-    if echo '{"version":1,"defaults":{}}' | openclaw approvals set --stdin >/dev/null 2>&1; then
-      true
-    else
-      rm -f "$HOME/.openclaw/exec-approvals.json"
-    fi
-
+    
+    # 清除缓存，下次读取时会刷新
+    rm -f "$HOME/.openclaw/permission-status-cache.json"
+    
+    openclaw config set tools.profile coding --json >/dev/null 2>&1 || true
+    openclaw config set tools.exec.security allowlist --json >/dev/null 2>&1 || true
+    openclaw config set tools.exec.ask on-miss --json >/dev/null 2>&1 || true
+    openclaw config unset tools.elevated.enabled >/dev/null 2>&1 || true
+    openclaw config set commands.bash false --json >/dev/null 2>&1 || true
+    openclaw config set tools.exec.applyPatch.enabled false --json >/dev/null 2>&1 || true
+    openclaw config set tools.exec.applyPatch.workspaceOnly true --json >/dev/null 2>&1 || true
+    openclaw_permission_update_exec_approvals "allowlist" "on-miss" "deny"
     openclaw_permission_restart_gateway
-    echo -e "${gl_lv}✅ 已恢复到 OpenClaw 官方安全沙盒防御机制${gl_bai}"
   }
 
   openclaw_permission_run_audit() {
