@@ -56,7 +56,6 @@ SKPL_REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Hutton-h/wsl.ubuntu.op
 SKPL_REMOTE_SCRIPT_PROXIES="https://gh-proxy.com/ https://ghproxy.net/ https://github.moeyy.xyz/ https://gh-proxy.llyke.com/ https://ghproxy.cc/"
 SKPL_BASE_NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
 SKPL_DOMESTIC_MODEL_DIRECT_RULE="model-square.app.baizhi.cloud,.baizhi.cloud,.aliyuncs.com,.modelscope.cn,.deepseek.com,.moonshot.cn,.bigmodel.cn,.siliconflow.cn,.stepfun.com,.minimax.chat,.baichuan-ai.com,.ppinfra.com,.volces.com,.ark.cn-beijing.volces.com,.qianfan.baidubce.com,.xf-yun.com,.spark-api.xf-yun.com,.hunyuan.cloud.tencent.com,.tencentcloudapi.com"
-SKPL_WHATSAPP_DIRECT_RULE="web.whatsapp.com,.whatsapp.com,.whatsapp.net,.wa.me,.facebook.com,.fbcdn.net"
 
 gl_bai='\033[0m'
 gl_lv='\033[32m'
@@ -196,7 +195,7 @@ PY
 
 skpl_build_no_proxy_rule() {
   local extra_hosts="${1:-}"
-  skpl_merge_no_proxy_csv "$SKPL_BASE_NO_PROXY_RULE" "$SKPL_DOMESTIC_MODEL_DIRECT_RULE" "$SKPL_WHATSAPP_DIRECT_RULE" "$extra_hosts"
+  skpl_merge_no_proxy_csv "$SKPL_BASE_NO_PROXY_RULE" "$SKPL_DOMESTIC_MODEL_DIRECT_RULE" "$extra_hosts"
 }
 
 skpl_extract_url_host() {
@@ -536,6 +535,61 @@ openclaw_gateway_port_reachable() {
 
 openclaw_gateway_process_running() {
   pgrep -f "openclaw-gateway|dist/index\.js.*gateway|node .*openclaw.*gateway|openclaw[[:space:]]+gateway" >/dev/null 2>&1
+}
+
+openclaw_whatsapp_proxy_host() {
+  local active_proxy port host
+  port="$(skpl_effective_proxy_port)"
+  active_proxy=$(resolve_active_proxy "$port" 2>/dev/null || true)
+  if [ -n "$active_proxy" ]; then
+    printf '%s\n' "${active_proxy%%:*}"
+    return 0
+  fi
+
+  host=$(getent ahostsv4 host.docker.internal 2>/dev/null | awk 'NR==1{print $1}')
+  if [ -n "$host" ]; then
+    printf '%s\n' "$host"
+    return 0
+  fi
+
+  host=$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf 2>/dev/null)
+  if [ -n "$host" ]; then
+    printf '%s\n' "$host"
+    return 0
+  fi
+
+  printf '%s\n' "127.0.0.1"
+}
+
+openclaw_whatsapp_proxy_url() {
+  local port host
+  port="$(skpl_effective_proxy_port)"
+  host="$(openclaw_whatsapp_proxy_host)"
+  printf 'http://%s:%s\n' "$host" "$port"
+}
+
+openclaw_channel_uses_install_proxy() {
+  local channel="$1"
+  case "$channel" in
+    telegram|whatsapp|discord|slack)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+openclaw_apply_channel_proxy_config() {
+  local channel="$1"
+  local proxy_url=""
+  [ -z "$channel" ] && return 1
+  if ! openclaw_channel_uses_install_proxy "$channel"; then
+    return 0
+  fi
+  proxy_url="$(openclaw_whatsapp_proxy_url)"
+  openclaw config set "channels.${channel}.proxy" "$proxy_url" >/dev/null 2>&1 || true
+  openclaw config set "channels.${channel}.proxyUrl" "$proxy_url" >/dev/null 2>&1 || true
+  openclaw config set "channels.${channel}.socksProxy" "$proxy_url" >/dev/null 2>&1 || true
+  return 0
 }
 
 openclaw_gateway_is_running() {
@@ -5384,6 +5438,9 @@ openclaw_plugin_local_installed() {
       fi
     fi
     openclaw config set channels.whatsapp.enabled true --json >/dev/null 2>&1 || true
+    openclaw config set channels.whatsapp.proxy "$(openclaw_whatsapp_proxy_url)" >/dev/null 2>&1 || true
+    openclaw config set channels.whatsapp.proxyUrl "$(openclaw_whatsapp_proxy_url)" >/dev/null 2>&1 || true
+    openclaw config set channels.whatsapp.socksProxy "$(openclaw_whatsapp_proxy_url)" >/dev/null 2>&1 || true
     start_gateway nosleep 5 >/dev/null 2>&1 || true
     return 0
   }
@@ -5438,25 +5495,29 @@ openclaw_plugin_local_installed() {
   }
 
   openclaw_print_whatsapp_diagnosis() {
-    local active_proxy="" session_root gateway_port pair_url
+    local active_proxy="" session_root gateway_port pair_url whatsapp_proxy_url configured_port
     session_root=$(openclaw_whatsapp_session_root)
     gateway_port=$(openclaw_gateway_port)
     pair_url=$(openclaw_whatsapp_pairing_url)
     active_proxy=$(resolve_active_proxy "$(skpl_effective_proxy_port)" 2>/dev/null || true)
+    configured_port=$(skpl_effective_proxy_port)
+    whatsapp_proxy_url=$(openclaw_whatsapp_proxy_url)
 
     skpl_ui_header "WhatsApp 连接诊断" "聚焦 WSL、代理、网关与会话状态"
     skpl_ui_kv "WSL 环境" "$(openclaw_is_wsl && echo 是 || echo 否)"
     skpl_ui_kv "网关端口" "$gateway_port"
     skpl_ui_kv "网关监听" "$(openclaw_gateway_port_reachable && echo 正常 || echo 未就绪)"
-    skpl_ui_kv "代理状态" "${active_proxy:-直连}"
+    skpl_ui_kv "安装代理端口" "$configured_port"
+    skpl_ui_kv "代理状态" "${active_proxy:-未探测到活动代理}"
+    skpl_ui_kv "WhatsApp代理" "$whatsapp_proxy_url"
     skpl_ui_kv "会话目录" "$session_root"
     skpl_ui_kv "会话文件" "$(openclaw_whatsapp_has_session && echo 已存在 || echo 未生成)"
     skpl_ui_kv "配对入口" "$pair_url"
     echo
     echo "建议："
-    echo "1. WhatsApp 连接优先走直连，当前脚本已将 WhatsApp 域名加入 NO_PROXY。"
+    echo "1. 18789 是本地网关端口，10808 或自定义端口用于 WhatsApp 出站代理。"
     echo "2. WSL 环境可正常承载 OpenClaw，扫码展示通常依赖 WebUI 或宿主浏览器。"
-    echo "3. 二维码异常通常来自网关未就绪、浏览器未打开配对页、旧会话残留或代理拦截。"
+    echo "3. 二维码异常通常来自网关未就绪、浏览器未打开配对页、旧会话残留或代理未生效。"
   }
 
   openclaw_whatsapp_open_pairing_page() {
@@ -5482,6 +5543,8 @@ openclaw_plugin_local_installed() {
       return 1
     fi
     openclaw_print_whatsapp_diagnosis
+    echo
+    echo "已为 WhatsApp 通道写入代理：$(openclaw_whatsapp_proxy_url)"
     echo
     openclaw_whatsapp_open_pairing_page
     return 0
