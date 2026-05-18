@@ -8,8 +8,30 @@ SKPL_SCRIPT_PATH="${SKPL_HOME}/${SKPL_SCRIPT_NAME}"
 SKPL_CMD_PATH="/usr/local/bin/skpl"
 SKPL_PROXY_PORT="10808"
 EVOMAP_DIR="/root/.openclaw/evolver"
-EVOMAP_MEMORY_DIR="/root/.openclaw/workspace/.learnings"
+EVOMAP_MEMORY_DIR="/root/.openclaw/hybrid-memory/evomap-learnings"
 EVOMAP_BACKUP_DIR="/root/.openclaw/evolver_backups"
+SKPL_HYBRID_MEMORY_ROOT="/root/.openclaw/hybrid-memory"
+SKPL_HYBRID_MEMORY_EVENTS_DIR="${SKPL_HYBRID_MEMORY_ROOT}/events/inbox"
+SKPL_HYBRID_MEMORY_ARCHIVE_DIR="${SKPL_HYBRID_MEMORY_ROOT}/events/archive"
+SKPL_HYBRID_MEMORY_KNOWLEDGE_DIR="${SKPL_HYBRID_MEMORY_ROOT}/knowledge"
+SKPL_HYBRID_MEMORY_FASTCARDS_DIR="${SKPL_HYBRID_MEMORY_KNOWLEDGE_DIR}/fast-cards"
+SKPL_HYBRID_MEMORY_EXPORT_DIR="/root/.openclaw/workspace/memory/hybrid-cards"
+SKPL_HYBRID_MEMORY_STATE_DIR="${SKPL_HYBRID_MEMORY_ROOT}/state"
+SKPL_HYBRID_MEMORY_LOGS_DIR="${SKPL_HYBRID_MEMORY_ROOT}/logs"
+SKPL_HYBRID_MEMORY_CACHE_DIR="${SKPL_HYBRID_MEMORY_ROOT}/cache"
+SKPL_HYBRID_MEMORY_DB="${SKPL_HYBRID_MEMORY_ROOT}/hybrid-memory.sqlite3"
+SKPL_HYBRID_MEMORY_CONFIG="${SKPL_HYBRID_MEMORY_ROOT}/config.json"
+SKPL_HYBRID_MEMORY_BROKER="${SKPL_HYBRID_MEMORY_ROOT}/memory-broker.py"
+SKPL_HYBRID_MEMORY_SYNC_LOG="${SKPL_HYBRID_MEMORY_LOGS_DIR}/sync.log"
+SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG="${SKPL_HYBRID_MEMORY_LOGS_DIR}/sync-error.log"
+SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE="${SKPL_HYBRID_MEMORY_STATE_DIR}/sync.stamp"
+SKPL_HYBRID_MEMORY_FAILED_DIR="${SKPL_HYBRID_MEMORY_ARCHIVE_DIR}/failed"
+SKPL_HYBRID_MEMORY_EXPORT_MIN_CONFIDENCE="0.72"
+SKPL_HYBRID_MEMORY_SEARCH_CACHE_TTL="120"
+SKPL_HYBRID_MEMORY_EVENT_ALLOWLIST="memory-index,memory-manual-sync,evomap-manual-sync,evomap-install,evomap-update,openclaw-update,install-pipeline"
+SKPL_HYBRID_MEMORY_SYNC_LOCK_FILE="${SKPL_HYBRID_MEMORY_STATE_DIR}/sync.lock"
+SKPL_HYBRID_MEMORY_SYNC_LOAD_LIMIT="6.0"
+SKPL_HYBRID_MEMORY_RETRY_MAX="1"
 SKPL_STATE_FILE="/root/.skpl/install.state"
 SKPL_LOG_FILE="/root/.skpl/install.log"
 SKPL_APT_UPDATED="0"
@@ -25,6 +47,8 @@ SKPL_MULTIAGENT_AGENTS_CACHE_FILE="${SKPL_HOME}/multiagent-agents.json"
 SKPL_MULTIAGENT_BINDINGS_CACHE_FILE="${SKPL_HOME}/multiagent-bindings.json"
 SKPL_MULTIAGENT_SESSIONS_CACHE_FILE="${SKPL_HOME}/multiagent-sessions.json"
 SKPL_WEBUI_TOKEN_CACHE_FILE="${SKPL_HOME}/webui-token.txt"
+SKPL_WEBUI_DOMAIN_CACHE_FILE="${SKPL_HOME}/webui-domains.txt"
+SKPL_GATEWAY_RESTART_STAMP_FILE="${SKPL_HOME}/gateway-restart.stamp"
 SKPL_REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Hutton-h/wsl.ubuntu.openclaw-/main/merged_openclaw_readable.sh"
 SKPL_REMOTE_SCRIPT_PROXIES="https://gh-proxy.com/ https://ghproxy.net/ https://github.moeyy.xyz/ https://gh-proxy.llyke.com/ https://ghproxy.cc/"
 SKPL_BASE_NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
@@ -1204,6 +1228,921 @@ install_evomap_dependencies() {
   npm_try_with_registries "${npm_args[@]}"
 }
 
+hybrid_memory_prepare_dirs() {
+  mkdir -p \
+    "$SKPL_HYBRID_MEMORY_EVENTS_DIR" \
+    "$SKPL_HYBRID_MEMORY_ARCHIVE_DIR" \
+    "$SKPL_HYBRID_MEMORY_FAILED_DIR" \
+    "$SKPL_HYBRID_MEMORY_KNOWLEDGE_DIR/draft" \
+    "$SKPL_HYBRID_MEMORY_KNOWLEDGE_DIR/candidate" \
+    "$SKPL_HYBRID_MEMORY_KNOWLEDGE_DIR/core" \
+    "$SKPL_HYBRID_MEMORY_FASTCARDS_DIR" \
+    "$SKPL_HYBRID_MEMORY_EXPORT_DIR" \
+    "$SKPL_HYBRID_MEMORY_STATE_DIR" \
+    "$SKPL_HYBRID_MEMORY_LOGS_DIR" \
+    "$SKPL_HYBRID_MEMORY_CACHE_DIR" \
+    "$EVOMAP_MEMORY_DIR"
+}
+
+hybrid_memory_write_broker() {
+  hybrid_memory_prepare_dirs
+  cat > "$SKPL_HYBRID_MEMORY_BROKER" <<'PY'
+#!/usr/bin/env python3
+import hashlib
+import json
+import math
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+db_path = Path(sys.argv[1])
+action = sys.argv[2] if len(sys.argv) > 2 else 'status'
+payload = Path(sys.argv[3]) if len(sys.argv) > 3 else None
+
+VECTOR_DIM = 128
+STOPWORDS = {
+    'a', 'an', 'and', 'as', 'at', 'by', 'for', 'from', 'in', 'into', 'is', 'of', 'on', 'or', 'the', 'to', 'with'
+}
+
+try:
+    from qdrant_client import QdrantClient
+    from qdrant_client.http.models import Distance, PointStruct, VectorParams
+    QDRANT_READY = True
+except Exception:
+    QDRANT_READY = False
+
+db_path.parent.mkdir(parents=True, exist_ok=True)
+conn = sqlite3.connect(db_path)
+conn.execute('create virtual table if not exists memory_fts using fts5(id, kind, source, summary, text, tags)')
+conn.execute('create table if not exists memory_objects (id text primary key, kind text, source text, summary text, text text, tags text, confidence real, created_at integer)')
+
+qdrant_path = db_path.parent / 'qdrant-store'
+qdrant = None
+collection_name = 'hybrid_memory'
+
+if QDRANT_READY:
+    try:
+        qdrant = QdrantClient(path=str(qdrant_path))
+        collections = [c.name for c in qdrant.get_collections().collections]
+        if collection_name not in collections:
+            qdrant.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
+            )
+    except Exception:
+        qdrant = None
+
+
+def embed_text(text: str):
+    vec = [0.0] * VECTOR_DIM
+    for token in (text or '').lower().split():
+        digest = hashlib.sha256(token.encode('utf-8')).digest()
+        idx = digest[0] % VECTOR_DIM
+        sign = 1.0 if digest[1] % 2 == 0 else -1.0
+        weight = 1.0 + (digest[2] / 255.0)
+        vec[idx] += sign * weight
+    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+    return [v / norm for v in vec]
+
+
+def parse_tags(raw):
+    try:
+        data = json.loads(raw or '[]')
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def tokenize(text: str):
+    return [token for token in (text or '').lower().replace('_', ' ').replace('-', ' ').split() if token]
+
+
+def content_tokens(text: str):
+    return [token for token in tokenize(text) if token not in STOPWORDS]
+
+
+def normalize_query(text: str):
+    normalized = ' '.join(tokenize(text))
+    alias_map = {
+        'mem': 'memory',
+        'memo': 'memory',
+        'mems': 'memory',
+        'memories': 'memory',
+        'hybrid': 'hybrid memory',
+        'hybrid-memory': 'hybrid memory',
+        'hybridmemory': 'hybrid memory',
+        'hybird': 'hybrid memory',
+        'hyprid': 'hybrid memory',
+        'vectordb': 'vector',
+        'vec': 'vector',
+        'vectors': 'vector',
+        'evomapai': 'evomap',
+        'evo': 'evomap',
+        'evolver': 'evomap',
+        'gatewayd': 'gateway',
+        'gatewat': 'gateway',
+        'gway': 'gateway',
+        'idx': 'index',
+        'indx': 'index',
+        'fts': 'fts5',
+        'qdrantdb': 'qdrant',
+    }
+    expanded = []
+    for token in tokenize(normalized):
+        mapped = alias_map.get(token, token)
+        expanded.extend(tokenize(mapped))
+    return ' '.join(expanded)
+
+
+def build_fts_queries(text: str):
+    normalized = normalize_query(text)
+    tokens = content_tokens(normalized) or tokenize(normalized)
+    queries = []
+
+    if normalized:
+        queries.append(f'"{normalized}"')
+    if tokens:
+        queries.append(' AND '.join(tokens))
+        queries.append(' OR '.join(f'{token}*' for token in tokens if len(token) >= 2))
+        if len(tokens) == 1 and len(tokens[0]) >= 2:
+            queries.append(f'{tokens[0]}*')
+
+    dedup = []
+    seen = set()
+    for item in queries:
+        item = (item or '').strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        dedup.append(item)
+    return dedup[:3]
+
+
+def build_relaxed_queries(text: str):
+    normalized = normalize_query(text)
+    tokens = content_tokens(normalized) or tokenize(normalized)
+    if not tokens:
+        return []
+
+    queries = []
+    if len(tokens) >= 2:
+        queries.append(' OR '.join(tokens))
+    short_tokens = [f'{token}*' for token in tokens if len(token) >= 2]
+    if short_tokens:
+        queries.append(' OR '.join(short_tokens))
+
+    dedup = []
+    seen = set()
+    for item in queries:
+        item = (item or '').strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        dedup.append(item)
+    return dedup[:2]
+
+
+def retrieval_balance(query: str):
+    tokens = content_tokens(query) or tokenize(query)
+    token_count = len(tokens)
+    char_count = len((query or '').strip())
+
+    if token_count <= 1 and char_count <= 10:
+        return 1.2, 0.8, '短查询偏词面'
+    if token_count >= 4 or char_count >= 24:
+        return 0.95, 1.15, '长查询偏语义'
+    return 1.05, 1.0, '中等查询均衡融合'
+
+
+def compact_text(*parts):
+    return ' '.join(part.strip() for part in parts if part and part.strip())
+
+
+def lexical_bonus(query: str, summary: str, source: str, text: str, tags):
+    query_text = (query or '').strip().lower()
+    if not query_text:
+        return 0.0, []
+
+    summary_text = (summary or '').lower()
+    tag_text = ' '.join(tags or []).lower()
+    body_text = (text or '').lower()
+    source_text = (source or '').lower()
+    full_text = compact_text(summary or '', text or '', ' '.join(tags or []), source or '').lower()
+    query_tokens = content_tokens(query_text) or tokenize(query_text)
+    tag_set = {str(tag).lower() for tag in (tags or [])}
+    bonus = 0.0
+    reasons = []
+
+    if query_text in tag_set:
+        bonus += 1.35
+        reasons.append('标签精确命中')
+
+    if query_text and query_text in summary_text:
+        bonus += 1.55
+        reasons.append('标题短语命中')
+    elif query_text and query_text in tag_text:
+        bonus += 1.1
+        reasons.append('标签短语命中')
+    elif query_text and query_text in body_text:
+        bonus += 0.9
+        reasons.append('正文短语命中')
+    elif query_text and query_text in source_text:
+        bonus += 0.55
+        reasons.append('来源短语命中')
+
+    token_hits = 0
+    for token in query_tokens:
+        token_weight = 0.65 if token in STOPWORDS else 1.0
+        if any(tag == token for tag in tag_set):
+            bonus += 0.7 * token_weight
+            reasons.append(f'标签命中:{token}')
+        elif any(tag.startswith(token) for tag in tag_set if len(token) >= 2):
+            bonus += 0.35 * token_weight
+            reasons.append(f'标签前缀命中:{token}')
+
+        if summary_text.startswith(token):
+            bonus += 0.5 * token_weight
+            reasons.append(f'标题前缀命中:{token}')
+        if token in summary_text:
+            bonus += 0.52 * token_weight
+            token_hits += 1
+            reasons.append(f'标题命中:{token}')
+        elif token in tag_text:
+            bonus += 0.38 * token_weight
+            token_hits += 1
+            reasons.append(f'标签命中:{token}')
+        elif token in body_text:
+            bonus += 0.2 * token_weight
+            token_hits += 1
+            reasons.append(f'正文命中:{token}')
+        elif token in source_text:
+            bonus += 0.12 * token_weight
+            token_hits += 1
+            reasons.append(f'来源命中:{token}')
+        if token in tag_set:
+            bonus += 0.18 * token_weight
+        if source and token in source_text:
+            bonus += 0.15 * token_weight
+
+    if token_hits and query_tokens and token_hits == len(query_tokens):
+        bonus += 0.5
+        reasons.append('关键词全命中')
+    elif token_hits:
+        reasons.append(f'关键词命中{token_hits}个')
+
+    return bonus, reasons
+
+
+def upsert_vector(data):
+    if not qdrant:
+        return
+    text = ' '.join(filter(None, [data.get('summary', ''), data.get('text', ''), ' '.join(data.get('tags', []))]))
+    vector = embed_text(text)
+    pid = int(hashlib.sha256((data.get('id') or '').encode('utf-8')).hexdigest()[:16], 16)
+    qdrant.upsert(
+        collection_name=collection_name,
+        points=[PointStruct(id=pid, vector=vector, payload={
+            'id': data.get('id'),
+            'summary': data.get('summary'),
+            'source': data.get('source'),
+        })],
+        wait=True,
+    )
+
+if action == 'ingest' and payload and payload.exists():
+    data = json.loads(payload.read_text(encoding='utf-8'))
+    conn.execute(
+        'insert or replace into memory_objects (id, kind, source, summary, text, tags, confidence, created_at) values (?, ?, ?, ?, ?, ?, ?, ?)',
+        (
+            data.get('id'), data.get('kind'), data.get('source'), data.get('summary'), data.get('text'),
+            json.dumps(data.get('tags', []), ensure_ascii=False), float(data.get('confidence', 0.5)), int(time.time())
+        )
+    )
+    conn.execute('delete from memory_fts where id = ?', (data.get('id'),))
+    conn.execute(
+        'insert into memory_fts (id, kind, source, summary, text, tags) values (?, ?, ?, ?, ?, ?)',
+        (
+            data.get('id'), data.get('kind'), data.get('source'), data.get('summary'), data.get('text'),
+            ' '.join(data.get('tags', []))
+        )
+    )
+    conn.commit()
+    upsert_vector(data)
+    print('ingested')
+elif action == 'status':
+    count = conn.execute('select count(*) from memory_objects').fetchone()[0]
+    vector_count = 0
+    if qdrant:
+        try:
+            info = qdrant.get_collection(collection_name=collection_name)
+            vector_count = int(getattr(info, 'points_count', 0) or 0)
+        except Exception:
+            vector_count = 0
+    print(json.dumps({
+        'objects': count,
+        'plugins': {
+            'fts5': {'enabled': True, 'status': 'ready'},
+            'vector': {'enabled': bool(qdrant), 'status': 'ready' if qdrant else ('missing-package' if not QDRANT_READY else 'init-failed')},
+            'rerank': {'enabled': False, 'status': 'reserved'},
+        },
+        'vectorObjects': vector_count,
+    }, ensure_ascii=False))
+elif action == 'search':
+    query = sys.argv[3] if len(sys.argv) > 3 else ''
+    normalized_query = normalize_query(query)
+    results = {}
+    query_tokens = content_tokens(normalized_query) or tokenize(normalized_query)
+    fts_queries = build_fts_queries(query)
+    lexical_weight, semantic_weight, balance_reason = retrieval_balance(normalized_query)
+
+    for query_rank, fts_query in enumerate(fts_queries, start=1):
+        try:
+            rows = conn.execute(
+                'select id, summary, source, text, tags from memory_fts where memory_fts match ? limit 8',
+                (fts_query,)
+            ).fetchall()
+        except Exception:
+            rows = []
+
+        for rank, row in enumerate(rows, start=1):
+            rid, summary, source, text, tags_raw = row
+            tags = (tags_raw or '').split()
+            item = results.setdefault(rid, {'id': rid, 'summary': summary, 'source': source, 'score': 0.0, 'channels': [], 'reasons': [], 'created_at': 0, 'field_rank': 0, 'used_fallback': False})
+            item['score'] += ((1.4 / rank) / query_rank) * lexical_weight
+            bonus, reasons = lexical_bonus(normalized_query, summary, source, text, tags)
+            item['score'] += bonus * lexical_weight
+            item['field_rank'] = max(item.get('field_rank', 0), 4)
+            item['reasons'].append(balance_reason)
+            if query_rank == 1:
+                item['reasons'].append('短语检索命中')
+            elif query_rank == 2:
+                item['reasons'].append('多词检索命中')
+            else:
+                item['reasons'].append('前缀检索命中')
+            item['reasons'].extend(reasons)
+            item['channels'].append('fts5')
+
+    if not results:
+        for query_rank, fts_query in enumerate(build_relaxed_queries(query), start=1):
+            try:
+                rows = conn.execute(
+                    'select id, summary, source, text, tags from memory_fts where memory_fts match ? limit 8',
+                    (fts_query,)
+                ).fetchall()
+            except Exception:
+                rows = []
+
+            for rank, row in enumerate(rows, start=1):
+                rid, summary, source, text, tags_raw = row
+                tags = (tags_raw or '').split()
+                item = results.setdefault(rid, {'id': rid, 'summary': summary, 'source': source, 'score': 0.0, 'channels': [], 'reasons': [], 'created_at': 0, 'field_rank': 0, 'used_fallback': False})
+                item['score'] += ((0.95 / rank) / query_rank) * lexical_weight
+                bonus, reasons = lexical_bonus(normalized_query, summary, source, text, tags)
+                item['score'] += bonus * 0.85 * lexical_weight
+                item['field_rank'] = max(item.get('field_rank', 0), 3)
+                item['used_fallback'] = True
+                item['reasons'].append(balance_reason)
+                item['reasons'].append('宽松检索回退')
+                item['reasons'].extend(reasons)
+                item['channels'].append('fts5')
+
+    if qdrant:
+        query_vector = embed_text(normalized_query)
+        try:
+            vector_hits = qdrant.search(collection_name=collection_name, query_vector=query_vector, limit=8)
+        except Exception:
+            vector_hits = []
+        for rank, hit in enumerate(vector_hits, start=1):
+            payload = hit.payload or {}
+            rid = payload.get('id')
+            if not rid:
+                continue
+            item = results.setdefault(rid, {'id': rid, 'summary': payload.get('summary', ''), 'source': payload.get('source', 'vector'), 'score': 0.0, 'channels': [], 'reasons': [], 'created_at': 0, 'field_rank': 0, 'used_fallback': False})
+            semantic_score = float(getattr(hit, 'score', 0.0))
+            item['score'] += ((semantic_score * 1.1) + (0.55 / rank)) * semantic_weight
+            item['field_rank'] = max(item.get('field_rank', 0), 2)
+            item['reasons'].append(balance_reason)
+            if semantic_score >= 0.8:
+                item['reasons'].append('高语义相似')
+            elif semantic_score >= 0.55:
+                item['reasons'].append('语义相似')
+            item['channels'].append('vector')
+
+    for item in results.values():
+        confidence = conn.execute('select confidence, created_at, text, tags from memory_objects where id = ?', (item['id'],)).fetchone()
+        if confidence:
+            conf_value, created_at, full_text, tags_raw = confidence
+            age_hours = max((time.time() - int(created_at)) / 3600.0, 0.0)
+            recency_bonus = 0.25 / (1.0 + age_hours / 24.0)
+            tags = parse_tags(tags_raw)
+            lexical_score, reasons = lexical_bonus(normalized_query, item.get('summary', ''), item.get('source', ''), full_text or '', tags)
+            item['score'] += float(conf_value or 0.5) * 0.45 + recency_bonus + (lexical_score * 0.35 * lexical_weight)
+            item['reasons'].extend(reasons)
+            item['created_at'] = int(created_at or 0)
+
+            summary_text = (item.get('summary') or '').lower()
+            tag_text = ' '.join(tags or []).lower()
+            body_text = (full_text or '').lower()
+            source_text = (item.get('source') or '').lower()
+            if normalized_query and normalized_query in summary_text:
+                item['field_rank'] = max(item.get('field_rank', 0), 4)
+            elif normalized_query and normalized_query in tag_text:
+                item['field_rank'] = max(item.get('field_rank', 0), 3)
+            elif normalized_query and normalized_query in body_text:
+                item['field_rank'] = max(item.get('field_rank', 0), 2)
+            elif normalized_query and normalized_query in source_text:
+                item['field_rank'] = max(item.get('field_rank', 0), 1)
+
+        if item.get('source') == 'openclaw':
+            item['score'] += 0.08
+        if item.get('summary') and query_tokens:
+            summary_tokens = tokenize(item.get('summary', ''))
+            if summary_tokens[:len(query_tokens)] == query_tokens[:len(summary_tokens)]:
+                item['score'] += 0.18
+
+    for item in results.values():
+        item['channels'] = sorted(set(item.get('channels', [])))
+        normalized_reasons = []
+        seen_reason_prefix = set()
+        for reason in item.get('reasons', []):
+            if not reason:
+                continue
+            prefix = reason.split(':', 1)[0]
+            if prefix in seen_reason_prefix:
+                continue
+            seen_reason_prefix.add(prefix)
+            normalized_reasons.append(reason)
+        item['reasons'] = normalized_reasons[:5]
+        if item['channels'] == ['fts5', 'vector']:
+            item['explain'] = '关键词与向量双命中'
+        elif item['channels'] == ['fts5']:
+            item['explain'] = '关键词命中'
+        elif item['channels'] == ['vector']:
+            item['explain'] = '向量语义命中'
+        else:
+            item['explain'] = '混合命中'
+        if item.get('used_fallback'):
+            item['explain'] = f"{item['explain']} / 宽松回退"
+        if item['reasons']:
+            item['explain'] = f"{item['explain']} / {'、'.join(item['reasons'][:3])}"
+
+    dedup = []
+    seen = set()
+    for item in sorted(results.values(), key=lambda x: (x['score'], x.get('field_rank', 0), x.get('created_at', 0), x.get('source', ''), x.get('id', '')), reverse=True):
+        summary_key = (item.get('summary') or '').strip().lower()
+        if summary_key in seen:
+            continue
+        seen.add(summary_key)
+        dedup.append(item)
+        if len(dedup) >= 5:
+            break
+
+    merged = dedup
+    print(json.dumps(merged, ensure_ascii=False))
+conn.close()
+PY
+  chmod +x "$SKPL_HYBRID_MEMORY_BROKER"
+}
+
+hybrid_memory_write_config() {
+  hybrid_memory_prepare_dirs
+  python3 - "$SKPL_HYBRID_MEMORY_CONFIG" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = {
+    'version': 1,
+    'retrieval': {
+        'broker': 'sqlite-fts-hybrid',
+        'fastCardsDir': '/root/.openclaw/hybrid-memory/knowledge/fast-cards',
+        'db': '/root/.openclaw/hybrid-memory/hybrid-memory.sqlite3',
+        'plugins': {
+            'fts5': {'enabled': True, 'status': 'ready'},
+            'vector': {'enabled': False, 'status': 'reserved'},
+            'rerank': {'enabled': False, 'status': 'reserved'}
+        }
+    },
+    'evomap': {
+        'eventsDir': '/root/.openclaw/hybrid-memory/events/inbox',
+        'archiveDir': '/root/.openclaw/hybrid-memory/events/archive',
+        'knowledgeDir': '/root/.openclaw/hybrid-memory/knowledge'
+    }
+}
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+hybrid_memory_install_stack() {
+  install sqlite3 python3 >/dev/null 2>&1
+  if command -v pip3 >/dev/null 2>&1; then
+    pip3 install --break-system-packages qdrant-client >/dev/null 2>&1 || true
+  elif command -v pip >/dev/null 2>&1; then
+    pip install --break-system-packages qdrant-client >/dev/null 2>&1 || true
+  fi
+  hybrid_memory_prepare_dirs
+  hybrid_memory_write_broker
+  hybrid_memory_write_config
+  printf '{"installedAt": %s, "stack": "sqlite-fts-qdrant-hybrid"}\n' "$(date +%s)" > "$SKPL_HYBRID_MEMORY_STATE_DIR/install.json"
+  echo "混合记忆栈已初始化：SQLite FTS + 本地 Qdrant + EvoMap 增量知识目录"
+}
+
+hybrid_memory_status_json() {
+  if [ -x "$SKPL_HYBRID_MEMORY_BROKER" ]; then
+    python3 "$SKPL_HYBRID_MEMORY_BROKER" "$SKPL_HYBRID_MEMORY_DB" status 2>/dev/null || echo '{"objects":0}'
+  else
+    echo '{"objects":0}'
+  fi
+}
+
+hybrid_memory_status_report() {
+  local status_json install_time sync_time lock_state load_state sync_stamp
+  hybrid_memory_prepare_dirs
+  status_json=$(hybrid_memory_status_json 2>/dev/null || echo '{"objects":0}')
+  if [ -f "$SKPL_HYBRID_MEMORY_STATE_DIR/install.json" ]; then
+    install_time=$(python3 - "$SKPL_HYBRID_MEMORY_STATE_DIR/install.json" <<'PY'
+import json, sys
+from datetime import datetime
+try:
+    data = json.load(open(sys.argv[1], encoding='utf-8'))
+    ts = int(data.get('installedAt', 0))
+    print(datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S') if ts else '未知')
+except Exception:
+    print('未知')
+PY
+)
+  else
+    install_time="未初始化"
+  fi
+  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_LOG" ]; then
+    sync_time=$(python3 - "$SKPL_HYBRID_MEMORY_SYNC_LOG" <<'PY'
+import sys
+from pathlib import Path
+lines = Path(sys.argv[1]).read_text(encoding='utf-8', errors='ignore').splitlines()
+print(lines[-1] if lines else '暂无同步记录')
+PY
+)
+  else
+    sync_time="暂无同步记录"
+  fi
+  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE" ]; then
+    sync_stamp=$(cat "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE" 2>/dev/null || echo 0)
+  else
+    sync_stamp="0"
+  fi
+  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_LOCK_FILE" ]; then
+    lock_state="运行中"
+  else
+    lock_state="空闲"
+  fi
+  load_state=$(python3 - "$SKPL_HYBRID_MEMORY_SYNC_LOAD_LIMIT" <<'PY'
+import os, sys
+limit = float(sys.argv[1])
+try:
+    load1 = os.getloadavg()[0]
+except Exception:
+    load1 = 0.0
+print(f"{load1:.2f} / limit {limit:.2f}")
+PY
+)
+  echo "融合根目录: $SKPL_HYBRID_MEMORY_ROOT"
+  echo "安装时间: $install_time"
+  echo "最近同步: $sync_time"
+  echo "同步版本: $sync_stamp"
+  echo "同步状态: $lock_state"
+  echo "当前负载: $load_state"
+  echo "回灌阈值: $SKPL_HYBRID_MEMORY_EXPORT_MIN_CONFIDENCE"
+  echo "失败重试: $SKPL_HYBRID_MEMORY_FAILED_DIR"
+  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG" ]; then
+    echo "错误日志: $SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG"
+  fi
+  python3 - "$status_json" "$SKPL_HYBRID_MEMORY_CONFIG" <<'PY'
+import json, sys
+
+status_raw, config_path = sys.argv[1:3]
+try:
+    status = json.loads(status_raw)
+except Exception:
+    status = {'objects': 0}
+try:
+    config = json.load(open(config_path, encoding='utf-8'))
+except Exception:
+    config = {}
+plugins = (((status.get('plugins') or {})) or (((config.get('retrieval') or {}).get('plugins')) or {}))
+print(f"知识对象: {status.get('objects', 0)}")
+if 'vectorObjects' in status:
+    print(f"向量对象: {status.get('vectorObjects', 0)}")
+for key in ('fts5', 'vector', 'rerank'):
+    meta = plugins.get(key) or {}
+    enabled = 'on' if meta.get('enabled') else 'off'
+    print(f"插件 {key}: {enabled} / {meta.get('status', 'unknown')}")
+PY
+}
+
+hybrid_memory_search() {
+  local query="$1" cache_key cache_file raw_json sync_stamp="0"
+  [ -z "$query" ] && return 1
+  if [ ! -x "$SKPL_HYBRID_MEMORY_BROKER" ]; then
+    echo "混合记忆 broker 尚未初始化。"
+    return 1
+  fi
+  hybrid_memory_prepare_dirs
+  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE" ]; then
+    sync_stamp=$(cat "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE" 2>/dev/null || echo 0)
+  fi
+  cache_key=$(python3 - "$query" "$sync_stamp" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(f"{sys.argv[1]}::{sys.argv[2]}".encode('utf-8')).hexdigest())
+PY
+)
+  cache_file="$SKPL_HYBRID_MEMORY_CACHE_DIR/search-${cache_key}.json"
+  if [ -s "$cache_file" ] && openclaw_memory_cache_fresh "$cache_file" "$SKPL_HYBRID_MEMORY_SEARCH_CACHE_TTL"; then
+    raw_json=$(cat "$cache_file")
+  else
+    raw_json=$(python3 "$SKPL_HYBRID_MEMORY_BROKER" "$SKPL_HYBRID_MEMORY_DB" search "$query")
+    printf '%s' "$raw_json" > "$cache_file"
+  fi
+  printf '%s' "$raw_json" | python3 - <<'PY'
+import json
+import sys
+
+raw = sys.stdin.read().strip()
+if not raw:
+    print('未返回检索结果。')
+    raise SystemExit(0)
+
+try:
+    data = json.loads(raw)
+except Exception:
+    print(raw)
+    raise SystemExit(0)
+
+if not data:
+    print('未命中混合记忆结果。')
+    raise SystemExit(0)
+
+for idx, item in enumerate(data, start=1):
+    print(f"{idx}. [{item.get('source', '-')}] {item.get('summary', '-')}")
+    print(f"   score={item.get('score', 0):.3f} | channels={','.join(item.get('channels', [])) or '-'} | explain={item.get('explain', '-')}")
+PY
+}
+
+hybrid_memory_search_raw_json() {
+  local query="$1" cache_key cache_file raw_json sync_stamp="0"
+  [ -z "$query" ] && return 1
+  if [ ! -x "$SKPL_HYBRID_MEMORY_BROKER" ]; then
+    echo '[]'
+    return 0
+  fi
+  hybrid_memory_prepare_dirs
+  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE" ]; then
+    sync_stamp=$(cat "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE" 2>/dev/null || echo 0)
+  fi
+  cache_key=$(python3 - "$query" "$sync_stamp" <<'PY'
+import hashlib, sys
+print(hashlib.sha256(f"{sys.argv[1]}::{sys.argv[2]}".encode('utf-8')).hexdigest())
+PY
+)
+  cache_file="$SKPL_HYBRID_MEMORY_CACHE_DIR/search-${cache_key}.json"
+  if [ -s "$cache_file" ] && openclaw_memory_cache_fresh "$cache_file" "$SKPL_HYBRID_MEMORY_SEARCH_CACHE_TTL"; then
+    cat "$cache_file"
+  else
+    raw_json=$(python3 "$SKPL_HYBRID_MEMORY_BROKER" "$SKPL_HYBRID_MEMORY_DB" search "$query")
+    printf '%s' "$raw_json" > "$cache_file"
+    printf '%s' "$raw_json"
+  fi
+}
+
+hybrid_memory_enqueue_event() {
+  local event_type="$1"
+  local summary="$2"
+  local ts event_file
+  [ -z "$event_type" ] && return 1
+  if ! python3 - "$SKPL_HYBRID_MEMORY_EVENT_ALLOWLIST" "$event_type" <<'PY'
+import sys
+allowlist = [x.strip() for x in sys.argv[1].split(',') if x.strip()]
+event_type = sys.argv[2].strip()
+raise SystemExit(0 if event_type in allowlist else 1)
+PY
+  then
+    return 0
+  fi
+  hybrid_memory_prepare_dirs
+  ts=$(date +%s)
+  event_file="$SKPL_HYBRID_MEMORY_EVENTS_DIR/${ts}-${event_type}.json"
+  python3 - "$event_file" "$event_type" "$summary" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, event_type, summary = sys.argv[1:4]
+payload = {
+    'id': Path(path).stem,
+    'kind': 'event',
+    'source': 'openclaw',
+    'text': summary or event_type,
+    'summary': summary or event_type,
+    'tags': [event_type, 'hybrid-memory'],
+    'confidence': 0.6,
+}
+Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+hybrid_memory_sync_once() {
+  local event_file processed=0 sync_status="ok" sync_message="" error_detail="" retry_count retry_target
+  hybrid_memory_prepare_dirs
+  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_LOCK_FILE" ]; then
+    echo "混合记忆同步正在进行中，已跳过重复执行。"
+    return 0
+  fi
+  if ! python3 - "$SKPL_HYBRID_MEMORY_SYNC_LOAD_LIMIT" <<'PY'
+import os, sys
+limit = float(sys.argv[1])
+try:
+    load1 = os.getloadavg()[0]
+except Exception:
+    load1 = 0.0
+raise SystemExit(0 if load1 <= limit else 1)
+PY
+  then
+    echo "当前系统负载较高，已跳过本次混合记忆同步。"
+    return 0
+  fi
+  printf '%s\n' "$$" > "$SKPL_HYBRID_MEMORY_SYNC_LOCK_FILE"
+  trap 'rm -f "$SKPL_HYBRID_MEMORY_SYNC_LOCK_FILE"' EXIT
+  if ! hybrid_memory_write_broker; then
+    sync_status="error"
+    sync_message="broker 初始化失败"
+    error_detail="hybrid_memory_write_broker returned non-zero"
+    goto_sync_finalize=1
+  fi
+  if [ -z "${goto_sync_finalize:-}" ]; then
+  for event_file in "$SKPL_HYBRID_MEMORY_EVENTS_DIR"/*.json; do
+    [ -f "$event_file" ] || continue
+    if ! python3 "$SKPL_HYBRID_MEMORY_BROKER" "$SKPL_HYBRID_MEMORY_DB" ingest "$event_file" >/dev/null 2>&1; then
+      sync_status="error"
+      sync_message="事件入库失败"
+      error_detail="$event_file"
+      retry_count=$(python3 - "$event_file" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    payload = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    payload = {}
+print(int(payload.get('retry_count', 0) or 0))
+PY
+)
+      if [ "$retry_count" -lt "$SKPL_HYBRID_MEMORY_RETRY_MAX" ]; then
+        retry_target="$SKPL_HYBRID_MEMORY_FAILED_DIR/$(basename "$event_file")"
+        python3 - "$event_file" "$retry_target" <<'PY'
+import json, sys, time
+from pathlib import Path
+
+src = Path(sys.argv[1])
+dst = Path(sys.argv[2])
+payload = json.loads(src.read_text(encoding='utf-8'))
+payload['retry_count'] = int(payload.get('retry_count', 0) or 0) + 1
+payload['retry_after'] = int(time.time()) + 30
+dst.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+        mv "$event_file" "$SKPL_HYBRID_MEMORY_ARCHIVE_DIR/failed-$(basename "$event_file")"
+      fi
+      break
+    fi
+    mv "$event_file" "$SKPL_HYBRID_MEMORY_ARCHIVE_DIR/$(basename "$event_file")"
+    processed=$((processed + 1))
+  done
+  fi
+  if [ "$sync_status" = "ok" ]; then
+  python3 - "$SKPL_HYBRID_MEMORY_CACHE_DIR" <<'PY'
+import sys
+from pathlib import Path
+cache_dir = Path(sys.argv[1])
+if cache_dir.is_dir():
+    for path in cache_dir.glob('search-*.json'):
+        path.unlink(missing_ok=True)
+PY
+  fi
+  if [ "$sync_status" = "ok" ]; then
+    if ! hybrid_memory_export_fast_cards >/dev/null 2>&1; then
+      sync_status="error"
+      sync_message="fast cards 导出失败"
+      error_detail="hybrid_memory_export_fast_cards returned non-zero"
+    fi
+  fi
+  rm -f "$SKPL_HYBRID_MEMORY_SYNC_LOCK_FILE"
+  trap - EXIT
+  if [ "$sync_status" = "ok" ]; then
+    python3 - "$SKPL_HYBRID_MEMORY_FAILED_DIR" "$SKPL_HYBRID_MEMORY_EVENTS_DIR" <<'PY'
+import json, sys, time
+from pathlib import Path
+
+failed_dir = Path(sys.argv[1])
+events_dir = Path(sys.argv[2])
+now = int(time.time())
+for path in failed_dir.glob('*.json'):
+    try:
+        payload = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        continue
+    if int(payload.get('retry_after', 0) or 0) > now:
+        continue
+    target = events_dir / path.name
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    path.unlink(missing_ok=True)
+    break
+PY
+  fi
+  if [ "$sync_status" = "ok" ]; then
+    printf '%s\n' "$(date +%s)" > "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE"
+    printf '[%s] status=ok processed=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$processed" >> "$SKPL_HYBRID_MEMORY_SYNC_LOG"
+    echo "混合记忆同步完成，处理 ${processed} 条事件。"
+    return 0
+  fi
+  printf '[%s] status=error processed=%s message=%s detail=%s\n' \
+    "$(date '+%Y-%m-%d %H:%M:%S')" "$processed" "$sync_message" "$error_detail" >> "$SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG"
+  echo "混合记忆同步未完成：$sync_message"
+  return 1
+}
+
+hybrid_memory_export_fast_cards() {
+  hybrid_memory_prepare_dirs
+  python3 - "$SKPL_HYBRID_MEMORY_DB" "$SKPL_HYBRID_MEMORY_EXPORT_DIR" "$SKPL_HYBRID_MEMORY_EXPORT_MIN_CONFIDENCE" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1])
+export_dir = Path(sys.argv[2])
+min_confidence = float(sys.argv[3])
+export_dir.mkdir(parents=True, exist_ok=True)
+
+if not db_path.exists():
+    raise SystemExit(0)
+
+conn = sqlite3.connect(db_path)
+rows = conn.execute(
+    'select id, summary, text, tags, confidence from memory_objects order by confidence desc, created_at desc limit 20'
+).fetchall()
+conn.close()
+
+expected = set()
+
+for idx, row in enumerate(rows, start=1):
+    rid, summary, text, tags_raw, confidence = row
+    if float(confidence or 0) < min_confidence:
+        continue
+    try:
+        tags = json.loads(tags_raw or '[]')
+    except Exception:
+        tags = []
+    content = [
+        f'# {summary or rid}',
+        '',
+        f'- ID: {rid}',
+        f'- Confidence: {confidence}',
+        f'- Tags: {", ".join(tags)}',
+        '',
+        text or summary or rid,
+        ''
+    ]
+    filename = f'{rid}.md'
+    expected.add(filename)
+    path = export_dir / filename
+    new_text = '\n'.join(content)
+    old_text = path.read_text(encoding='utf-8') if path.exists() else None
+    if old_text != new_text:
+        path.write_text(new_text, encoding='utf-8')
+
+for path in export_dir.glob('*.md'):
+    if path.name not in expected:
+        path.unlink(missing_ok=True)
+PY
+  echo "已导出混合记忆 fast cards 到: $SKPL_HYBRID_MEMORY_EXPORT_DIR"
+}
+
+hybrid_memory_show_sync_log() {
+  if [ ! -f "$SKPL_HYBRID_MEMORY_SYNC_LOG" ]; then
+    echo "暂无同步日志。"
+    return 0
+  fi
+  python3 - "$SKPL_HYBRID_MEMORY_SYNC_LOG" <<'PY'
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text(encoding='utf-8', errors='ignore').splitlines()
+for line in lines[-80:]:
+    print(line)
+PY
+}
+
 openclaw_get_config_path_quick() {
   if [ -f "${HOME}/.openclaw/openclaw.json" ]; then
     echo "${HOME}/.openclaw/openclaw.json"
@@ -1280,12 +2219,24 @@ install_node_and_tools() {
 }
 
 start_gateway() {
+  local mode="${1:-normal}" cooldown="${2:-15}" now last_restart=0
+
+  if [ "$mode" != "force" ] && [ -f "$SKPL_GATEWAY_RESTART_STAMP_FILE" ]; then
+    read -r last_restart < "$SKPL_GATEWAY_RESTART_STAMP_FILE" 2>/dev/null || last_restart=0
+  fi
+
+  now=$(date +%s)
+  if [ "$mode" != "force" ] && [ $((now - last_restart)) -lt "$cooldown" ] && openclaw_gateway_is_running; then
+    return 0
+  fi
+
   if openclaw_gateway_service_active; then
     systemctl --user restart openclaw-gateway.service >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
   else
     openclaw gateway restart >/dev/null 2>&1 || openclaw gateway start >/dev/null 2>&1 || true
   fi
-  if [ "${SKPL_BATCH_MODE:-0}" != "1" ]; then
+  printf '%s\n' "$now" > "$SKPL_GATEWAY_RESTART_STAMP_FILE"
+  if [ "${SKPL_BATCH_MODE:-0}" != "1" ] && [ "$mode" != "nosleep" ]; then
     sleep 3
   fi
 }
@@ -1401,7 +2352,9 @@ openclaw_memory_prepare_prefetch() {
 
 openclaw_memory_finalize() {
   openclaw memory index --force >/dev/null 2>&1 || true
-  openclaw gateway restart >/dev/null 2>&1 || true
+  hybrid_memory_enqueue_event "memory-index" "OpenClaw 记忆索引已完成"
+  hybrid_memory_sync_once >/dev/null 2>&1 || true
+  start_gateway nosleep 5 >/dev/null 2>&1 || true
 }
 
 openclaw_memory_bootstrap() {
@@ -1419,7 +2372,7 @@ openclaw_memory_bootstrap() {
       curl -L --retry 3 --connect-timeout 10 --max-time 900 -C - -o "$model_path" "$model_url" || true
     fi
     ${low_priority_prefix}openclaw memory index --force >/dev/null 2>&1 || true
-    openclaw gateway restart >/dev/null 2>&1 || true
+    bash "${SKPL_SCRIPT_PATH}" panel __internal_start_gateway nosleep 5 >/dev/null 2>&1 || true
   ' _ "$model_path" "$low_priority_prefix" >"$bootstrap_log" 2>&1 &
   disown 2>/dev/null || true
   echo "$bootstrap_log"
@@ -1953,15 +2906,15 @@ openclaw_panel_menu() {
     skpl_ui_menu_item 11 "配置向导" "重新进入 onboard"
 
     echo
-    skpl_ui_section "运行与数据"
-    skpl_ui_menu_item 12 "健康检测与修复" "自动修复常见问题"
-    skpl_ui_menu_item 13 "WebUI 访问设置" "Token、域名、访问入口"
-    skpl_ui_menu_item 14 "TUI 对话" "进入命令行对话界面"
-    skpl_ui_menu_item 15 "记忆管理" "索引、方案、状态"
-    skpl_ui_menu_item 16 "权限管理" "策略与白名单"
-    skpl_ui_menu_item 17 "多智能体管理" "Agent、绑定、会话"
-    skpl_ui_menu_item 18 "备份与还原" "记忆与项目快照"
-    skpl_ui_menu_item 21 "EvoMap 管理" "安装、更新与记忆"
+      skpl_ui_section "运行与数据"
+      skpl_ui_menu_item 12 "健康检测与修复" "自动修复常见问题"
+      skpl_ui_menu_item 13 "WebUI 访问设置" "Token、域名、访问入口"
+      skpl_ui_menu_item 14 "TUI 对话" "进入命令行对话界面"
+      skpl_ui_menu_item 15 "记忆管理" "索引、方案、融合检索"
+      skpl_ui_menu_item 16 "权限管理" "策略与白名单"
+      skpl_ui_menu_item 17 "多智能体管理" "Agent、绑定、会话"
+      skpl_ui_menu_item 18 "备份与还原" "记忆与项目快照"
+      skpl_ui_menu_item 21 "EvoMap 管理" "安装、更新与混合记忆"
 
     echo
     skpl_ui_section "维护"
@@ -1973,12 +2926,24 @@ openclaw_panel_menu() {
 
 
   start_gateway() {
+    local mode="${1:-normal}" cooldown="${2:-15}" now last_restart=0
+
+    if [ "$mode" != "force" ] && [ -f "$SKPL_GATEWAY_RESTART_STAMP_FILE" ]; then
+      read -r last_restart < "$SKPL_GATEWAY_RESTART_STAMP_FILE" 2>/dev/null || last_restart=0
+    fi
+
+    now=$(date +%s)
+    if [ "$mode" != "force" ] && [ $((now - last_restart)) -lt "$cooldown" ] && openclaw_gateway_is_running; then
+      return 0
+    fi
+
     if openclaw_gateway_service_active; then
       systemctl --user restart openclaw-gateway.service >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
     else
       openclaw gateway restart >/dev/null 2>&1 || openclaw gateway start >/dev/null 2>&1 || true
     fi
-    if [ "${SKPL_BATCH_MODE:-0}" != "1" ]; then
+    printf '%s\n' "$now" > "$SKPL_GATEWAY_RESTART_STAMP_FILE"
+    if [ "${SKPL_BATCH_MODE:-0}" != "1" ] && [ "$mode" != "nosleep" ]; then
       sleep 3
     fi
   }
@@ -5250,7 +6215,7 @@ openclaw_memory_list_agents() {
   openclaw_memory_rebuild_index_safe() {
     local agent_id="${1:-main}"
     openclaw_memory_rebuild_index_single "$agent_id"
-    openclaw gateway restart
+    start_gateway nosleep 5 >/dev/null 2>&1 || true
     echo "✅ 索引已重建并自动重启网关"
     echo ""
     openclaw_memory_render_status
@@ -5267,7 +6232,7 @@ openclaw_memory_list_agents() {
     done <<EOF
 $agent_lines
 EOF
-    openclaw gateway restart
+    start_gateway nosleep 5 >/dev/null 2>&1 || true
     echo "✅ 索引已重建并自动重启网关"
     echo "✅ 已为 ${count} 个智能体重建索引"
     echo ""
@@ -5852,7 +6817,7 @@ EOF
     fi
     echo "♻️ 重启 OpenClaw 网关"
     if declare -F start_gateway >/dev/null 2>&1; then
-      start_gateway
+      start_gateway nosleep 5
     else
       openclaw gateway restart
     fi
@@ -5932,7 +6897,7 @@ EOF
       return 0
     fi
     if declare -F start_gateway >/dev/null 2>&1; then
-      start_gateway
+      start_gateway nosleep 5
     else
       openclaw gateway restart
     fi
@@ -6158,15 +7123,107 @@ EOF
   }
 
 
-  openclaw_memory_search_test() {
-    read -e -p "输入搜索关键词: " query
-    if [ -z "$query" ]; then
-      echo "关键词不能为空。"
-      return 1
+openclaw_memory_search_test() {
+  read -e -p "输入搜索关键词: " query
+  if [ -z "$query" ]; then
+    echo "关键词不能为空。"
+    return 1
     fi
-    echo "正在搜索记忆..."
-    openclaw memory search "$query" --max-results 5
-  }
+  echo "正在搜索记忆..."
+  openclaw memory search "$query" --max-results 5
+}
+
+openclaw_memory_compare_search_test() {
+  local query
+  read -e -p "输入检索对照关键词: " query
+  if [ -z "$query" ]; then
+    echo "关键词不能为空。"
+    return 1
+  fi
+  local native_raw hybrid_raw
+  native_raw=$(openclaw memory search "$query" --max-results 5 2>&1 || true)
+  hybrid_raw=$(hybrid_memory_search_raw_json "$query")
+  python3 - "$native_raw" "$hybrid_raw" <<'PY'
+import json
+import sys
+
+native_raw, hybrid_raw = sys.argv[1:3]
+
+print('===== 原生检索 =====')
+native_lines = [line.rstrip() for line in native_raw.splitlines() if line.strip()]
+if native_lines:
+    for idx, line in enumerate(native_lines[:12], start=1):
+        prefix = f'{idx}. ' if len(native_lines) <= 5 else ''
+        print(f'{prefix}{line}')
+else:
+    print('未命中原生检索结果。')
+
+print('')
+print('===== 混合检索 =====')
+try:
+    hybrid = json.loads(hybrid_raw)
+except Exception:
+    hybrid = []
+
+if not hybrid:
+    print('未命中混合检索结果。')
+else:
+    for idx, item in enumerate(hybrid[:5], start=1):
+        print(f"{idx}. [{item.get('source', '-')}] {item.get('summary', '-')}")
+        print(f"   score={item.get('score', 0):.3f} | channels={','.join(item.get('channels', [])) or '-'}")
+        print(f"   explain={item.get('explain', '-')}")
+
+print('')
+print(f'原生结果行数: {len(native_lines)}')
+print(f'混合结果数量: {len(hybrid)}')
+PY
+}
+
+openclaw_memory_benchmark_search_test() {
+  local benchmark_queries
+  benchmark_queries=(
+    "memory"
+    "hybrid memory"
+    "evomap"
+    "gateway"
+    "index"
+    "qdrant"
+  )
+  python3 - <<'PY' "${benchmark_queries[@]}"
+import sys
+queries = sys.argv[1:]
+print('===== 批量检索评测 =====')
+for idx, query in enumerate(queries, start=1):
+    print(f'{idx}. {query}')
+PY
+  local query native_raw hybrid_raw
+  for query in "${benchmark_queries[@]}"; do
+    echo
+    echo "--- Query: $query ---"
+    native_raw=$(openclaw memory search "$query" --max-results 3 2>&1 || true)
+    hybrid_raw=$(hybrid_memory_search_raw_json "$query")
+    python3 - "$query" "$native_raw" "$hybrid_raw" <<'PY'
+import json
+import sys
+
+query, native_raw, hybrid_raw = sys.argv[1:4]
+native_lines = [line.strip() for line in native_raw.splitlines() if line.strip()]
+try:
+    hybrid = json.loads(hybrid_raw)
+except Exception:
+    hybrid = []
+
+print(f'原生行数: {len(native_lines)}')
+print(f'混合数量: {len(hybrid)}')
+if hybrid:
+    top = hybrid[0]
+    print(f"混合Top1: [{top.get('source', '-')}] {top.get('summary', '-')}")
+    print(f"原因: {top.get('explain', '-')}")
+else:
+    print('混合Top1: 无结果')
+PY
+  done
+}
 
   openclaw_memory_deep_status() {
     echo "正在探测嵌入模型就绪状态..."
@@ -6180,7 +7237,7 @@ EOF
     send_stats "OpenClaw记忆管理"
     while true; do
       clear
-      skpl_ui_header "记忆管理" "索引、方案、检索与预热"
+      skpl_ui_header "记忆管理" "索引、方案、检索、混合记忆"
       openclaw_memory_render_status
       echo
       skpl_ui_section "操作"
@@ -6192,6 +7249,12 @@ EOF
       skpl_ui_menu_item 6 "搜索测试" "验证索引是否工作"
       skpl_ui_menu_item 7 "深度状态探测" "检查嵌入模型"
       skpl_ui_menu_item 8 "后台预热日志" "查看 bootstrap 输出"
+      skpl_ui_menu_item 9 "融合记忆同步" "同步 EvoMap 与混合检索栈"
+      skpl_ui_menu_item 10 "混合检索测试" "测试检索并显示来源解释"
+      skpl_ui_menu_item 11 "融合栈状态" "查看插件、负载与同步状态"
+      skpl_ui_menu_item 12 "查看混合知识卡" "浏览独立导出的 hybrid-cards"
+      skpl_ui_menu_item 13 "检索结果对照" "原生搜索与混合检索并排比对"
+      skpl_ui_menu_item 14 "批量检索评测" "固定查询集快速验证检索效果"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e memory_choice
@@ -6225,7 +7288,7 @@ EOF
               done <<EOF
 $fl_agent_lines
 EOF
-              openclaw gateway restart
+              start_gateway nosleep 5 >/dev/null 2>&1 || true
               echo "✅ 已对所有智能体执行 force 重建并自动重启网关"
             fi
           else
@@ -6253,6 +7316,31 @@ EOF
           ;;
         8)
           openclaw_memory_show_bootstrap_log
+          break_end
+          ;;
+        9)
+          hybrid_memory_enqueue_event "memory-manual-sync" "用户手动触发混合记忆同步"
+          hybrid_memory_sync_once
+          break_end
+          ;;
+        10)
+          hybrid_memory_search_test
+          break_end
+          ;;
+        11)
+          hybrid_memory_status_report
+          break_end
+          ;;
+        12)
+          ls -la "$SKPL_HYBRID_MEMORY_EXPORT_DIR" 2>/dev/null || echo "暂无混合知识卡。"
+          break_end
+          ;;
+        13)
+          openclaw_memory_compare_search_test
+          break_end
+          ;;
+        14)
+          openclaw_memory_benchmark_search_test
           break_end
           ;;
         0)
@@ -6324,10 +7412,14 @@ EOF
       return 1
     fi
     echo "正在重启 OpenClaw Gateway..."
-    openclaw gateway restart >/dev/null 2>&1 || {
-      openclaw gateway stop >/dev/null 2>&1
-      openclaw gateway start >/dev/null 2>&1
-    }
+    if declare -F start_gateway >/dev/null 2>&1; then
+      start_gateway nosleep 5 >/dev/null 2>&1 || true
+    else
+      openclaw gateway restart >/dev/null 2>&1 || {
+        openclaw gateway stop >/dev/null 2>&1
+        openclaw gateway start >/dev/null 2>&1
+      }
+    fi
   }
 
   openclaw_permission_get_value() {
@@ -7312,14 +8404,16 @@ openclaw_backup_restore_menu() {
   openclaw_evomap_menu() {
     while true; do
       clear
-      skpl_ui_header "EvoMap 管理" "安装、更新与记忆目录"
+      skpl_ui_header "EvoMap 管理" "安装、更新与混合记忆目录"
       evomap_print_status
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "安装 EvoMap" "克隆、依赖、初始化"
+      skpl_ui_menu_item 1 "安装 EvoMap" "克隆、依赖、初始化融合栈"
       skpl_ui_menu_item_tone 2 "卸载 EvoMap" "保留备份后移除" "danger"
-      skpl_ui_menu_item 3 "更新 EvoMap" "拉取最新代码并重启"
-      skpl_ui_menu_item 4 "EvoMap 记忆管理" "查看目录与备份"
+      skpl_ui_menu_item 3 "更新 EvoMap" "拉取最新代码并同步更新融合栈"
+      skpl_ui_menu_item 4 "EvoMap 记忆管理" "查看目录、备份与融合状态"
+      skpl_ui_menu_item 5 "立即同步融合记忆" "处理事件并更新检索对象"
+      skpl_ui_menu_item 6 "融合栈状态" "查看插件、对象数与最近同步"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e evomap_choice
@@ -7328,20 +8422,25 @@ openclaw_backup_restore_menu() {
         2) evomap_uninstall; break_end ;;
         3) evomap_update; break_end ;;
         4) evomap_memory_menu ;;
+        5) hybrid_memory_enqueue_event "evomap-manual-sync" "用户在 EvoMap 面板触发同步"; hybrid_memory_sync_once; break_end ;;
+        6) hybrid_memory_status_report; break_end ;;
         0) return 0 ;;
         *) echo "无效的选择，请重试。"; sleep 1 ;;
       esac
     done
   }
 
-  update_openclaw_panel() {
-    echo "更新 OpenClaw..."
-    send_stats "更新 OpenClaw..."
-    install_node_and_tools
-    echo "正在更新 OpenClaw CLI..."
-    install_openclaw_global
-    crontab -l 2>/dev/null | grep -v "s gateway" | crontab -
-    start_gateway
+update_openclaw_panel() {
+  echo "更新 OpenClaw..."
+  send_stats "更新 OpenClaw..."
+  install_node_and_tools
+  echo "正在更新 OpenClaw CLI..."
+  install_openclaw_global
+  hybrid_memory_install_stack >/dev/null 2>&1 || true
+  hybrid_memory_enqueue_event "openclaw-update" "OpenClaw CLI 已更新，混合记忆栈已对齐"
+  hybrid_memory_sync_once >/dev/null 2>&1 || true
+  crontab -l 2>/dev/null | grep -v "s gateway" | crontab -
+  start_gateway
     if ! openclaw_gateway_status_quick; then
       echo "⚠️ OpenClaw 网关状态暂未就绪，可稍后在面板中执行健康检测与修复。"
     fi
@@ -7385,27 +8484,73 @@ openclaw_backup_restore_menu() {
 
 
   openclaw_find_webui_domain() {
-    local conf domain_list
+    local domain_list cache_ttl="30"
+
+    if [ -s "$SKPL_WEBUI_DOMAIN_CACHE_FILE" ] && openclaw_memory_cache_fresh "$SKPL_WEBUI_DOMAIN_CACHE_FILE" "$cache_ttl"; then
+      cat "$SKPL_WEBUI_DOMAIN_CACHE_FILE"
+      return 0
+    fi
 
     domain_list=$(
-      grep -R "18789" /home/web/conf.d/*.conf 2>/dev/null \
-      | awk -F: '{print $1}' \
-      | sort -u \
-      | while read conf; do
-        basename "$conf" .conf
-      done
+      python3 - <<'PY'
+from pathlib import Path
+
+conf_dir = Path('/home/web/conf.d')
+results = []
+if conf_dir.is_dir():
+    for path in sorted(conf_dir.glob('*.conf')):
+        try:
+            text = path.read_text(encoding='utf-8', errors='ignore')
+        except Exception:
+            continue
+        if '18789' in text:
+            results.append(path.stem)
+print('\n'.join(results))
+PY
     )
+
+    if [ -n "$domain_list" ]; then
+      printf '%s\n' "$domain_list" > "$SKPL_WEBUI_DOMAIN_CACHE_FILE"
+    elif [ -f "$SKPL_WEBUI_DOMAIN_CACHE_FILE" ]; then
+      : > "$SKPL_WEBUI_DOMAIN_CACHE_FILE"
+    fi
 
     if [ -n "$domain_list" ]; then
       echo "$domain_list"
     fi
   }
 
+  openclaw_webui_extract_token() {
+    python3 - <<'PY'
+import re
+import sys
+
+text = sys.stdin.read()
+patterns = [
+    r'[#&?]token=([^\s"\'"'"'&>]+)',
+    r'\btoken\s*[:=]\s*([^\s"\'"'"'&>]+)',
+]
+
+for pattern in patterns:
+    match = re.search(pattern, text, re.IGNORECASE)
+    if match:
+        print(match.group(1))
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+  }
+
   openclaw_webui_refresh_token_cache() {
-    local token
-    token=$(timeout 8 openclaw dashboard 2>/dev/null \
-      | sed -n 's/.*:18789\/#token=\([^[:space:]"&]\+\).*/\1/p' \
-      | head -n 1)
+    local dashboard_output token
+
+    openclaw_webui_ensure_local_origins >/dev/null 2>&1 || true
+    refresh_openclaw_gateway_service >/dev/null 2>&1 || true
+
+    dashboard_output=$(timeout 12 openclaw dashboard 2>/dev/null || true)
+    [ -n "$dashboard_output" ] || return 1
+
+    token=$(printf '%s\n' "$dashboard_output" | openclaw_webui_extract_token 2>/dev/null || true)
     if [ -n "$token" ]; then
       printf '%s' "$token" > "$SKPL_WEBUI_TOKEN_CACHE_FILE"
       echo "$token"
@@ -7512,7 +8657,8 @@ PY
       if command -v jq >/dev/null 2>&1; then
         if openclaw_webui_ensure_origins "http://127.0.0.1:18789" "http://localhost:18789" "http://127.0.0.1" "http://localhost" "$new_origin"; then
           echo -e "${gl_kjlan}已将域名 ${yuming} 加入 allowedOrigins 配置${gl_bai}"
-          openclaw gateway restart >/dev/null 2>&1
+          : > "$SKPL_WEBUI_DOMAIN_CACHE_FILE"
+          start_gateway nosleep 5 >/dev/null 2>&1 || true
         else
           echo "❌ 写入 allowedOrigins 失败，请检查 OpenClaw 配置文件是否为合法 JSON。"
           return 1
@@ -7725,6 +8871,7 @@ run_openclaw2_network_optimization() {
 }
 
 evomap_print_status() {
+  local hybrid_json
   skpl_ui_kv "EvoMap 目录" "$EVOMAP_DIR"
   if [ -d "$EVOMAP_DIR" ]; then
     skpl_ui_kv "状态" "已安装"
@@ -7737,7 +8884,29 @@ evomap_print_status() {
     skpl_ui_kv "状态" "未安装"
   fi
   skpl_ui_kv "记忆目录" "$EVOMAP_MEMORY_DIR"
+  skpl_ui_kv "融合栈" "$SKPL_HYBRID_MEMORY_ROOT"
+  hybrid_json=$(hybrid_memory_status_json 2>/dev/null || echo '{"objects":0}')
+  skpl_ui_kv "知识对象" "$(python3 - <<'PY' "$hybrid_json"
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    print(data.get('objects', 0))
+except Exception:
+    print(0)
+PY
+)"
   skpl_ui_kv "备份目录" "$EVOMAP_BACKUP_DIR"
+}
+
+hybrid_memory_search_test() {
+  local query
+  read -e -p "输入混合检索关键词: " query
+  if [ -z "$query" ]; then
+    echo "关键词不能为空。"
+    return 1
+  fi
+  echo "正在执行混合检索..."
+  hybrid_memory_search "$query"
 }
 
 evomap_backup_current() {
@@ -7784,6 +8953,7 @@ evomap_refresh_gateway_if_needed() {
 evomap_install() {
   local node_id last_saved_node_id
   install git curl
+  install sqlite3 python3 >/dev/null 2>&1
   mkdir -p /root/.openclaw
 
   last_saved_node_id="$(state_get EVOMAP_NODE_ID)"
@@ -7804,13 +8974,16 @@ evomap_install() {
   fi
   cd "$EVOMAP_DIR"
   install_evomap_dependencies
-  mkdir -p skills assets/gep memory
+  hybrid_memory_install_stack
+  mkdir -p skills assets/gep memory "$SKPL_HYBRID_MEMORY_KNOWLEDGE_DIR/core"
 
   cat > .env <<EOF_ENV
 MEMORY_DIR=${EVOMAP_MEMORY_DIR}
 A2A_HUB_URL=https://evomap.ai
 A2A_NODE_ID=${node_id}
 EVOLVE_STRATEGY=balanced
+HYBRID_MEMORY_ROOT=${SKPL_HYBRID_MEMORY_ROOT}
+HYBRID_MEMORY_DB=${SKPL_HYBRID_MEMORY_DB}
 EOF_ENV
 
   cat > assets/gep/openclaw-core-genes.json <<'EOF_GENE'
@@ -7821,11 +8994,13 @@ EOF_GENE
 {"capsules":[{"id":"core-repair-kit","name":"核心修复胶囊","version":"1.0.0","targets":["agent-loop","execution-failure","stagnation"],"steps":["识别循环停滞并输出修复建议","识别执行错误并输出标准方案","生成可审计修复记录"]}]}
 EOF_CAP
 
+  hybrid_memory_enqueue_event "evomap-install" "EvoMap 与混合记忆栈安装完成"
+  hybrid_memory_sync_once >/dev/null 2>&1 || true
   evomap_start_loop
   sleep 2
   evomap_refresh_gateway_if_needed
 
-  echo "EvoMap 安装完成。"
+  echo "EvoMap 与混合记忆栈安装完成。"
 }
 
 evomap_uninstall() {
@@ -7846,21 +9021,26 @@ evomap_update() {
   cd "$EVOMAP_DIR"
   git pull --rebase
   install_evomap_dependencies
+  hybrid_memory_install_stack
+  hybrid_memory_enqueue_event "evomap-update" "EvoMap 与混合记忆栈已更新"
+  hybrid_memory_sync_once >/dev/null 2>&1 || true
   evomap_start_loop
   evomap_refresh_gateway_if_needed
-  echo "EvoMap 更新完成。"
+  echo "EvoMap 与混合记忆栈更新完成。"
 }
 
 evomap_memory_menu() {
   while true; do
     clear
-    skpl_ui_header "EvoMap 记忆管理" "查看学习目录与备份归档"
+    skpl_ui_header "EvoMap 记忆管理" "查看学习目录、融合栈与备份归档"
     evomap_print_status
     echo
     skpl_ui_section "操作"
     skpl_ui_menu_item 1 "立即备份 EvoMap"
     skpl_ui_menu_item 2 "查看记忆目录"
     skpl_ui_menu_item 3 "查看备份目录"
+    skpl_ui_menu_item 4 "查看融合根目录"
+    skpl_ui_menu_item 5 "查看同步日志"
     skpl_ui_menu_item 0 "返回上一级"
     skpl_ui_footer_prompt "请输入你的选择: "
     read -r evo_mem_choice
@@ -7868,6 +9048,8 @@ evomap_memory_menu() {
       1) evomap_backup_current; break_end ;;
       2) ls -la "$EVOMAP_MEMORY_DIR" 2>/dev/null || echo "记忆目录不存在。"; break_end ;;
       3) ls -la "$EVOMAP_BACKUP_DIR" 2>/dev/null || echo "备份目录不存在。"; break_end ;;
+      4) ls -la "$SKPL_HYBRID_MEMORY_ROOT" 2>/dev/null || echo "融合根目录不存在。"; break_end ;;
+      5) hybrid_memory_show_sync_log; break_end ;;
       0) return 0 ;;
       *) echo "无效的选择，请重试。"; sleep 1 ;;
     esac
@@ -7888,7 +9070,7 @@ run_full_pipeline_once() {
   [ -z "$step" ] && step=1
 
   if [ "$step" -le 1 ]; then
-    echo "[1/4] 执行 wslwin 代理同步..."
+    echo "[1/5] 执行 wslwin 代理同步..."
     if ! run_step_guard "step1_wslwin" run_wslwin_proxy_sync; then
       print_failure_hint
       return 1
@@ -7899,7 +9081,7 @@ run_full_pipeline_once() {
   step=$(state_get STEP)
   [ -z "$step" ] && step=2
   if [ "$step" -le 2 ]; then
-    echo "[2/4] 安装 OpenClaw，并后台预热记忆模型资源..."
+    echo "[2/5] 安装 OpenClaw，并后台预热记忆模型资源..."
     if ! run_step_guard "step2_openclaw" run_openclaw_install_step; then
       print_failure_hint
       return 1
@@ -7910,7 +9092,7 @@ run_full_pipeline_once() {
   step=$(state_get STEP)
   [ -z "$step" ] && step=3
   if [ "$step" -le 3 ]; then
-    echo "[3/4] 执行 openclaw2 网络优化..."
+    echo "[3/5] 执行 openclaw2 网络优化..."
     if ! run_step_guard "step3_openclaw2" run_openclaw2_network_optimization; then
       print_failure_hint
       return 1
@@ -7922,16 +9104,29 @@ run_full_pipeline_once() {
   step=$(state_get STEP)
   [ -z "$step" ] && step=4
   if [ "$step" -le 4 ]; then
+    echo "[4/5] 初始化混合记忆栈..."
+    if ! run_step_guard "step4_hybrid_memory" hybrid_memory_install_stack; then
+      print_failure_hint
+      return 1
+    fi
+    hybrid_memory_enqueue_event "install-pipeline" "OpenClaw 安装流程已完成混合记忆栈初始化"
+    hybrid_memory_sync_once >/dev/null 2>&1 || true
+    state_set STEP 5
+  fi
+
+  step=$(state_get STEP)
+  [ -z "$step" ] && step=5
+  if [ "$step" -le 5 ]; then
     if [ "${SKPL_SKIP_EVOMAP:-0}" = "1" ]; then
-      echo "[4/4] 已按 SKPL_SKIP_EVOMAP=1 跳过 EvoMap 安装。"
+      echo "[5/5] 已按 SKPL_SKIP_EVOMAP=1 跳过 EvoMap 安装。"
     else
-      echo "[4/4] 安装 EvoMap..."
-      if ! run_step_guard "step4_evomap" run_evomap_install_step; then
+      echo "[5/5] 安装 EvoMap 与融合学习能力..."
+      if ! run_step_guard "step5_evomap" run_evomap_install_step; then
         print_failure_hint
         return 1
       fi
     fi
-    state_set STEP 5
+    state_set STEP 6
   fi
 
   echo "全部步骤执行完成。可使用 skpl 打开面板。"
@@ -8048,6 +9243,11 @@ main() {
     panel)
       save_self_to_skpl
       load_openclaw_panel
+      if [ "${2:-}" = "__internal_start_gateway" ]; then
+        shift 2
+        start_gateway "$@"
+        return 0
+      fi
       skpl_main_panel
       ;;
     openclaw)
