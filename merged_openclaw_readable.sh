@@ -5438,9 +5438,7 @@ openclaw_plugin_local_installed() {
       fi
     fi
     openclaw config set channels.whatsapp.enabled true --json >/dev/null 2>&1 || true
-    openclaw config set channels.whatsapp.proxy "$(openclaw_whatsapp_proxy_url)" >/dev/null 2>&1 || true
-    openclaw config set channels.whatsapp.proxyUrl "$(openclaw_whatsapp_proxy_url)" >/dev/null 2>&1 || true
-    openclaw config set channels.whatsapp.socksProxy "$(openclaw_whatsapp_proxy_url)" >/dev/null 2>&1 || true
+    openclaw_apply_channel_proxy_config "whatsapp"
     start_gateway nosleep 5 >/dev/null 2>&1 || true
     return 0
   }
@@ -5531,6 +5529,21 @@ openclaw_plugin_local_installed() {
     fi
   }
 
+  openclaw_whatsapp_open_qr_connection() {
+    echo "正在准备 WhatsApp QR 连接..."
+    if ! openclaw_prepare_whatsapp_channel; then
+      echo "❌ WhatsApp 通道准备失败。"
+      return 1
+    fi
+    if ! openclaw_ensure_gateway_ready; then
+      echo "❌ 网关未就绪，无法展示 WhatsApp QR 页面。"
+      return 1
+    fi
+    echo "QR 连接页将通过 OpenClaw WebUI 打开。"
+    openclaw_whatsapp_open_pairing_page
+    return 0
+  }
+
   openclaw_whatsapp_repair_flow() {
     echo "正在执行 WhatsApp 通道修复..."
     refresh_runtime_proxy_env
@@ -5557,8 +5570,9 @@ openclaw_plugin_local_installed() {
       echo
       skpl_ui_section "操作"
       skpl_ui_menu_item 1 "一键修复并打开配对页" "修复网关、代理与会话状态"
-      skpl_ui_menu_item 2 "仅打开配对页" "用浏览器显示二维码/配对入口"
-      skpl_ui_menu_item 3 "批准连接码" "输入 WhatsApp 收到的配对码"
+      skpl_ui_menu_item 2 "WhatsApp QR 连接" "直接打开二维码连接页"
+      skpl_ui_menu_item 3 "仅打开配对页" "用浏览器显示二维码/配对入口"
+      skpl_ui_menu_item 4 "批准连接码" "输入 WhatsApp 收到的配对码"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e wa_choice
@@ -5570,13 +5584,18 @@ openclaw_plugin_local_installed() {
           read -p "按回车返回菜单..."
           ;;
         2)
+          openclaw_whatsapp_open_qr_connection
+          echo
+          read -p "按回车返回菜单..."
+          ;;
+        3)
           if openclaw_prepare_whatsapp_channel; then
             openclaw_whatsapp_open_pairing_page
           fi
           echo
           read -p "按回车返回菜单..."
           ;;
-        3)
+        4)
           if ! openclaw_prepare_whatsapp_channel; then
             break_end
             continue
@@ -5612,6 +5631,33 @@ openclaw_plugin_local_installed() {
       fi
     fi
     openclaw config set channels.telegram.enabled true --json >/dev/null 2>&1 || true
+    openclaw_apply_channel_proxy_config "telegram"
+    start_gateway nosleep 5 >/dev/null 2>&1 || true
+    return 0
+  }
+
+  openclaw_prepare_discord_channel() {
+    if ! openclaw_ensure_channel_plugin_enabled "discord"; then
+      if ! openclaw_ensure_channel_plugin_enabled "openclaw-discord"; then
+        echo "❌ Discord 插件安装或启用失败。"
+        return 1
+      fi
+    fi
+    openclaw config set channels.discord.enabled true --json >/dev/null 2>&1 || true
+    openclaw_apply_channel_proxy_config "discord"
+    start_gateway nosleep 5 >/dev/null 2>&1 || true
+    return 0
+  }
+
+  openclaw_prepare_slack_channel() {
+    if ! openclaw_ensure_channel_plugin_enabled "slack"; then
+      if ! openclaw_ensure_channel_plugin_enabled "openclaw-slack"; then
+        echo "❌ Slack 插件安装或启用失败。"
+        return 1
+      fi
+    fi
+    openclaw config set channels.slack.enabled true --json >/dev/null 2>&1 || true
+    openclaw_apply_channel_proxy_config "slack"
     start_gateway nosleep 5 >/dev/null 2>&1 || true
     return 0
   }
@@ -5648,6 +5694,13 @@ openclaw_plugin_local_installed() {
     local label="$1"
     local status="$2"
     echo -e "- ${label}: $(openclaw_colorize_bot_status "$status")"
+  }
+
+  openclaw_print_bot_status_line_with_mode() {
+    local label="$1"
+    local status="$2"
+    local mode="$3"
+    echo -e "- ${label}: $(openclaw_colorize_bot_status "$status") [${mode}]"
   }
 
   openclaw_show_bot_local_status_block() {
@@ -5788,28 +5841,33 @@ openclaw_plugin_local_installed() {
     wx_status=$(openclaw_bot_status_text "$wx_enabled" "$wx_cfg" "$wx_connected" "$wx_abnormal")
 
     echo "本地状态（仅本机配置/缓存，不做网络探测）："
-    openclaw_print_bot_status_line "Telegram" "$tg_status"
-    openclaw_print_bot_status_line "飞书(Lark)" "$feishu_status"
-    openclaw_print_bot_status_line "WhatsApp" "$wa_status"
-    openclaw_print_bot_status_line "Discord" "$dc_status"
-    openclaw_print_bot_status_line "Slack" "$slack_status"
-    openclaw_print_bot_status_line "QQ Bot" "$qq_status"
-    openclaw_print_bot_status_line "微信 (Weixin)" "$wx_status"
+    openclaw_print_bot_status_line_with_mode "Telegram" "$tg_status" "自动代理"
+    openclaw_print_bot_status_line_with_mode "飞书(Lark)" "$feishu_status" "本地直连"
+    openclaw_print_bot_status_line_with_mode "WhatsApp" "$wa_status" "自动代理"
+    openclaw_print_bot_status_line_with_mode "Discord" "$dc_status" "自动代理"
+    openclaw_print_bot_status_line_with_mode "Slack" "$slack_status" "自动代理"
+    openclaw_print_bot_status_line_with_mode "QQ Bot" "$qq_status" "本地直连"
+    openclaw_print_bot_status_line_with_mode "微信 (Weixin)" "$wx_status" "本地直连"
   }
 
   change_tg_bot_code() {
     send_stats "机器人对接"
     while true; do
       clear
-      skpl_ui_header "机器人连接对接" "批准连接码或安装对应渠道接入"
+      skpl_ui_header "机器人连接对接" "海外渠道自动继承安装代理端口，本地渠道保持原接入方式"
       openclaw_show_bot_local_status_block
       echo
+      echo "代理规则：Telegram / WhatsApp / Discord / Slack 自动使用安装时输入的代理端口。"
+      echo "本地规则：飞书 / QQ / 微信保持原有接入逻辑。"
+      echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "Telegram 对接" "批准 Telegram 连接码"
+      skpl_ui_menu_item 1 "Telegram 对接" "自动写入代理并批准连接码"
       skpl_ui_menu_item 2 "飞书对接" "安装 Lark 集成"
-      skpl_ui_menu_item 3 "WhatsApp 对接" "批准 WhatsApp 连接码"
-      skpl_ui_menu_item 4 "QQ 对接" "查看官方接入地址"
-      skpl_ui_menu_item 5 "微信对接" "安装 Weixin CLI"
+      skpl_ui_menu_item 3 "WhatsApp 对接" "自动写入代理并打开配对页"
+      skpl_ui_menu_item 4 "Discord 对接" "自动写入代理并启用渠道"
+      skpl_ui_menu_item 5 "Slack 对接" "自动写入代理并启用渠道"
+      skpl_ui_menu_item 6 "QQ 对接" "查看官方接入地址"
+      skpl_ui_menu_item 7 "微信对接" "安装 Weixin CLI"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e bot_choice
@@ -5838,11 +5896,23 @@ openclaw_plugin_local_installed() {
           openclaw_whatsapp_menu
           ;;
         4)
+          echo "正在准备 Discord 通道..."
+          openclaw_prepare_discord_channel
+          echo "Discord 已启用，并继承安装代理端口：$(openclaw_whatsapp_proxy_url)"
+          break_end
+          ;;
+        5)
+          echo "正在准备 Slack 通道..."
+          openclaw_prepare_slack_channel
+          echo "Slack 已启用，并继承安装代理端口：$(openclaw_whatsapp_proxy_url)"
+          break_end
+          ;;
+        6)
           echo "QQ 官方对接地址："
           echo "https://q.qq.com/qqbot/openclaw/login.html"
           break_end
           ;;
-        5)
+        7)
           npx -y @tencent-weixin/openclaw-weixin-cli@latest install
           start_gateway nosleep 5 >/dev/null 2>&1 || true
           break_end
