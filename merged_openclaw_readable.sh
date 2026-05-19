@@ -195,7 +195,22 @@ PY
 
 skpl_build_no_proxy_rule() {
   local extra_hosts="${1:-}"
-  skpl_merge_no_proxy_csv "$SKPL_BASE_NO_PROXY_RULE" "$SKPL_DOMESTIC_MODEL_DIRECT_RULE" "$extra_hosts"
+  local merged
+  merged=$(skpl_merge_no_proxy_csv "$SKPL_BASE_NO_PROXY_RULE" "$SKPL_DOMESTIC_MODEL_DIRECT_RULE" "$extra_hosts")
+  python3 - "$merged" <<'PY'
+import sys
+
+blocked = {'mmg.whatsapp.net', '.whatsapp.net', '.whatsapp.com'}
+items = []
+seen = set()
+for part in (sys.argv[1] or '').strip().split(','):
+    part = part.strip()
+    if not part or part in blocked or part in seen:
+        continue
+    seen.add(part)
+    items.append(part)
+print(','.join(items))
+PY
 }
 
 skpl_extract_url_host() {
@@ -2245,12 +2260,38 @@ if not isinstance(gateway, dict):
     gateway = {}
     data['gateway'] = gateway
 
+control_ui = gateway.get('controlUi')
+if not isinstance(control_ui, dict):
+    control_ui = {}
+    gateway['controlUi'] = control_ui
+
 changed = False
 if gateway.get('mode') != 'local':
     gateway['mode'] = 'local'
     changed = True
 if not isinstance(gateway.get('port'), int):
     gateway['port'] = port
+    changed = True
+
+if control_ui.get('allowInsecureAuth') is not True:
+    control_ui['allowInsecureAuth'] = True
+    changed = True
+
+expected_origins = [
+    f'http://127.0.0.1:{port}',
+    f'http://localhost:{port}',
+    'http://127.0.0.1',
+    'http://localhost',
+]
+allowed_origins = control_ui.get('allowedOrigins')
+if not isinstance(allowed_origins, list):
+    allowed_origins = []
+normalized_origins = []
+for origin in allowed_origins + expected_origins:
+    if isinstance(origin, str) and origin and origin not in normalized_origins:
+        normalized_origins.append(origin)
+if normalized_origins != allowed_origins:
+    control_ui['allowedOrigins'] = normalized_origins
     changed = True
 
 for key, value in (('agents', {}), ('channels', {}), ('plugins', {}), ('memory', {})):
@@ -2975,6 +3016,28 @@ openclaw_panel_menu() {
     get_local_openclaw_version_raw
   }
 
+  openclaw_proxy_summary() {
+    local active_proxy proxy_port
+    proxy_port=$(skpl_effective_proxy_port)
+    active_proxy=$(resolve_active_proxy "$proxy_port" 2>/dev/null || true)
+    if [ -n "$active_proxy" ]; then
+      printf '已开启 (%s)\n' "$active_proxy"
+      return 0
+    fi
+    printf '未探测到活动代理 (期望端口 %s)\n' "$proxy_port"
+  }
+
+  openclaw_domestic_provider_summary() {
+    local config_file hosts_csv
+    config_file=$(openclaw_get_config_file)
+    hosts_csv=$(skpl_collect_domestic_provider_hosts_from_config "$config_file" 2>/dev/null || true)
+    if [ -n "$hosts_csv" ]; then
+      printf '%s\n' "$hosts_csv"
+      return 0
+    fi
+    printf '未识别到国内直连 provider\n'
+  }
+
 
   show_menu() {
     clear
@@ -2996,6 +3059,8 @@ openclaw_panel_menu() {
     skpl_ui_status_row "安装状态" "$install_tone" "$install_status"
     skpl_ui_status_row "网关状态" "$running_tone" "$running_status"
     skpl_ui_kv "版本信息" "$local_version"
+    skpl_ui_kv "代理摘要" "$(openclaw_proxy_summary)"
+    skpl_ui_kv "国内直连" "$(openclaw_domestic_provider_summary)"
 
     echo
     skpl_ui_section "服务"
@@ -3018,6 +3083,7 @@ openclaw_panel_menu() {
       skpl_ui_section "运行与数据"
       skpl_ui_menu_item 12 "健康检测与修复" "自动修复常见问题"
       skpl_ui_menu_item 13 "WebUI 访问设置" "Token、域名、访问入口"
+      skpl_ui_menu_item 22 "网络诊断" "汇总代理、WebUI 与 WhatsApp 状态"
       skpl_ui_menu_item 14 "TUI 对话" "进入命令行对话界面"
       skpl_ui_menu_item 15 "记忆管理" "索引、方案、融合检索"
       skpl_ui_menu_item 16 "权限管理" "策略与白名单"
@@ -3438,7 +3504,7 @@ PY
 
     openclaw_onboard_if_needed
     start_gateway
-    openclaw gateway status >/dev/null 2>&1 || true
+    openclaw_webui_reset_local_cache
     refresh_panel_overview_cache >/dev/null 2>&1 || true
     add_app_id
     break_end
@@ -5504,25 +5570,93 @@ openclaw_plugin_local_installed() {
     return 0
   }
 
+  openclaw_whatsapp_auth_root() {
+    printf '%s\n' "${HOME}/.openclaw/credentials/whatsapp"
+  }
+
   openclaw_is_wsl() {
     grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null
   }
 
   openclaw_whatsapp_session_root() {
-    printf '%s\n' "${HOME}/.openclaw/whatsapp"
+    printf '%s\n' "$(openclaw_whatsapp_auth_root)"
   }
 
   openclaw_whatsapp_has_session() {
-    local session_root
-    session_root=$(openclaw_whatsapp_session_root)
-    openclaw_dir_has_files "$session_root"
+    local auth_root legacy_root
+    auth_root=$(openclaw_whatsapp_auth_root)
+    legacy_root="${HOME}/.openclaw/whatsapp"
+    if find "$auth_root" -maxdepth 3 -type f -name 'creds.json' 2>/dev/null | grep -q .; then
+      return 0
+    fi
+    openclaw_dir_has_files "$legacy_root"
+  }
+
+  openclaw_whatsapp_probe_connected() {
+    timeout 20 openclaw channels status --probe 2>/dev/null | python3 - <<'PY'
+import re
+import sys
+
+text = sys.stdin.read().lower()
+ok = False
+for line in text.splitlines():
+    if 'whatsapp' not in line:
+        continue
+    if re.search(r'\b(connected|works|audit ok|transport connected)\b', line):
+        ok = True
+        break
+raise SystemExit(0 if ok else 1)
+PY
+  }
+
+  openclaw_whatsapp_wait_for_ready() {
+    local attempts="${1:-4}" delay="${2:-3}" i=1
+    while [ "$i" -le "$attempts" ]; do
+      if openclaw_whatsapp_has_session && openclaw_whatsapp_probe_connected; then
+        return 0
+      fi
+      [ "$i" -lt "$attempts" ] && sleep "$delay"
+      i=$((i + 1))
+    done
+    return 1
   }
 
   openclaw_whatsapp_clear_broken_state() {
-    local session_root
+    local session_root legacy_root
     session_root=$(openclaw_whatsapp_session_root)
     mkdir -p "$session_root"
     find "$session_root" -maxdepth 2 -type f \( -name '*.lock' -o -name 'Singleton*' -o -name 'DevToolsActivePort' -o -name '*.tmp' -o -name '*.log' \) -exec mv -f {} "${session_root}/" \; >/dev/null 2>&1 || true
+    legacy_root="${HOME}/.openclaw/whatsapp"
+    if [ -d "$legacy_root" ]; then
+      find "$legacy_root" -maxdepth 2 -type f \( -name '*.lock' -o -name 'Singleton*' -o -name 'DevToolsActivePort' -o -name '*.tmp' -o -name '*.log' \) -exec mv -f {} "${legacy_root}/" \; >/dev/null 2>&1 || true
+    fi
+  }
+
+  openclaw_whatsapp_login_via_cli() {
+    refresh_runtime_proxy_env
+    if ! openclaw_prepare_whatsapp_channel; then
+      echo "❌ WhatsApp 通道准备失败。"
+      return 1
+    fi
+    echo "正在启动官方 WhatsApp 登录流程..."
+    echo "请按命令输出的二维码完成扫码，直到命令返回。"
+    if openclaw channels login --channel whatsapp; then
+      start_gateway nosleep 5 >/dev/null 2>&1 || true
+      if openclaw_whatsapp_has_session; then
+        echo "正在进行登录后状态确认..."
+        if openclaw_whatsapp_wait_for_ready 4 3; then
+          echo "✅ WhatsApp 凭据已生成，通道探测通过。"
+        else
+          echo "⚠️ WhatsApp 凭据已生成，但通道探测仍未确认通过。"
+          echo "请在稍后查看 channels status --probe 或面板本地状态。"
+        fi
+      else
+        echo "⚠️ 登录命令已返回，但尚未检测到 creds.json，请稍后在状态里复查。"
+      fi
+      return 0
+    fi
+    echo "❌ 官方 WhatsApp 登录流程未成功完成。"
+    return 1
   }
 
   openclaw_open_url() {
@@ -5544,12 +5678,13 @@ openclaw_plugin_local_installed() {
   }
 
   openclaw_whatsapp_pairing_url() {
-    local token
+    local token scheme
+    scheme=$(openclaw_webui_scheme)
     token=$(openclaw_webui_refresh_token_cache 2>/dev/null || openclaw_webui_get_cached_token 2>/dev/null || true)
     if [ -n "$token" ]; then
-      printf 'http://127.0.0.1:%s/#token=%s\n' "$(openclaw_gateway_port)" "$token"
+      printf '%s://127.0.0.1:%s/#token=%s\n' "$scheme" "$(openclaw_gateway_port)" "$token"
     else
-      printf 'http://127.0.0.1:%s/\n' "$(openclaw_gateway_port)"
+      printf '%s://127.0.0.1:%s/\n' "$scheme" "$(openclaw_gateway_port)"
     fi
   }
 
@@ -5642,13 +5777,14 @@ PY
   }
 
   openclaw_print_whatsapp_diagnosis() {
-    local active_proxy="" session_root gateway_port pair_url whatsapp_proxy_url configured_port
+    local active_proxy="" session_root gateway_port pair_url whatsapp_proxy_url configured_port auth_hint
     session_root=$(openclaw_whatsapp_session_root)
     gateway_port=$(openclaw_gateway_port)
     pair_url=$(openclaw_whatsapp_pairing_url)
     active_proxy=$(resolve_active_proxy "$(skpl_effective_proxy_port)" 2>/dev/null || true)
     configured_port=$(skpl_effective_proxy_port)
     whatsapp_proxy_url=$(openclaw_channel_http_proxy_url)
+    auth_hint="${session_root}/default/creds.json"
 
     skpl_ui_header "WhatsApp 连接诊断" "聚焦 WSL、代理、网关与会话状态"
     skpl_ui_kv "WSL 环境" "$(openclaw_is_wsl && echo 是 || echo 否)"
@@ -5657,15 +5793,87 @@ PY
     skpl_ui_kv "安装代理端口" "$configured_port"
     skpl_ui_kv "代理状态" "${active_proxy:-未探测到活动代理}"
     skpl_ui_kv "WhatsApp代理" "$whatsapp_proxy_url"
-    skpl_ui_kv "会话目录" "$session_root"
-    skpl_ui_kv "会话文件" "$(openclaw_whatsapp_has_session && echo 已存在 || echo 未生成)"
-    skpl_ui_kv "配对入口" "$pair_url"
+    skpl_ui_kv "凭据目录" "$session_root"
+    skpl_ui_kv "凭据文件" "$(openclaw_whatsapp_has_session && echo 已存在 || echo 未生成)"
+    skpl_ui_kv "默认凭据" "$auth_hint"
+    skpl_ui_kv "WebUI入口" "$pair_url"
     echo
     echo "建议："
     echo "1. 18789 是本地网关端口，10808 或自定义端口用于 WhatsApp 出站代理。"
-    echo "2. WSL 环境可正常承载 OpenClaw，扫码展示通常依赖 WebUI 或宿主浏览器。"
-    echo "3. 二维码异常通常来自网关未就绪、浏览器未打开配对页、旧会话残留或代理未生效。"
+    echo "2. WhatsApp 官方登录流程应使用 openclaw channels login --channel whatsapp。"
+    echo "3. WebUI 入口用于 OpenClaw 控制台访问，不作为 WhatsApp 官方扫码登录主流程。"
     echo "4. 若出现 fetch-runtime / createHttp1EnvHttpProxyAgent 报错，说明插件与 OpenClaw 核心版本不匹配，脚本已会自动同步核心后重试。"
+  }
+
+  openclaw_network_diagnosis_status() {
+    local label="$1" value="$2" tone="warn"
+    case "$value" in
+      正常|已连接|已开启*|已存在|可用|已识别)
+        tone="ok"
+        ;;
+      未就绪|未生成|未探测到*|未识别到*|不可用|异常)
+        tone="danger"
+        ;;
+    esac
+    skpl_ui_status_row "$label" "$tone" "$value"
+  }
+
+  openclaw_network_diagnosis_menu() {
+    local scheme port token domains active_proxy configured_port whatsapp_proxy_url whatsapp_session provider_summary
+    scheme=$(openclaw_webui_scheme)
+    port=$(openclaw_gateway_port)
+    token=$(openclaw_webui_get_cached_token 2>/dev/null || true)
+    [ -z "$token" ] && token=$(openclaw_webui_refresh_token_cache 2>/dev/null || true)
+    domains=$(openclaw_find_webui_domain)
+    active_proxy=$(resolve_active_proxy "$(skpl_effective_proxy_port)" 2>/dev/null || true)
+    configured_port=$(skpl_effective_proxy_port)
+    whatsapp_proxy_url=$(openclaw_channel_http_proxy_url)
+    whatsapp_session=$(openclaw_whatsapp_has_session && printf '已存在' || printf '未生成')
+    provider_summary=$(openclaw_domestic_provider_summary)
+
+    clear
+    skpl_ui_header "网络诊断" "汇总网关、本地入口、域名代理与 WhatsApp 状态"
+    skpl_ui_section "网关与代理"
+    openclaw_network_diagnosis_status "网关监听" "$(openclaw_gateway_port_reachable && echo 正常 || echo 未就绪)"
+    skpl_ui_kv "网关地址" "${scheme}://127.0.0.1:${port}/"
+    skpl_ui_kv "安装代理端口" "$configured_port"
+    openclaw_network_diagnosis_status "活动代理" "${active_proxy:-未探测到活动代理}"
+    skpl_ui_kv "WhatsApp代理" "$whatsapp_proxy_url"
+
+    echo
+    skpl_ui_section "WebUI 与域名"
+    if [ -n "$token" ]; then
+      skpl_ui_kv "本机入口" "${scheme}://127.0.0.1:${port}/#token=${token}"
+    else
+      skpl_ui_kv "本机入口" "${scheme}://127.0.0.1:${port}/"
+    fi
+    if [ -n "$domains" ]; then
+      openclaw_network_diagnosis_status "域名入口" "已识别"
+      while IFS= read -r d; do
+        [ -z "$d" ] && continue
+        if [ -n "$token" ]; then
+          skpl_ui_kv "域名地址" "https://${d}/#token=${token}"
+        else
+          skpl_ui_kv "域名地址" "https://${d}/"
+        fi
+      done <<EOF
+$domains
+EOF
+    else
+      openclaw_network_diagnosis_status "域名入口" "未识别到反向代理域名"
+    fi
+
+    echo
+    skpl_ui_section "国内直连与 WhatsApp"
+    skpl_ui_kv "国内直连" "$provider_summary"
+    openclaw_network_diagnosis_status "凭据文件" "$whatsapp_session"
+    if openclaw_whatsapp_probe_connected; then
+      openclaw_network_diagnosis_status "WhatsApp探测" "已连接"
+    else
+      openclaw_network_diagnosis_status "WhatsApp探测" "未就绪"
+    fi
+    echo
+    read -p "按回车返回菜单..."
   }
 
   openclaw_whatsapp_open_pairing_page() {
@@ -5680,18 +5888,9 @@ PY
   }
 
   openclaw_whatsapp_open_qr_connection() {
-    echo "正在准备 WhatsApp QR 连接..."
-    if ! openclaw_prepare_whatsapp_channel; then
-      echo "❌ WhatsApp 通道准备失败。"
-      return 1
-    fi
-    if ! openclaw_ensure_gateway_ready; then
-      echo "❌ 网关未就绪，无法展示 WhatsApp QR 页面。"
-      return 1
-    fi
-    echo "QR 连接页将通过 OpenClaw WebUI 打开。"
-    openclaw_whatsapp_open_pairing_page
-    return 0
+    echo "正在准备 WhatsApp 官方 QR 登录..."
+    openclaw_whatsapp_login_via_cli
+    return $?
   }
 
   openclaw_whatsapp_repair_flow() {
@@ -5709,8 +5908,8 @@ PY
     echo
     echo "已为 WhatsApp 通道写入代理：$(openclaw_channel_http_proxy_url)"
     echo
-    openclaw_whatsapp_open_pairing_page
-    return 0
+    openclaw_whatsapp_login_via_cli
+    return $?
   }
 
   openclaw_whatsapp_menu() {
@@ -5719,9 +5918,9 @@ PY
       openclaw_print_whatsapp_diagnosis
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "一键修复并打开配对页" "修复网关、代理与会话状态"
-      skpl_ui_menu_item 2 "WhatsApp QR 连接" "直接打开二维码连接页"
-      skpl_ui_menu_item 3 "仅打开配对页" "用浏览器显示二维码/配对入口"
+      skpl_ui_menu_item 1 "一键修复并执行登录" "修复网关、代理与凭据状态"
+      skpl_ui_menu_item 2 "WhatsApp 官方 QR 登录" "执行 channels login --channel whatsapp"
+      skpl_ui_menu_item 3 "仅打开 WebUI 页" "仅用于控制台访问与设备授权"
       skpl_ui_menu_item 4 "批准连接码" "输入 WhatsApp 收到的配对码"
       skpl_ui_menu_item 5 "设备配对授权" "独立处理 device pairing required"
       skpl_ui_menu_item 0 "返回上一级"
@@ -5915,7 +6114,7 @@ PY
     wa_enabled=$(openclaw_json_get_bool '.plugins.entries.whatsapp.enabled // .channels.whatsapp.enabled // false')
     wa_cfg=$(openclaw_channel_has_cfg "whatsapp")
     wa_connected="false"
-    if openclaw_dir_has_files "${HOME}/.openclaw/whatsapp"; then
+    if openclaw_whatsapp_has_session; then
       wa_connected="true"
     fi
     wa_abnormal="false"
@@ -5926,9 +6125,11 @@ PY
       wa_abnormal="true"
     fi
     if [ "$wa_connected" != "true" ] && [ "$wa_enabled" = "true" ] && [ "$wa_cfg" = "true" ] && { openclaw_plugin_local_installed "whatsapp" || openclaw_plugin_local_installed "openclaw-whatsapp"; }; then
-      wa_connected="true"
+      wa_status="已配置"
     fi
-    wa_status=$(openclaw_bot_status_text "$wa_enabled" "$wa_cfg" "$wa_connected" "$wa_abnormal")
+    if [ -z "$wa_status" ]; then
+      wa_status=$(openclaw_bot_status_text "$wa_enabled" "$wa_cfg" "$wa_connected" "$wa_abnormal")
+    fi
 
     local dc_enabled dc_cfg dc_connected dc_abnormal dc_status
     dc_enabled=$(openclaw_json_get_bool '.channels.discord.enabled // .plugins.entries.discord.enabled // false')
@@ -6018,7 +6219,7 @@ PY
       skpl_ui_section "操作"
       skpl_ui_menu_item 1 "Telegram 对接" "自动写入代理并批准连接码"
       skpl_ui_menu_item 2 "飞书对接" "安装 Lark 集成"
-      skpl_ui_menu_item 3 "WhatsApp 对接" "自动写入代理并打开配对页"
+      skpl_ui_menu_item 3 "WhatsApp 对接" "自动写入代理并执行官方登录"
       skpl_ui_menu_item 4 "Discord 对接" "自动写入代理并启用渠道"
       skpl_ui_menu_item 5 "Slack 对接" "自动写入代理并启用渠道"
       skpl_ui_menu_item 6 "QQ 对接" "查看官方接入地址"
@@ -9124,6 +9325,60 @@ raise SystemExit(1)
 PY
   }
 
+  openclaw_webui_scheme() {
+    local config_file
+    config_file=$(openclaw_get_config_file)
+    python3 - "$config_file" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+scheme = 'http'
+try:
+    if path and os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict) and data.get('gateway', {}).get('tls', {}).get('enabled') is True:
+            scheme = 'https'
+except Exception:
+    pass
+print(scheme)
+PY
+  }
+
+  openclaw_webui_token_from_config() {
+    local config_file
+    config_file=$(openclaw_get_config_file)
+    python3 - "$config_file" <<'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+token = os.environ.get('OPENCLAW_GATEWAY_TOKEN', '').strip()
+if token:
+    print(token)
+    raise SystemExit(0)
+
+try:
+    if path and os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        auth = data.get('gateway', {}).get('auth', {}) if isinstance(data, dict) else {}
+        value = auth.get('token') if isinstance(auth, dict) else None
+        if isinstance(value, str):
+            value = value.strip()
+            if value and not value.startswith('${'):
+                print(value)
+                raise SystemExit(0)
+except Exception:
+    pass
+
+raise SystemExit(1)
+PY
+  }
+
   openclaw_webui_refresh_token_cache() {
     local dashboard_output token
 
@@ -9131,9 +9386,12 @@ PY
     refresh_openclaw_gateway_service >/dev/null 2>&1 || true
 
     dashboard_output=$(timeout 12 openclaw dashboard 2>/dev/null || true)
-    [ -n "$dashboard_output" ] || return 1
-
-    token=$(printf '%s\n' "$dashboard_output" | openclaw_webui_extract_token 2>/dev/null || true)
+    if [ -n "$dashboard_output" ]; then
+      token=$(printf '%s\n' "$dashboard_output" | openclaw_webui_extract_token 2>/dev/null || true)
+    fi
+    if [ -z "$token" ]; then
+      token=$(openclaw_webui_token_from_config 2>/dev/null || true)
+    fi
     if [ -n "$token" ]; then
       printf '%s' "$token" > "$SKPL_WEBUI_TOKEN_CACHE_FILE"
       echo "$token"
@@ -9168,7 +9426,10 @@ PY
   }
 
   openclaw_webui_ensure_local_origins() {
-    openclaw_webui_ensure_origins "http://127.0.0.1:18789" "http://localhost:18789" "http://127.0.0.1" "http://localhost"
+    local scheme port
+    scheme=$(openclaw_webui_scheme)
+    port=$(openclaw_gateway_port)
+    openclaw_webui_ensure_origins "${scheme}://127.0.0.1:${port}" "${scheme}://localhost:${port}" "${scheme}://127.0.0.1" "${scheme}://localhost"
   }
 
   openclaw_webui_get_cached_token() {
@@ -9179,35 +9440,44 @@ PY
     return 1
   }
 
+  openclaw_webui_reset_local_cache() {
+    : > "$SKPL_WEBUI_TOKEN_CACHE_FILE" 2>/dev/null || true
+  }
+
 
 
   openclaw_show_webui_addr() {
-    local local_ip token domains
+    local local_ip token domains scheme port
 
     skpl_ui_header "WebUI 访问设置" "本机访问优先，域名入口按需接入"
     openclaw_webui_ensure_local_origins >/dev/null 2>&1 || true
     local_ip="127.0.0.1"
+    scheme=$(openclaw_webui_scheme)
+    port=$(openclaw_gateway_port)
 
     token=$(openclaw_webui_get_cached_token 2>/dev/null || true)
     skpl_ui_section "本机地址"
     if [ -n "$token" ]; then
-      echo "http://${local_ip}:18789/#token=${token}"
+      echo "${scheme}://${local_ip}:${port}/#token=${token}"
     else
-      echo "http://${local_ip}:18789/"
-      echo "当前未缓存 token，可在菜单中手动刷新。"
+      echo "${scheme}://${local_ip}:${port}/"
+      echo "当前使用无 token 的本地入口，可在菜单中按需手动刷新 token。"
     fi
 
     domains=$(openclaw_find_webui_domain)
     if [ -n "$domains" ]; then
       echo
       skpl_ui_section "域名地址"
-      echo "$domains" | while read d; do
+      while IFS= read -r d; do
+        [ -z "$d" ] && continue
         if [ -n "$token" ]; then
           echo "https://${d}/#token=${token}"
         else
           echo "https://${d}/"
         fi
-      done
+      done <<EOF
+$domains
+EOF
     fi
   }
 
@@ -9215,7 +9485,7 @@ PY
 
   # 添加域名（调用你给的函数）
   openclaw_domain_webui() {
-    local proxy_scheme token config_file new_origin tmp_json
+    local proxy_scheme token config_file new_origin scheme port
 
     add_yuming
     if ! ldnmp_Proxy "${yuming}" 127.0.0.1 18789; then
@@ -9223,6 +9493,8 @@ PY
       return 1
     fi
     proxy_scheme="${SKPL_LAST_PROXY_SCHEME:-http}"
+    scheme=$(openclaw_webui_scheme)
+    port=$(openclaw_gateway_port)
 
     token=$(openclaw_webui_refresh_token_cache 2>/dev/null || openclaw_webui_get_cached_token 2>/dev/null || true)
 
@@ -9238,7 +9510,7 @@ PY
       new_origin="${proxy_scheme}://${yuming}"
       # 使用 jq 安全修改 JSON，确保结构存在且不重复添加域名
       if command -v jq >/dev/null 2>&1; then
-        if openclaw_webui_ensure_origins "http://127.0.0.1:18789" "http://localhost:18789" "http://127.0.0.1" "http://localhost" "$new_origin"; then
+        if openclaw_webui_ensure_origins "${scheme}://127.0.0.1:${port}" "${scheme}://localhost:${port}" "${scheme}://127.0.0.1" "${scheme}://localhost" "$new_origin"; then
           echo -e "${gl_kjlan}已将域名 ${yuming} 加入 allowedOrigins 配置${gl_bai}"
           : > "$SKPL_WEBUI_DOMAIN_CACHE_FILE"
           start_gateway nosleep 5 >/dev/null 2>&1 || true
@@ -9352,6 +9624,7 @@ PY
         break_end
         ;;
       13) openclaw_webui_menu ;;
+      22) openclaw_network_diagnosis_menu ;;
       14) send_stats "TUI命令行对话"
         openclaw tui
         break_end
@@ -9402,6 +9675,7 @@ install_openclaw_direct() {
 
   openclaw_onboard_if_needed
   openclaw_ensure_local_gateway_config >/dev/null 2>&1 || true
+  openclaw_webui_reset_local_cache
   refresh_openclaw_gateway_service >/dev/null 2>&1 || true
 
   if [ "${SKPL_BATCH_MODE:-0}" = "1" ]; then
@@ -9425,7 +9699,9 @@ run_openclaw_install_step() {
   else
     refresh_runtime_proxy_env
     refresh_openclaw_gateway_service >/dev/null 2>&1 || true
-    openclaw gateway status >/dev/null 2>&1 || openclaw_ensure_gateway_ready || true
+    if ! openclaw_gateway_is_running; then
+      openclaw_ensure_gateway_ready || true
+    fi
   fi
 }
 
