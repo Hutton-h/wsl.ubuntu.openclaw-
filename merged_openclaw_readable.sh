@@ -5593,26 +5593,13 @@ openclaw_plugin_local_installed() {
   }
 
   openclaw_whatsapp_probe_connected() {
-    timeout 20 openclaw channels status --probe 2>/dev/null | python3 - <<'PY'
-import re
-import sys
-
-text = sys.stdin.read().lower()
-ok = False
-for line in text.splitlines():
-    if 'whatsapp' not in line:
-        continue
-    if re.search(r'\b(connected|works|audit ok|transport connected)\b', line):
-        ok = True
-        break
-raise SystemExit(0 if ok else 1)
-PY
+    openclaw_whatsapp_has_session
   }
 
   openclaw_whatsapp_wait_for_ready() {
     local attempts="${1:-4}" delay="${2:-3}" i=1
     while [ "$i" -le "$attempts" ]; do
-      if openclaw_whatsapp_has_session && openclaw_whatsapp_probe_connected; then
+      if openclaw_whatsapp_has_session; then
         return 0
       fi
       [ "$i" -lt "$attempts" ] && sleep "$delay"
@@ -5623,6 +5610,9 @@ PY
 
   openclaw_whatsapp_clear_broken_state() {
     local session_root legacy_root
+    if openclaw_whatsapp_has_session; then
+      return 0
+    fi
     session_root=$(openclaw_whatsapp_session_root)
     mkdir -p "$session_root"
     find "$session_root" -maxdepth 2 -type f \( -name '*.lock' -o -name 'Singleton*' -o -name 'DevToolsActivePort' -o -name '*.tmp' -o -name '*.log' \) -exec mv -f {} "${session_root}/" \; >/dev/null 2>&1 || true
@@ -5642,16 +5632,12 @@ PY
     echo "请按命令输出的二维码完成扫码，直到命令返回。"
     if openclaw channels login --channel whatsapp; then
       start_gateway nosleep 5 >/dev/null 2>&1 || true
-      if openclaw_whatsapp_has_session; then
-        echo "正在进行登录后状态确认..."
-        if openclaw_whatsapp_wait_for_ready 4 3; then
-          echo "✅ WhatsApp 凭据已生成，通道探测通过。"
-        else
-          echo "⚠️ WhatsApp 凭据已生成，但通道探测仍未确认通过。"
-          echo "请在稍后查看 channels status --probe 或面板本地状态。"
-        fi
+      echo "正在进行登录后状态确认..."
+      if openclaw_whatsapp_wait_for_ready 4 3; then
+        echo "✅ WhatsApp 凭据已生成，会话文件已落盘。"
       else
-        echo "⚠️ 登录命令已返回，但尚未检测到 creds.json，请稍后在状态里复查。"
+        echo "⚠️ 登录命令已返回，但尚未检测到 creds.json。"
+        echo "请先检查二维码流程是否走完，再稍后复查本地状态。"
       fi
       return 0
     fi
@@ -5714,8 +5700,38 @@ PY
     timeout 12 openclaw devices list 2>/dev/null || true
   }
 
+  openclaw_device_pairing_preview_latest() {
+    echo "正在预览最新待处理设备请求..."
+    if timeout 12 openclaw devices approve --latest; then
+      return 0
+    fi
+    echo "❌ 未能读取最新待处理请求，请先确认当前存在待批准设备。"
+    return 1
+  }
+
+  openclaw_pending_request_ids_summary() {
+    timeout 12 openclaw devices list 2>/dev/null | python3 - <<'PY'
+import re
+import sys
+
+ids = []
+for line in sys.stdin.read().splitlines():
+    for value in re.findall(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}\b', line):
+        if value not in ids:
+            ids.append(value)
+
+if ids:
+    print(', '.join(ids))
+else:
+    print('当前未识别到待处理 requestId')
+PY
+  }
+
   openclaw_device_pairing_approve() {
     local raw_input request_id
+    echo "当前待处理请求："
+    openclaw_devices_list_safe
+    echo
     echo "可直接粘贴完整报错，例如: device pairing required (requestId: xxxx)"
     echo "也可直接输入 Request_Key / requestId。"
     read -e -p "请输入待批准的设备请求: " raw_input
@@ -5867,8 +5883,8 @@ EOF
     skpl_ui_section "国内直连与 WhatsApp"
     skpl_ui_kv "国内直连" "$provider_summary"
     openclaw_network_diagnosis_status "凭据文件" "$whatsapp_session"
-    if openclaw_whatsapp_probe_connected; then
-      openclaw_network_diagnosis_status "WhatsApp探测" "已连接"
+    if openclaw_whatsapp_has_session; then
+      openclaw_network_diagnosis_status "WhatsApp探测" "已存在本地会话"
     else
       openclaw_network_diagnosis_status "WhatsApp探测" "未就绪"
     fi
@@ -5899,7 +5915,9 @@ EOF
     openclaw_ensure_local_gateway_config >/dev/null 2>&1 || true
     openclaw_webui_ensure_local_origins >/dev/null 2>&1 || true
     openclaw_prepare_whatsapp_channel || return 1
-    openclaw_whatsapp_clear_broken_state
+    if ! openclaw_whatsapp_has_session; then
+      openclaw_whatsapp_clear_broken_state
+    fi
     if ! openclaw_ensure_gateway_ready; then
       echo "❌ 网关未就绪，WhatsApp 无法生成有效连接页面。"
       return 1
@@ -5987,6 +6005,42 @@ EOF
     openclaw_apply_channel_proxy_config "telegram"
     start_gateway nosleep 5 >/dev/null 2>&1 || true
     return 0
+  }
+
+  openclaw_telegram_has_session() {
+    openclaw_dir_has_files "${HOME}/.openclaw/telegram"
+  }
+
+  openclaw_telegram_pairing_approve() {
+    local code="$1"
+    [ -z "$code" ] && return 1
+    openclaw pairing approve telegram "$code"
+  }
+
+  openclaw_telegram_login_flow() {
+    local code
+    echo "正在准备 Telegram 通道..."
+    if ! openclaw_prepare_telegram_channel; then
+      return 1
+    fi
+    read -e -p "请输入 TG 机器人收到的连接码 (例如 NYA99R2F)（输入 0 退出）： " code
+    if [ "$code" = "0" ]; then
+      return 0
+    fi
+    if [ -z "$code" ]; then
+      echo "错误：连接码不能为空。"
+      return 1
+    fi
+    if openclaw_telegram_pairing_approve "$code"; then
+      if openclaw_telegram_has_session; then
+        echo "✅ Telegram 本地会话已存在。"
+      else
+        echo "⚠️ Telegram 批准已提交，请稍后复查本地状态。"
+      fi
+      return 0
+    fi
+    echo "❌ Telegram 连接码批准失败。"
+    return 1
   }
 
   openclaw_prepare_discord_channel() {
@@ -6217,7 +6271,7 @@ EOF
       echo "设备规则：device pairing required 属于 OpenClaw 设备授权，和 WhatsApp 扫码关联是两条独立流程。"
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "Telegram 对接" "自动写入代理并批准连接码"
+      skpl_ui_menu_item 1 "Telegram 对接" "自动写入代理并手动批准连接码"
       skpl_ui_menu_item 2 "飞书对接" "安装 Lark 集成"
       skpl_ui_menu_item 3 "WhatsApp 对接" "自动写入代理并执行官方登录"
       skpl_ui_menu_item 4 "Discord 对接" "自动写入代理并启用渠道"
@@ -6230,15 +6284,7 @@ EOF
 
       case $bot_choice in
         1)
-          echo "正在准备 Telegram 通道..."
-          if ! openclaw_prepare_telegram_channel; then
-            break_end
-            continue
-          fi
-          read -e -p "请输入TG机器人收到的连接码 (例如 NYA99R2F)（输入 0 退出）： " code
-          if [ "$code" = "0" ]; then continue; fi
-          if [ -z "$code" ]; then echo "错误：连接码不能为空。"; sleep 1; continue; fi
-          openclaw pairing approve telegram "$code"
+          openclaw_telegram_login_flow
           break_end
           ;;
         2)
@@ -9479,6 +9525,10 @@ PY
 $domains
 EOF
     fi
+
+    echo
+    skpl_ui_section "待处理设备授权"
+    echo "进入下方菜单后可按需查看 devices list 与批准 requestId。"
   }
 
 
@@ -9558,6 +9608,9 @@ EOF
       skpl_ui_menu_item 1 "刷新访问 Token" "重新获取 dashboard token"
       skpl_ui_menu_item 2 "添加域名访问" "自动写入 allowedOrigins"
       skpl_ui_menu_item_tone 3 "删除域名访问" "移除反向代理域名" "danger"
+      skpl_ui_menu_item 4 "查看待处理请求" "显示 devices list 原始输出"
+      skpl_ui_menu_item 5 "批准设备请求" "按 requestId 执行 devices approve"
+      skpl_ui_menu_item 6 "预览最新请求" "执行 devices approve --latest"
       skpl_ui_menu_item 0 "退出"
       skpl_ui_footer_prompt "请选择: "
       read -e choice
@@ -9579,6 +9632,24 @@ EOF
           ;;
         3)
           openclaw_remove_domain
+          read -p "按回车返回菜单..."
+          ;;
+        4)
+          echo
+          openclaw_devices_list_safe
+          echo
+          read -p "按回车返回菜单..."
+          ;;
+        5)
+          echo
+          openclaw_device_pairing_approve
+          echo
+          read -p "按回车返回菜单..."
+          ;;
+        6)
+          echo
+          openclaw_device_pairing_preview_latest
+          echo
           read -p "按回车返回菜单..."
           ;;
         0)
