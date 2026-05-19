@@ -5708,12 +5708,12 @@ PY
   }
 
   openclaw_devices_list_safe() {
-    timeout 12 openclaw_with_gateway_token openclaw devices list 2>/dev/null || timeout 12 openclaw devices list 2>/dev/null || true
+    timeout 12 openclaw devices list 2>/dev/null || true
   }
 
   openclaw_device_pairing_preview_latest() {
     echo "正在预览最新待处理设备请求..."
-    if timeout 12 openclaw_with_gateway_token openclaw devices approve --latest || timeout 12 openclaw devices approve --latest; then
+    if timeout 12 openclaw devices approve --latest; then
       return 0
     fi
     echo "❌ 未能读取最新待处理请求，请先确认当前存在待批准设备。"
@@ -5751,12 +5751,12 @@ PY
     [ -z "$request_id" ] && request_id="$raw_input"
 
     echo "正在批准设备请求: $request_id"
-    if timeout 12 openclaw_with_gateway_token openclaw devices approve "$request_id" || timeout 12 openclaw devices approve "$request_id"; then
+    if timeout 12 openclaw devices approve "$request_id"; then
       echo "✅ 设备授权已提交"
       return 0
     fi
 
-    echo "❌ 设备授权失败，请先确认该 requestId 仍然有效，且本地持久 gateway token 已具备所需 scope。"
+    echo "❌ 设备授权失败，请先确认该 requestId 仍然有效。"
     return 1
   }
 
@@ -9490,15 +9490,6 @@ PY
     return 1
   }
 
-  openclaw_with_gateway_token() {
-    local token
-    token=$(openclaw_webui_token_from_config 2>/dev/null || true)
-    if [ -z "$token" ]; then
-      return 1
-    fi
-    OPENCLAW_GATEWAY_TOKEN="$token" "$@"
-  }
-
   openclaw_webui_reset_local_cache() {
     : > "$SKPL_WEBUI_TOKEN_CACHE_FILE" 2>/dev/null || true
   }
@@ -9584,7 +9575,7 @@ EOF
       fi
     fi
 
-    if ! timeout 12 openclaw_with_gateway_token openclaw devices list && ! timeout 12 openclaw devices list; then
+    if ! timeout 12 openclaw devices list; then
       echo "❌ 设备列表加载超时或失败，请确认网关已就绪后重试。"
       return 1
     fi
@@ -9596,7 +9587,7 @@ EOF
       return 1
     }
 
-    if ! timeout 12 openclaw_with_gateway_token openclaw devices approve "$Request_Key" && ! timeout 12 openclaw devices approve "$Request_Key"; then
+    if ! timeout 12 openclaw devices approve "$Request_Key"; then
       echo "❌ 设备授权超时或失败，请稍后重试。"
       return 1
     fi
