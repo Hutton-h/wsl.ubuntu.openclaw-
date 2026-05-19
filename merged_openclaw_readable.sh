@@ -5553,6 +5553,94 @@ openclaw_plugin_local_installed() {
     fi
   }
 
+  openclaw_extract_request_id() {
+    python3 - <<'PY'
+import re
+import sys
+
+text = sys.stdin.read().strip()
+patterns = [
+    r'requestId\s*[:=]\s*([0-9a-fA-F-]{8,})',
+    r'Request[_ -]?Key\s*[:=]\s*([^\s)]+)',
+    r'\b([0-9a-fA-F]{8}-[0-9a-fA-F-]{27,})\b',
+]
+
+for pattern in patterns:
+    match = re.search(pattern, text, re.IGNORECASE)
+    if match:
+        print(match.group(1))
+        raise SystemExit(0)
+
+raise SystemExit(1)
+PY
+  }
+
+  openclaw_devices_list_safe() {
+    timeout 12 openclaw devices list 2>/dev/null || true
+  }
+
+  openclaw_device_pairing_approve() {
+    local raw_input request_id
+    echo "可直接粘贴完整报错，例如: device pairing required (requestId: xxxx)"
+    echo "也可直接输入 Request_Key / requestId。"
+    read -e -p "请输入待批准的设备请求: " raw_input
+    [ -z "$raw_input" ] && { echo "输入不能为空"; return 1; }
+    request_id=$(printf '%s' "$raw_input" | openclaw_extract_request_id 2>/dev/null || true)
+    [ -z "$request_id" ] && request_id="$raw_input"
+
+    echo "正在批准设备请求: $request_id"
+    if timeout 12 openclaw devices approve "$request_id"; then
+      echo "✅ 设备授权已提交"
+      return 0
+    fi
+
+    echo "❌ 设备授权失败，请先确认该 requestId / Request_Key 仍然有效。"
+    return 1
+  }
+
+  openclaw_device_pairing_menu() {
+    while true; do
+      clear
+      skpl_ui_header "设备配对授权" "独立于 WhatsApp/Telegram 等渠道连接，用于批准 OpenClaw 设备访问"
+      echo "当前配对页地址：$(openclaw_whatsapp_pairing_url)"
+      echo
+      skpl_ui_section "待批准设备"
+      openclaw_devices_list_safe
+      echo
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "刷新待批准设备" "重新加载 devices list"
+      skpl_ui_menu_item 2 "批准设备请求" "支持粘贴 device pairing required 报错"
+      skpl_ui_menu_item 3 "打开配对页" "在浏览器打开当前 WebUI 配对入口"
+      skpl_ui_menu_item 0 "返回上一级"
+      skpl_ui_footer_prompt "请输入你的选择: "
+      read -e device_choice
+
+      case "$device_choice" in
+        1)
+          echo
+          read -p "按回车返回菜单..."
+          ;;
+        2)
+          openclaw_device_pairing_approve
+          echo
+          read -p "按回车返回菜单..."
+          ;;
+        3)
+          openclaw_whatsapp_open_pairing_page
+          echo
+          read -p "按回车返回菜单..."
+          ;;
+        0)
+          return 0
+          ;;
+        *)
+          echo "无效的选择，请重试。"
+          sleep 1
+          ;;
+      esac
+    done
+  }
+
   openclaw_print_whatsapp_diagnosis() {
     local active_proxy="" session_root gateway_port pair_url whatsapp_proxy_url configured_port
     session_root=$(openclaw_whatsapp_session_root)
@@ -5635,6 +5723,7 @@ openclaw_plugin_local_installed() {
       skpl_ui_menu_item 2 "WhatsApp QR 连接" "直接打开二维码连接页"
       skpl_ui_menu_item 3 "仅打开配对页" "用浏览器显示二维码/配对入口"
       skpl_ui_menu_item 4 "批准连接码" "输入 WhatsApp 收到的配对码"
+      skpl_ui_menu_item 5 "设备配对授权" "独立处理 device pairing required"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e wa_choice
@@ -5673,6 +5762,9 @@ openclaw_plugin_local_installed() {
           fi
           openclaw pairing approve whatsapp "$code"
           break_end
+          ;;
+        5)
+          openclaw_device_pairing_menu
           ;;
         0)
           return 0
@@ -5916,11 +6008,12 @@ openclaw_plugin_local_installed() {
     send_stats "机器人对接"
     while true; do
       clear
-      skpl_ui_header "机器人连接对接" "海外渠道自动继承安装代理端口，本地渠道保持原接入方式"
+      skpl_ui_header "机器人连接对接" "渠道连接与设备授权分离，海外渠道自动继承安装代理端口"
       openclaw_show_bot_local_status_block
       echo
       echo "代理规则：Telegram / WhatsApp / Discord / Slack 自动使用安装时输入的代理端口。"
       echo "本地规则：飞书 / QQ / 微信保持原有接入逻辑。"
+      echo "设备规则：device pairing required 属于 OpenClaw 设备授权，和 WhatsApp 扫码关联是两条独立流程。"
       echo
       skpl_ui_section "操作"
       skpl_ui_menu_item 1 "Telegram 对接" "自动写入代理并批准连接码"
