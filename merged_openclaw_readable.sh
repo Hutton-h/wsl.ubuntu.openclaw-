@@ -49,9 +49,12 @@ SKPL_MULTIAGENT_SESSIONS_CACHE_FILE="${SKPL_HOME}/multiagent-sessions.json"
 SKPL_WEBUI_TOKEN_CACHE_FILE="${SKPL_HOME}/webui-token.txt"
 SKPL_WEBUI_DOMAIN_CACHE_FILE="${SKPL_HOME}/webui-domains.txt"
 SKPL_GATEWAY_RESTART_STAMP_FILE="${SKPL_HOME}/gateway-restart.stamp"
+SKPL_GATEWAY_SENSITIVE_UNTIL_FILE="${SKPL_HOME}/gateway-sensitive-until.stamp"
 SKPL_BOT_STATUS_CACHE_FILE="${SKPL_HOME}/bot-status.txt"
+SKPL_DEVICES_LIST_CACHE_FILE="${SKPL_HOME}/devices-list.txt"
 SKPL_PLUGIN_LIST_CACHE_FILE="${SKPL_HOME}/plugins-list.txt"
 SKPL_PANEL_OVERVIEW_CACHE_FILE="${SKPL_HOME}/panel-overview.tsv"
+SKPL_CHANNEL_PROBE_CACHE_FILE="${SKPL_HOME}/channel-probe.txt"
 SKPL_REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Hutton-h/wsl.ubuntu.openclaw-/main/merged_openclaw_readable.sh"
 SKPL_REMOTE_SCRIPT_PROXIES="https://gh-proxy.com/ https://ghproxy.net/ https://github.moeyy.xyz/ https://gh-proxy.llyke.com/ https://ghproxy.cc/"
 SKPL_BASE_NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
@@ -522,6 +525,37 @@ log_msg() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$msg" >> "$SKPL_LOG_FILE"
 }
 
+openclaw_run_interactive_logged_command() {
+  local log_file="$1"
+  shift
+  [ -z "$log_file" ] && return 1
+  mkdir -p "$(dirname "$log_file")"
+  : > "$log_file"
+  if command -v script >/dev/null 2>&1; then
+    local cmd
+    cmd=$(printf '%q ' "$@")
+    script -qefc "$cmd" "$log_file"
+    return $?
+  fi
+  "$@" 2>&1 | tee -a "$log_file"
+}
+
+openclaw_run_interactive_logged_command_with_timeout() {
+  local timeout_seconds="$1"
+  local log_file="$2"
+  shift 2
+  [ -z "$timeout_seconds" ] && return 1
+  if command -v script >/dev/null 2>&1; then
+    local cmd
+    cmd=$(printf '%q ' "$@")
+    mkdir -p "$(dirname "$log_file")"
+    : > "$log_file"
+    timeout "$timeout_seconds" script -qefc "$cmd" "$log_file"
+    return $?
+  fi
+  timeout "$timeout_seconds" bash -o pipefail -lc 'log_file="$1"; shift; "$@" 2>&1 | tee -a "$log_file"' _ "$log_file" "$@"
+}
+
 check_tcp_port() {
   local ip_port="$1"
   local ip port
@@ -616,6 +650,188 @@ openclaw_gateway_is_running() {
   openclaw_gateway_service_active \
     || openclaw_gateway_port_reachable \
     || openclaw_gateway_process_running
+}
+
+openclaw_gateway_mark_sensitive_period() {
+  local seconds="${1:-180}" now until
+  now=$(date +%s)
+  until=$((now + seconds))
+  printf '%s\n' "$until" > "$SKPL_GATEWAY_SENSITIVE_UNTIL_FILE"
+}
+
+openclaw_gateway_clear_sensitive_period() {
+  : > "$SKPL_GATEWAY_SENSITIVE_UNTIL_FILE" 2>/dev/null || true
+}
+
+openclaw_gateway_sensitive_period_active() {
+  local until now
+  [ -s "$SKPL_GATEWAY_SENSITIVE_UNTIL_FILE" ] || return 1
+  read -r until < "$SKPL_GATEWAY_SENSITIVE_UNTIL_FILE" 2>/dev/null || return 1
+  now=$(date +%s)
+  [ -n "$until" ] && [ "$until" -gt "$now" ]
+}
+
+openclaw_start_gateway_allowed() {
+  if openclaw_gateway_sensitive_period_active; then
+    return 1
+  fi
+  return 0
+}
+
+openclaw_maybe_start_gateway() {
+  local mode="${1:-normal}" cooldown="${2:-15}"
+  if ! openclaw_start_gateway_allowed; then
+    return 0
+  fi
+  start_gateway "$mode" "$cooldown"
+}
+
+openclaw_replace_path_from_backup() {
+  local src="$1"
+  local dest="$2"
+  local backup_suffix=".pre-restore.$(date +%Y%m%d%H%M%S)"
+  [ -e "$src" ] || return 0
+  mkdir -p "$(dirname "$dest")"
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    mv "$dest" "${dest}${backup_suffix}"
+  fi
+  cp -a "$src" "$dest"
+}
+
+openclaw_whatsapp_status() {
+  if openclaw_whatsapp_probe_connected; then
+    printf 'connected\n'
+    return 0
+  fi
+  if openclaw_whatsapp_has_session; then
+    printf 'session_only\n'
+    return 0
+  fi
+  printf 'not_ready\n'
+}
+
+openclaw_devices_list_cache_read() {
+  local ttl="${1:-8}"
+  if ! openclaw_memory_cache_fresh "$SKPL_DEVICES_LIST_CACHE_FILE" "$ttl" || [ ! -s "$SKPL_DEVICES_LIST_CACHE_FILE" ]; then
+    return 1
+  fi
+  cat "$SKPL_DEVICES_LIST_CACHE_FILE"
+}
+
+openclaw_devices_list_cache_refresh() {
+  local output exit_code
+  output=$(openclaw_panel_run_command_with_timeout 12 openclaw devices list 2>/dev/null)
+  exit_code=$?
+  if [ "$exit_code" -eq 0 ] && [ -n "$output" ]; then
+    printf '%s\n' "$output" > "$SKPL_DEVICES_LIST_CACHE_FILE"
+    printf '%s\n' "$output"
+    return 0
+  fi
+  if [ -s "$SKPL_DEVICES_LIST_CACHE_FILE" ]; then
+    cat "$SKPL_DEVICES_LIST_CACHE_FILE"
+    return 0
+  fi
+  printf '%s\n' "$output"
+  return 1
+}
+
+openclaw_is_safe_channel_name() {
+  local channel="$1"
+  case "$channel" in
+    whatsapp|telegram|discord|slack|feishu|lark|qqbot|weixin)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+openclaw_is_valid_bool() {
+  case "$1" in
+    true|false)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+openclaw_is_valid_number() {
+  [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+openclaw_is_nonempty_csv() {
+  local raw="$1"
+  python3 - "$raw" <<'PY'
+import sys
+items = [x.strip() for x in sys.argv[1].split(',') if x.strip()]
+raise SystemExit(0 if items else 1)
+PY
+}
+
+openclaw_probe_cache_read() {
+  local ttl="${1:-45}"
+  if ! openclaw_memory_cache_fresh "$SKPL_CHANNEL_PROBE_CACHE_FILE" "$ttl" || [ ! -s "$SKPL_CHANNEL_PROBE_CACHE_FILE" ]; then
+    return 1
+  fi
+  cat "$SKPL_CHANNEL_PROBE_CACHE_FILE"
+}
+
+openclaw_probe_cache_refresh() {
+  local output exit_code
+  output=$(timeout 20 openclaw channels status --probe 2>/dev/null)
+  exit_code=$?
+  if [ "$exit_code" -eq 0 ] && [ -n "$output" ]; then
+    printf '%s\n' "$output" > "$SKPL_CHANNEL_PROBE_CACHE_FILE"
+    printf '%s\n' "$output"
+    return 0
+  fi
+  if [ -s "$SKPL_CHANNEL_PROBE_CACHE_FILE" ]; then
+    cat "$SKPL_CHANNEL_PROBE_CACHE_FILE"
+    return 0
+  fi
+  printf '%s\n' "$output"
+  return 1
+}
+
+openclaw_probe_status_from_cache() {
+  local channel="$1"
+  local raw
+  raw=$(openclaw_probe_cache_read 45 2>/dev/null || true)
+  [ -n "$raw" ] || return 1
+  python3 - "$channel" <<'PY' <<< "$raw"
+import sys
+
+channel = sys.argv[1].strip().lower()
+lines = sys.stdin.read().splitlines()
+matched = []
+aliases = {
+    'whatsapp': ['whatsapp', 'wa'],
+    'telegram': ['telegram', 'tg'],
+}
+needles = aliases.get(channel, [channel])
+
+for line in lines:
+    low = line.lower()
+    if any(n in low for n in needles):
+        matched.append(low)
+
+text = '\n'.join(matched)
+if not text:
+    raise SystemExit(1)
+
+def has_any(words):
+    return any(word in text for word in words)
+
+if has_any(['error', 'failed', 'timeout', 'offline', 'disconnected', 'stale', 'not ready', 'broken']):
+    print('error')
+elif has_any(['pending', 'pair', 'approve', 'qr', 'scan', 'auth required']):
+    print('pending')
+elif has_any(['connected', 'healthy', 'ready', 'running', 'online', 'ok']):
+    print('connected')
+elif has_any(['disabled', 'not enabled']):
+    print('disabled')
+else:
+    print('configured')
+PY
 }
 
 skpl_low_priority_prefix() {
@@ -1817,7 +2033,7 @@ hybrid_memory_install_stack() {
   hybrid_memory_write_broker
   hybrid_memory_write_config
   printf '{"installedAt": %s, "stack": "sqlite-fts-qdrant-hybrid"}\n' "$(date +%s)" > "$SKPL_HYBRID_MEMORY_STATE_DIR/install.json"
-  echo "混合记忆栈已初始化：SQLite FTS + 本地 Qdrant + EvoMap 增量知识目录"
+  echo "混合记忆栈已初始化：SQLite FTS + EvoMap 事件融合，向量检索接口保留扩展位。"
 }
 
 hybrid_memory_status_json() {
@@ -2367,7 +2583,7 @@ openclaw_gateway_status_quick() {
   echo "初始化日志: ${onboard_log}"
   : > "$onboard_log"
   set +e
-  timeout 180 bash -o pipefail -lc 'openclaw onboard --install-daemon 2>&1 | tee -a "$1"' _ "$onboard_log"
+  openclaw_run_interactive_logged_command_with_timeout 180 "$onboard_log" openclaw onboard --install-daemon
   onboard_rc=$?
   set -e
 
@@ -2375,7 +2591,7 @@ openclaw_gateway_status_quick() {
     log_msg "OpenClaw onboard 成功"
     echo "OpenClaw 初始化完成。"
     echo "提示：官方新版 Control UI 在新浏览器或新设备上可能需要一次设备审批。"
-    echo "提示：WhatsApp 官方扫码登录仍然可用，但登录过程中若触发 scope-upgrade，需要再批准最新 requestId。"
+    echo "提示：WhatsApp 请通过 channels login 完成官方扫码登录，登录返回后先执行 openclaw channels status。"
     return 0
   fi
 
@@ -2434,9 +2650,8 @@ openclaw_ensure_gateway_ready() {
     echo "正在打开 OpenClaw 配置向导..."
     echo "配置向导日志: ${onboard_log}"
     echo "提示：向导完成后，WebUI 首次浏览器访问可能需要设备审批。"
-    echo "提示：WhatsApp 官方扫码登录后若出现 scope-upgrade pending approval，请刷新 devices list 并批准最新 requestId。"
-    : > "$onboard_log"
-    openclaw onboard --install-daemon 2>&1 | tee -a "$onboard_log"
+    echo "提示：WhatsApp 官方登录请回到机器人对接菜单执行 channels login --channel whatsapp。"
+    openclaw_run_interactive_logged_command "$onboard_log" openclaw onboard --install-daemon
   }
 
 openclaw_memory_prepare() {
@@ -2466,7 +2681,7 @@ openclaw_memory_finalize() {
   openclaw memory index --force >/dev/null 2>&1 || true
   hybrid_memory_enqueue_event "memory-index" "OpenClaw 记忆索引已完成"
   hybrid_memory_sync_once >/dev/null 2>&1 || true
-  start_gateway nosleep 5 >/dev/null 2>&1 || true
+  openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
 }
 
 openclaw_memory_bootstrap() {
@@ -2484,7 +2699,6 @@ openclaw_memory_bootstrap() {
       curl -L --retry 3 --connect-timeout 10 --max-time 900 -C - -o "$model_path" "$model_url" || true
     fi
     ${low_priority_prefix}openclaw memory index --force >/dev/null 2>&1 || true
-    bash "${SKPL_SCRIPT_PATH}" panel __internal_start_gateway nosleep 5 >/dev/null 2>&1 || true
   ' _ "$model_path" "$low_priority_prefix" >"$bootstrap_log" 2>&1 &
   disown 2>/dev/null || true
   echo "$bootstrap_log"
@@ -3056,7 +3270,6 @@ openclaw_panel_menu() {
   show_menu() {
     clear
 
-    refresh_panel_overview_cache >/dev/null 2>&1 || true
     local install_status=$(get_panel_overview_value "install_status" 15)
     local running_status=$(get_panel_overview_value "running_status" 15)
     local local_version=$(get_panel_overview_value "local_version" 15)
@@ -3098,6 +3311,7 @@ openclaw_panel_menu() {
       skpl_ui_menu_item 12 "健康检测与修复" "自动修复常见问题"
       skpl_ui_menu_item 13 "WebUI 访问设置" "Token、域名、访问入口"
       skpl_ui_menu_item 22 "网络诊断" "汇总代理、WebUI 与 WhatsApp 状态"
+      skpl_ui_menu_item 23 "官方诊断中心" "status、doctor、probe 与最近日志"
       skpl_ui_menu_item 14 "TUI 对话" "进入命令行对话界面"
       skpl_ui_menu_item 15 "记忆管理" "索引、方案、融合检索"
       skpl_ui_menu_item 16 "权限管理" "策略与白名单"
@@ -3116,6 +3330,10 @@ openclaw_panel_menu() {
 
   start_gateway() {
     local mode="${1:-normal}" cooldown="${2:-15}" now last_restart=0
+
+    if ! openclaw_start_gateway_allowed; then
+      return 0
+    fi
 
     if [ "$mode" != "force" ] && [ -f "$SKPL_GATEWAY_RESTART_STAMP_FILE" ]; then
       read -r last_restart < "$SKPL_GATEWAY_RESTART_STAMP_FILE" 2>/dev/null || last_restart=0
@@ -3520,7 +3738,7 @@ PY
     start_gateway
     openclaw_webui_reset_local_cache
     echo "提示：WebUI 在 127.0.0.1 / localhost 以外的浏览器入口通常需要一次设备审批。"
-    echo "提示：WhatsApp 仍走官方扫码登录；若扫码后提示 scope-upgrade pending approval，请批准最新 requestId。"
+    echo "提示：WhatsApp 仍走官方扫码登录；登录命令返回后请优先执行 openclaw channels status。"
     refresh_panel_overview_cache >/dev/null 2>&1 || true
     add_app_id
     break_end
@@ -3548,9 +3766,20 @@ PY
   view_logs() {
     echo "查看 OpenClaw 状态日志"
     send_stats "查看 OpenClaw 日志"
-    openclaw status
-    openclaw gateway status
-    openclaw logs
+    echo
+    skpl_ui_section "状态摘要"
+    openclaw status 2>/dev/null || true
+    echo
+    skpl_ui_section "网关状态"
+    openclaw gateway status 2>/dev/null || true
+    echo
+    skpl_ui_section "最近日志"
+    timeout 12 openclaw logs 2>/dev/null | python3 - <<'PY'
+import sys
+lines = sys.stdin.read().splitlines()
+for line in lines[-80:]:
+    print(line)
+PY
     break_end
   }
 
@@ -4987,6 +5216,244 @@ PYTHON_EOF
       fi
     }
 
+    openclaw_json_get_string() {
+      local expr="$1"
+      local config_file
+      config_file=$(openclaw_get_config_file)
+      [ -f "$config_file" ] || return 1
+      jq -r "$expr" "$config_file" 2>/dev/null | python3 - <<'PY'
+import sys
+for line in sys.stdin:
+    print(line.rstrip('\n'))
+    break
+PY
+    }
+
+    openclaw_config_set_string() {
+      local key="$1"
+      local value="$2"
+      [ -z "$key" ] && return 1
+      [ -n "$value" ] || return 1
+      openclaw config set "$key" "$value" >/dev/null 2>&1
+    }
+
+    openclaw_config_set_json_bool() {
+      local key="$1"
+      local value="$2"
+      [ -z "$key" ] && return 1
+      openclaw_is_valid_bool "$value" || return 1
+      openclaw config set "$key" "$value" --json >/dev/null 2>&1
+    }
+
+    openclaw_config_set_json_number() {
+      local key="$1"
+      local value="$2"
+      [ -z "$key" ] && return 1
+      openclaw_is_valid_number "$value" || return 1
+      openclaw config set "$key" "$value" --json >/dev/null 2>&1
+    }
+
+    openclaw_config_set_json_array() {
+      local key="$1"
+      local raw_csv="$2"
+      local json_array
+      openclaw_is_nonempty_csv "$raw_csv" || return 1
+      json_array=$(python3 - "$raw_csv" <<'PY'
+import json, sys
+items = [x.strip() for x in sys.argv[1].split(',') if x.strip()]
+print(json.dumps(items, ensure_ascii=False))
+PY
+)
+      openclaw config set "$key" "$json_array" --strict-json >/dev/null 2>&1
+    }
+
+    openclaw_run_official_diagnostics() {
+      clear
+      skpl_ui_header "官方诊断中心" "按 OpenClaw 官方推荐顺序执行诊断"
+      echo
+      skpl_ui_section "1. Runtime 状态"
+      timeout 12 openclaw status 2>/dev/null || true
+      echo
+      skpl_ui_section "2. Gateway 状态"
+      timeout 12 openclaw gateway status 2>/dev/null || true
+      echo
+      skpl_ui_section "3. Doctor 检查"
+      timeout 20 openclaw doctor 2>/dev/null || true
+      echo
+      skpl_ui_section "4. Channel Probe"
+      openclaw_probe_cache_refresh 2>/dev/null || true
+      echo
+      skpl_ui_section "5. 最近日志"
+      timeout 12 openclaw logs 2>/dev/null | python3 - <<'PY'
+import sys
+for line in sys.stdin.read().splitlines()[-80:]:
+    print(line)
+PY
+      echo
+      read -p "按回车返回菜单..."
+    }
+
+    openclaw_probe_single_channel_menu() {
+      local channel
+      read -e -p "请输入要探测的渠道（whatsapp/telegram/discord/slack/feishu 等）: " channel
+      [ -z "$channel" ] && return 1
+      if ! openclaw_is_safe_channel_name "$channel"; then
+        echo "渠道名称不在允许列表中。"
+        sleep 1
+        return 1
+      fi
+      clear
+      skpl_ui_header "单渠道 Probe" "$channel"
+      timeout 20 openclaw channels status --probe --channel "$channel" 2>/dev/null || openclaw_probe_cache_refresh 2>/dev/null || true
+      echo
+      read -p "按回车返回菜单..."
+    }
+
+    openclaw_gateway_advanced_menu() {
+      local choice value
+      while true; do
+        clear
+        skpl_ui_header "Gateway 高级设置" "热重载与渠道健康监控"
+        skpl_ui_kv "reload.mode" "$(openclaw_json_get_string '.gateway.reload.mode // "hybrid"' 2>/dev/null || echo hybrid)"
+        skpl_ui_kv "health check" "$(openclaw_json_get_string '.gateway.channelHealthCheckMinutes // 5' 2>/dev/null || echo 5)"
+        skpl_ui_kv "stale threshold" "$(openclaw_json_get_string '.gateway.channelStaleEventThresholdMinutes // 30' 2>/dev/null || echo 30)"
+        skpl_ui_kv "max restarts" "$(openclaw_json_get_string '.gateway.channelMaxRestartsPerHour // 10' 2>/dev/null || echo 10)"
+        echo
+        skpl_ui_menu_item 1 "设置 reload.mode" "hybrid / hot / restart / off"
+        skpl_ui_menu_item 2 "设置健康检查间隔" "gateway.channelHealthCheckMinutes"
+        skpl_ui_menu_item 3 "设置陈旧阈值" "gateway.channelStaleEventThresholdMinutes"
+        skpl_ui_menu_item 4 "设置每小时最大重启数" "gateway.channelMaxRestartsPerHour"
+        skpl_ui_menu_item 0 "返回上一级"
+        skpl_ui_footer_prompt "请选择: "
+        read -e choice
+        case "$choice" in
+          1)
+            read -e -p "请输入 reload.mode: " value
+            if [ -n "$value" ] && ! openclaw_config_set_string gateway.reload.mode "$value"; then
+              echo "配置写入失败，请检查输入值。"
+              sleep 1
+            fi
+            ;;
+          2)
+            read -e -p "请输入 channelHealthCheckMinutes: " value
+            if [ -n "$value" ] && ! openclaw_config_set_json_number gateway.channelHealthCheckMinutes "$value"; then
+              echo "请输入正整数。"
+              sleep 1
+            fi
+            ;;
+          3)
+            read -e -p "请输入 channelStaleEventThresholdMinutes: " value
+            if [ -n "$value" ] && ! openclaw_config_set_json_number gateway.channelStaleEventThresholdMinutes "$value"; then
+              echo "请输入正整数。"
+              sleep 1
+            fi
+            ;;
+          4)
+            read -e -p "请输入 channelMaxRestartsPerHour: " value
+            if [ -n "$value" ] && ! openclaw_config_set_json_number gateway.channelMaxRestartsPerHour "$value"; then
+              echo "请输入正整数。"
+              sleep 1
+            fi
+            ;;
+          0)
+            return 0
+            ;;
+        esac
+      done
+    }
+
+    openclaw_whatsapp_advanced_menu() {
+      local choice value
+      while true; do
+        clear
+        skpl_ui_header "WhatsApp 高级设置" "官方高频配置项"
+        skpl_ui_kv "dmPolicy" "$(openclaw_json_get_string '.channels.whatsapp.dmPolicy // "pairing"' 2>/dev/null || echo pairing)"
+        skpl_ui_kv "groupPolicy" "$(openclaw_json_get_string '.channels.whatsapp.groupPolicy // "allowlist"' 2>/dev/null || echo allowlist)"
+        skpl_ui_kv "replyToMode" "$(openclaw_json_get_string '.channels.whatsapp.replyToMode // "off"' 2>/dev/null || echo off)"
+        skpl_ui_kv "replyToSelf" "$(openclaw_json_get_string '.channels.whatsapp.replyToSelf // false' 2>/dev/null || echo false)"
+        skpl_ui_kv "reactionLevel" "$(openclaw_json_get_string '.channels.whatsapp.reactionLevel // "minimal"' 2>/dev/null || echo minimal)"
+        skpl_ui_kv "ackReaction" "$(openclaw_json_get_string '.channels.whatsapp.ackReaction // empty' 2>/dev/null || echo -)"
+        skpl_ui_kv "historyLimit" "$(openclaw_json_get_string '.channels.whatsapp.historyLimit // 50' 2>/dev/null || echo 50)"
+        echo
+        skpl_ui_menu_item 1 "设置 dmPolicy" "pairing / allowlist / open / disabled"
+        skpl_ui_menu_item 2 "设置 allowFrom" "逗号分隔电话号码"
+        skpl_ui_menu_item 3 "设置 groupPolicy" "allowlist / open / disabled"
+        skpl_ui_menu_item 4 "设置 groupAllowFrom" "逗号分隔电话号码"
+        skpl_ui_menu_item 5 "设置 replyToMode" "off / first / all / batched"
+        skpl_ui_menu_item 6 "设置 reactionLevel" "off / ack / minimal / extensive"
+        skpl_ui_menu_item 7 "设置 replyToSelf" "true / false"
+        skpl_ui_menu_item 8 "设置 ackReaction" "例如: 👍"
+        skpl_ui_menu_item 9 "设置 historyLimit" "默认 50"
+        skpl_ui_menu_item 10 "设置 sendReadReceipts" "true / false"
+        skpl_ui_menu_item 11 "设置 keepAliveIntervalMs" "web.whatsapp.keepAliveIntervalMs"
+        skpl_ui_menu_item 12 "设置 connectTimeoutMs" "web.whatsapp.connectTimeoutMs"
+        skpl_ui_menu_item 13 "设置 defaultQueryTimeoutMs" "web.whatsapp.defaultQueryTimeoutMs"
+        skpl_ui_menu_item 0 "返回上一级"
+        skpl_ui_footer_prompt "请选择: "
+        read -e choice
+        case "$choice" in
+          1) read -e -p "dmPolicy: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.whatsapp.dmPolicy "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
+          2) read -e -p "allowFrom（逗号分隔）: " value; [ -n "$value" ] && ! openclaw_config_set_json_array channels.whatsapp.allowFrom "$value" && { echo "请输入至少一个有效号码。"; sleep 1; } ;;
+          3) read -e -p "groupPolicy: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.whatsapp.groupPolicy "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
+          4) read -e -p "groupAllowFrom（逗号分隔）: " value; [ -n "$value" ] && ! openclaw_config_set_json_array channels.whatsapp.groupAllowFrom "$value" && { echo "请输入至少一个有效号码。"; sleep 1; } ;;
+          5) read -e -p "replyToMode: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.whatsapp.replyToMode "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
+          6) read -e -p "reactionLevel: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.whatsapp.reactionLevel "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
+          7) read -e -p "replyToSelf (true/false): " value; [ -n "$value" ] && ! openclaw_config_set_json_bool channels.whatsapp.replyToSelf "$value" && { echo "请输入 true 或 false。"; sleep 1; } ;;
+          8) read -e -p "ackReaction: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.whatsapp.ackReaction "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
+          9) read -e -p "historyLimit: " value; [ -n "$value" ] && ! openclaw_config_set_json_number channels.whatsapp.historyLimit "$value" && { echo "请输入正整数。"; sleep 1; } ;;
+          10) read -e -p "sendReadReceipts (true/false): " value; [ -n "$value" ] && ! openclaw_config_set_json_bool channels.whatsapp.sendReadReceipts "$value" && { echo "请输入 true 或 false。"; sleep 1; } ;;
+          11) read -e -p "keepAliveIntervalMs: " value; [ -n "$value" ] && ! openclaw_config_set_json_number web.whatsapp.keepAliveIntervalMs "$value" && { echo "请输入正整数。"; sleep 1; } ;;
+          12) read -e -p "connectTimeoutMs: " value; [ -n "$value" ] && ! openclaw_config_set_json_number web.whatsapp.connectTimeoutMs "$value" && { echo "请输入正整数。"; sleep 1; } ;;
+          13) read -e -p "defaultQueryTimeoutMs: " value; [ -n "$value" ] && ! openclaw_config_set_json_number web.whatsapp.defaultQueryTimeoutMs "$value" && { echo "请输入正整数。"; sleep 1; } ;;
+          0) return 0 ;;
+        esac
+      done
+    }
+
+    openclaw_telegram_advanced_menu() {
+      local choice value
+      while true; do
+        clear
+        skpl_ui_header "Telegram 高级设置" "官方高频配置项"
+        skpl_ui_kv "dmPolicy" "$(openclaw_json_get_string '.channels.telegram.dmPolicy // "pairing"' 2>/dev/null || echo pairing)"
+        skpl_ui_kv "groupPolicy" "$(openclaw_json_get_string '.channels.telegram.groupPolicy // "allowlist"' 2>/dev/null || echo allowlist)"
+        skpl_ui_kv "streaming.mode" "$(openclaw_json_get_string '.channels.telegram.streaming.mode // "partial"' 2>/dev/null || echo partial)"
+        skpl_ui_kv "replyToMode" "$(openclaw_json_get_string '.channels.telegram.replyToMode // "off"' 2>/dev/null || echo off)"
+        skpl_ui_kv "requireMention" "$(openclaw_json_get_string '.channels.telegram.requireMention // false' 2>/dev/null || echo false)"
+        echo
+        skpl_ui_menu_item 1 "设置 botToken" "写入 channels.telegram.botToken"
+        skpl_ui_menu_item 2 "设置 dmPolicy" "pairing / allowlist / open / disabled"
+        skpl_ui_menu_item 3 "设置 allowFrom" "逗号分隔用户 ID"
+        skpl_ui_menu_item 4 "设置 groupPolicy" "allowlist / open / disabled"
+        skpl_ui_menu_item 5 "设置 groupAllowFrom" "逗号分隔用户 ID"
+        skpl_ui_menu_item 6 "设置 streaming.mode" "off / partial / block / progress"
+        skpl_ui_menu_item 7 "设置 replyToMode" "off / first / all"
+        skpl_ui_menu_item 8 "设置 requireMention" "true / false"
+        skpl_ui_menu_item 9 "设置 pollingStallThresholdMs" "轮询停滞阈值"
+        skpl_ui_menu_item 10 "设置 timeoutSeconds" "Telegram API 超时"
+        skpl_ui_menu_item 11 "设置 autoSelectFamily" "true / false"
+        skpl_ui_menu_item 12 "设置 proxy" "http/socks5 代理 URL"
+        skpl_ui_menu_item 0 "返回上一级"
+        skpl_ui_footer_prompt "请选择: "
+        read -e choice
+        case "$choice" in
+          1) read -e -p "botToken: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.telegram.botToken "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
+          2) read -e -p "dmPolicy: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.telegram.dmPolicy "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
+          3) read -e -p "allowFrom（逗号分隔）: " value; [ -n "$value" ] && ! openclaw_config_set_json_array channels.telegram.allowFrom "$value" && { echo "请输入至少一个有效用户 ID。"; sleep 1; } ;;
+          4) read -e -p "groupPolicy: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.telegram.groupPolicy "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
+          5) read -e -p "groupAllowFrom（逗号分隔）: " value; [ -n "$value" ] && ! openclaw_config_set_json_array channels.telegram.groupAllowFrom "$value" && { echo "请输入至少一个有效用户 ID。"; sleep 1; } ;;
+          6) read -e -p "streaming.mode: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.telegram.streaming.mode "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
+          7) read -e -p "replyToMode: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.telegram.replyToMode "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
+          8) read -e -p "requireMention (true/false): " value; [ -n "$value" ] && ! openclaw_config_set_json_bool channels.telegram.requireMention "$value" && { echo "请输入 true 或 false。"; sleep 1; } ;;
+          9) read -e -p "pollingStallThresholdMs: " value; [ -n "$value" ] && ! openclaw_config_set_json_number channels.telegram.pollingStallThresholdMs "$value" && { echo "请输入正整数。"; sleep 1; } ;;
+          10) read -e -p "timeoutSeconds: " value; [ -n "$value" ] && ! openclaw_config_set_json_number channels.telegram.timeoutSeconds "$value" && { echo "请输入正整数。"; sleep 1; } ;;
+          11) read -e -p "autoSelectFamily (true/false): " value; [ -n "$value" ] && ! openclaw_config_set_json_bool channels.telegram.network.autoSelectFamily "$value" && { echo "请输入 true 或 false。"; sleep 1; } ;;
+          12) read -e -p "proxy URL: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.telegram.proxy "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
+          0) return 0 ;;
+        esac
+      done
+    }
+
     openclaw_sync_sessions_model() {
       local model_ref="$1"
       [ -z "$model_ref" ] && return 1
@@ -5600,7 +6067,6 @@ openclaw_plugin_local_installed() {
     fi
     openclaw config set channels.whatsapp.enabled true --json >/dev/null 2>&1 || true
     openclaw_apply_channel_proxy_config "whatsapp"
-    start_gateway nosleep 5 >/dev/null 2>&1 || true
     return 0
   }
 
@@ -5627,16 +6093,32 @@ openclaw_plugin_local_installed() {
   }
 
   openclaw_whatsapp_probe_connected() {
-    openclaw_whatsapp_has_session
+    if ! openclaw_whatsapp_has_session; then
+      return 1
+    fi
+    timeout 8 openclaw channels status 2>/dev/null | python3 - <<'PY'
+import sys
+text = sys.stdin.read().lower()
+if 'whatsapp' in text and ('linked' in text or 'connected' in text or 'ready' in text):
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
   }
 
   openclaw_whatsapp_wait_for_ready() {
     local attempts="${1:-4}" delay="${2:-3}" i=1
     while [ "$i" -le "$attempts" ]; do
-      if openclaw_whatsapp_has_session; then
-        return 0
+      case "$(openclaw_whatsapp_status)" in
+        connected)
+          return 0
+          ;;
+        session_only)
+          return 2
+          ;;
+      esac
+      if [ "$i" -lt "$attempts" ]; then
+        sleep "$delay"
       fi
-      [ "$i" -lt "$attempts" ] && sleep "$delay"
       i=$((i + 1))
     done
     return 1
@@ -5656,24 +6138,55 @@ openclaw_plugin_local_installed() {
     fi
   }
 
+  openclaw_whatsapp_pause_gateway_for_login() {
+    if openclaw_gateway_is_running; then
+      echo "登录前暂停 OpenClaw gateway，避免二维码登录与运行中会话竞争同一认证状态。"
+      openclaw_gateway_mark_sensitive_period 240
+      openclaw gateway stop >/dev/null 2>&1 || true
+      sleep 2
+      return 0
+    fi
+    return 1
+  }
+
   openclaw_whatsapp_login_via_cli() {
+    local login_log="/root/.skpl/openclaw-whatsapp-login.log"
+    local gateway_was_running="false"
     refresh_runtime_proxy_env
     if ! openclaw_prepare_whatsapp_channel; then
       echo "❌ WhatsApp 通道准备失败。"
       return 1
     fi
+    if openclaw_whatsapp_pause_gateway_for_login; then
+      gateway_was_running="true"
+    fi
     echo "正在启动官方 WhatsApp 登录流程..."
     echo "请按命令输出的二维码完成扫码，直到命令返回。"
-    if openclaw channels login --channel whatsapp; then
-      start_gateway nosleep 5 >/dev/null 2>&1 || true
+    echo "登录日志: ${login_log}"
+    if openclaw_run_interactive_logged_command "$login_log" openclaw channels login --channel whatsapp; then
+      echo "正在恢复 OpenClaw gateway..."
+      openclaw_gateway_clear_sensitive_period
+      openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
       echo "正在进行登录后状态确认..."
-      if openclaw_whatsapp_wait_for_ready 4 3; then
-        echo "✅ WhatsApp 凭据已生成，会话文件已落盘。"
-      else
-        echo "⚠️ 登录命令已返回，但尚未检测到 creds.json。"
-        echo "请先检查二维码流程是否走完，再稍后复查本地状态。"
-      fi
+      openclaw_whatsapp_wait_for_ready 6 2
+      case "$?" in
+        0)
+          echo "✅ WhatsApp 通道已连接，官方状态已确认。"
+          ;;
+        2)
+          echo "⚠️ 已检测到本地会话文件，但官方连接状态仍在稳定中。"
+          echo "请先执行 openclaw channels status，再按需打开 WebUI 查看待处理请求。"
+          ;;
+        *)
+          echo "⚠️ 登录命令已返回，但绑定状态尚未稳定。"
+          echo "请先执行 openclaw channels status，再按需打开 WebUI 查看待处理请求。"
+          ;;
+      esac
       return 0
+    fi
+    openclaw_gateway_clear_sensitive_period
+    if [ "$gateway_was_running" = "true" ]; then
+      openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
     fi
     echo "❌ 官方 WhatsApp 登录流程未成功完成。"
     return 1
@@ -5775,204 +6288,17 @@ exit 1
   }
 
   openclaw_devices_list_safe() {
-    openclaw_panel_run_command_with_timeout 12 openclaw devices list 2>/dev/null || true
+    local cached
+    cached=$(openclaw_devices_list_cache_read 8 2>/dev/null || true)
+    if [ -n "$cached" ]; then
+      printf '%s\n' "$cached"
+      return 0
+    fi
+    openclaw_devices_list_cache_refresh
   }
 
   openclaw_devices_list_raw() {
-    openclaw_panel_run_command_with_timeout 12 openclaw devices list 2>/dev/null
-  }
-
-  openclaw_extract_request_ids_from_text() {
-    python3 - <<'PY'
-import re
-import sys
-
-ids = []
-for line in sys.stdin.read().splitlines():
-    for value in re.findall(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}\b', line):
-        if value not in ids:
-            ids.append(value)
-
-for value in ids:
-    print(value)
-PY
-  }
-
-  openclaw_current_pending_request_ids() {
-    openclaw_devices_list_raw | openclaw_extract_request_ids_from_text
-  }
-
-  openclaw_request_id_is_pending() {
-    local request_id="$1"
-    [ -z "$request_id" ] && return 1
-    openclaw_current_pending_request_ids | grep -Fxq "$request_id"
-  }
-
-  openclaw_best_current_request_id() {
-    local latest_request_id pending_ids first_pending
-    latest_request_id=$(openclaw_latest_scope_upgrade_request_id 2>/dev/null || true)
-    pending_ids=$(openclaw_current_pending_request_ids 2>/dev/null || true)
-    if [ -n "$latest_request_id" ] && printf '%s\n' "$pending_ids" | grep -Fxq "$latest_request_id"; then
-      printf '%s\n' "$latest_request_id"
-      return 0
-    fi
-    first_pending=$(printf '%s\n' "$pending_ids" | python3 - <<'PY'
-import sys
-for line in sys.stdin.read().splitlines():
-    text = line.strip()
-    if text:
-        print(text)
-        break
-PY
-    )
-    [ -n "$first_pending" ] && printf '%s\n' "$first_pending"
-  }
-
-  openclaw_device_pairing_preview_latest() {
-    echo "正在预览最新待处理设备请求..."
-    if openclaw_panel_run_command_with_timeout 12 openclaw devices approve --latest; then
-      return 0
-    fi
-    echo "❌ 未能读取最新待处理请求，请先确认当前存在待批准设备。"
-    return 1
-  }
-
-  openclaw_pending_request_ids_summary() {
-    local latest_request_id summary_ids
-    summary_ids=$(openclaw_devices_list_raw | python3 - <<'PY'
-import re
-import sys
-
-ids = []
-for line in sys.stdin.read().splitlines():
-    for value in re.findall(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}\b', line):
-        if value not in ids:
-            ids.append(value)
-
-if ids:
-    print(', '.join(ids))
-else:
-    print('当前未识别到待处理 requestId')
-PY
-    )
-    latest_request_id=$(openclaw_latest_scope_upgrade_request_id 2>/dev/null || true)
-    if [ -n "$latest_request_id" ] && [ "$summary_ids" != "当前未识别到待处理 requestId" ]; then
-      printf '%s (日志最新: %s)\n' "$summary_ids" "$latest_request_id"
-      return 0
-    fi
-    if [ -n "$latest_request_id" ] && [ "$summary_ids" = "当前未识别到待处理 requestId" ]; then
-      printf '当前未识别到待处理 requestId (日志最新: %s)\n' "$latest_request_id"
-      return 0
-    fi
-    printf '%s\n' "$summary_ids"
-  }
-
-  openclaw_device_pairing_approve() {
-    local raw_input request_id latest_request_id suggested_request_id approve_exit_code approve_state
-    echo "当前待处理请求："
-    openclaw_devices_list_safe
-    echo
-    latest_request_id=$(openclaw_latest_scope_upgrade_request_id 2>/dev/null || true)
-    if [ -n "$latest_request_id" ]; then
-      echo "日志最新 requestId: $latest_request_id"
-      echo "建议优先批准这个 requestId。"
-      echo
-    fi
-    echo "可直接粘贴完整报错，例如: device pairing required (requestId: xxxx)"
-    echo "也可直接输入 Request_Key / requestId。"
-    read -e -p "请输入待批准的设备请求: " raw_input
-    [ -z "$raw_input" ] && { echo "输入不能为空"; return 1; }
-    request_id=$(printf '%s' "$raw_input" | openclaw_extract_request_id 2>/dev/null || true)
-    [ -z "$request_id" ] && request_id="$raw_input"
-
-    if ! openclaw_request_id_is_pending "$request_id"; then
-      suggested_request_id=$(openclaw_best_current_request_id 2>/dev/null || true)
-      echo "❌ 这个 requestId 当前已经失效。"
-      if [ -n "$suggested_request_id" ]; then
-        echo "请批准当前有效 requestId: $suggested_request_id"
-      else
-        echo "当前 devices list 中没有可批准的 requestId，请先刷新列表或重新触发配对。"
-      fi
-      return 1
-    fi
-
-    echo "正在批准设备请求: $request_id"
-    openclaw_panel_run_command_with_timeout 12 openclaw devices approve "$request_id"
-    approve_exit_code=$?
-    if [ "$approve_exit_code" -eq 0 ]; then
-      echo "✅ 设备授权已提交"
-      return 0
-    fi
-
-    approve_state=$(openclaw_panel_describe_timeout_result "$approve_exit_code")
-    if [ "$approve_state" = "timeout" ]; then
-      echo "⚠️ 批准命令在 12 秒内没有返回。"
-      echo "请立即重新执行 devices list，确认这个 requestId 是否已经从待处理列表中消失。"
-      return 1
-    fi
-
-    echo "❌ 设备授权失败，请先确认该 requestId 仍然有效。"
-    return 1
-  }
-
-  openclaw_device_pairing_menu() {
-    while true; do
-      local latest_request_id
-      clear
-      skpl_ui_header "设备配对授权" "独立于 WhatsApp/Telegram 等渠道连接，用于批准 OpenClaw 设备访问"
-      echo "当前配对页地址：$(openclaw_whatsapp_pairing_url)"
-      echo "说明：若日志里出现 scope-upgrade，新 requestId 会替换旧 requestId。批准前请先刷新列表。"
-      latest_request_id=$(openclaw_latest_scope_upgrade_request_id 2>/dev/null || true)
-      if [ -n "$latest_request_id" ]; then
-        echo "日志最新 requestId：$latest_request_id"
-      fi
-      echo
-      skpl_ui_section "待批准设备"
-      openclaw_devices_list_safe
-      echo
-      skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "刷新待批准设备" "重新加载 devices list"
-      skpl_ui_menu_item 2 "批准设备请求" "支持粘贴 device pairing required 报错"
-      skpl_ui_menu_item 3 "打开配对页" "在浏览器打开当前 WebUI 配对入口"
-      skpl_ui_menu_item 4 "查看日志最新ID" "优先关注最新 scope-upgrade requestId"
-      skpl_ui_menu_item 0 "返回上一级"
-      skpl_ui_footer_prompt "请输入你的选择: "
-      read -e device_choice
-
-      case "$device_choice" in
-        1)
-          echo
-          read -p "按回车返回菜单..."
-          ;;
-        2)
-          openclaw_device_pairing_approve
-          echo
-          read -p "按回车返回菜单..."
-          ;;
-        3)
-          openclaw_whatsapp_open_pairing_page
-          echo
-          read -p "按回车返回菜单..."
-          ;;
-        4)
-          latest_request_id=$(openclaw_latest_scope_upgrade_request_id 2>/dev/null || true)
-          if [ -n "$latest_request_id" ]; then
-            echo "日志最新 requestId: $latest_request_id"
-          else
-            echo "当前日志中未识别到 scope-upgrade requestId"
-          fi
-          echo
-          read -p "按回车返回菜单..."
-          ;;
-        0)
-          return 0
-          ;;
-        *)
-          echo "无效的选择，请重试。"
-          sleep 1
-          ;;
-      esac
-    done
+    openclaw_devices_list_cache_refresh
   }
 
   openclaw_print_whatsapp_diagnosis() {
@@ -5996,6 +6322,7 @@ PY
     skpl_ui_kv "凭据文件" "$(openclaw_whatsapp_has_session && echo 已存在 || echo 未生成)"
     skpl_ui_kv "默认凭据" "$auth_hint"
     skpl_ui_kv "WebUI入口" "$pair_url"
+    skpl_ui_kv "连接状态" "$(case "$(openclaw_whatsapp_status)" in connected) echo 已连接 ;; session_only) echo 已存在本地会话 ;; *) echo 未就绪 ;; esac)"
     echo
     echo "建议："
     echo "1. 18789 是本地网关端口，10808 或自定义端口用于 WhatsApp 出站代理。"
@@ -6065,11 +6392,17 @@ EOF
     skpl_ui_section "国内直连与 WhatsApp"
     skpl_ui_kv "国内直连" "$provider_summary"
     openclaw_network_diagnosis_status "凭据文件" "$whatsapp_session"
-    if openclaw_whatsapp_has_session; then
-      openclaw_network_diagnosis_status "WhatsApp探测" "已存在本地会话"
-    else
-      openclaw_network_diagnosis_status "WhatsApp探测" "未就绪"
-    fi
+    case "$(openclaw_whatsapp_status)" in
+      connected)
+        openclaw_network_diagnosis_status "WhatsApp探测" "已连接"
+        ;;
+      session_only)
+        openclaw_network_diagnosis_status "WhatsApp探测" "已存在本地会话"
+        ;;
+      *)
+        openclaw_network_diagnosis_status "WhatsApp探测" "未就绪"
+        ;;
+    esac
     echo
     read -p "按回车返回菜单..."
   }
@@ -6091,22 +6424,34 @@ EOF
     return $?
   }
 
+  openclaw_whatsapp_show_login_log() {
+    local login_log="/root/.skpl/openclaw-whatsapp-login.log"
+    if [ ! -f "$login_log" ]; then
+      echo "暂无 WhatsApp 登录日志。"
+      return 0
+    fi
+    python3 - "$login_log" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+    lines = f.readlines()
+for line in lines[-120:]:
+    print(line.rstrip())
+PY
+  }
+
   openclaw_whatsapp_repair_flow() {
     echo "正在执行 WhatsApp 通道修复..."
     refresh_runtime_proxy_env
-    openclaw_ensure_local_gateway_config >/dev/null 2>&1 || true
-    openclaw_webui_ensure_local_origins >/dev/null 2>&1 || true
     openclaw_prepare_whatsapp_channel || return 1
     if ! openclaw_whatsapp_has_session; then
       openclaw_whatsapp_clear_broken_state
     fi
-    if ! openclaw_ensure_gateway_ready; then
-      echo "❌ 网关未就绪，WhatsApp 无法生成有效连接页面。"
-      return 1
-    fi
     openclaw_print_whatsapp_diagnosis
     echo
     echo "已为 WhatsApp 通道写入代理：$(openclaw_channel_http_proxy_url)"
+    echo "登录会在二维码阶段临时暂停 gateway，待扫码完成后再恢复运行。"
+    echo "请在二维码出现后直接扫码，并等待登录命令自然返回。"
     echo
     openclaw_whatsapp_login_via_cli
     return $?
@@ -6118,11 +6463,11 @@ EOF
       openclaw_print_whatsapp_diagnosis
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "一键修复并执行登录" "修复后执行官方登录，再去刷新并批准最新 requestId"
+      skpl_ui_menu_item 1 "一键修复并执行登录" "保留代理与必要修复后执行官方登录"
       skpl_ui_menu_item 2 "WhatsApp 官方 QR 登录" "执行 channels login --channel whatsapp"
-      skpl_ui_menu_item 3 "仅打开 WebUI 页" "仅用于控制台访问与设备授权"
+      skpl_ui_menu_item 3 "仅打开 WebUI 页" "仅在登录后用于控制台访问与查看待处理请求"
       skpl_ui_menu_item 4 "批准连接码" "输入 WhatsApp 收到的配对码"
-      skpl_ui_menu_item 5 "设备配对授权" "独立处理 device pairing required"
+      skpl_ui_menu_item 5 "查看登录日志" "读取最近一次 WhatsApp 登录输出"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e wa_choice
@@ -6136,7 +6481,8 @@ EOF
         2)
           openclaw_whatsapp_open_qr_connection
           echo
-          echo "若随后日志出现 scope-upgrade pending approval，请立刻进入【设备配对授权】刷新列表，并批准最新 requestId。"
+          echo "登录命令返回后，请先执行 openclaw channels status 确认绑定状态。"
+          echo "若 WebUI 仍提示待审批，再进入 WebUI 菜单查看当前 devices list。"
           echo
           read -p "按回车返回菜单..."
           ;;
@@ -6165,7 +6511,9 @@ EOF
           break_end
           ;;
         5)
-          openclaw_device_pairing_menu
+          openclaw_whatsapp_show_login_log
+          echo
+          read -p "按回车返回菜单..."
           ;;
         0)
           return 0
@@ -6187,7 +6535,7 @@ EOF
     fi
     openclaw config set channels.telegram.enabled true --json >/dev/null 2>&1 || true
     openclaw_apply_channel_proxy_config "telegram"
-    start_gateway nosleep 5 >/dev/null 2>&1 || true
+    openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
     return 0
   }
 
@@ -6227,6 +6575,38 @@ EOF
     return 1
   }
 
+  openclaw_channel_tools_menu() {
+    local choice
+    while true; do
+      clear
+      skpl_ui_header "渠道诊断与高级设置" "官方 probe、诊断与网关参数入口"
+      echo
+      skpl_ui_section "诊断"
+      skpl_ui_menu_item 1 "官方诊断中心" "status / gateway status / doctor / probe / logs"
+      skpl_ui_menu_item 2 "单渠道 Probe" "按渠道执行 channels status --probe"
+      echo
+      skpl_ui_section "高级设置"
+      skpl_ui_menu_item 3 "WhatsApp 高级设置" "dmPolicy、replyToMode、historyLimit 等"
+      skpl_ui_menu_item 4 "Telegram 高级设置" "streaming、timeout、proxy 等"
+      skpl_ui_menu_item 5 "Gateway 高级设置" "reload 与健康监控参数"
+      skpl_ui_menu_item 0 "返回上一级"
+      skpl_ui_footer_prompt "请选择: "
+      read -e choice
+      case "$choice" in
+        1) openclaw_run_official_diagnostics ;;
+        2) openclaw_probe_single_channel_menu ;;
+        3) openclaw_whatsapp_advanced_menu ;;
+        4) openclaw_telegram_advanced_menu ;;
+        5) openclaw_gateway_advanced_menu ;;
+        0) return 0 ;;
+        *)
+          echo "无效的选择，请重试。"
+          sleep 1
+          ;;
+      esac
+    done
+  }
+
   openclaw_prepare_discord_channel() {
     if ! openclaw_ensure_channel_plugin_enabled "discord"; then
       if ! openclaw_ensure_channel_plugin_enabled "openclaw-discord"; then
@@ -6236,7 +6616,7 @@ EOF
     fi
     openclaw config set channels.discord.enabled true --json >/dev/null 2>&1 || true
     openclaw_apply_channel_proxy_config "discord"
-    start_gateway nosleep 5 >/dev/null 2>&1 || true
+    openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
     return 0
   }
 
@@ -6249,7 +6629,7 @@ EOF
     fi
     openclaw config set channels.slack.enabled true --json >/dev/null 2>&1 || true
     openclaw_apply_channel_proxy_config "slack"
-    start_gateway nosleep 5 >/dev/null 2>&1 || true
+    openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
     return 0
   }
 
@@ -6295,6 +6675,7 @@ EOF
   }
 
   openclaw_show_bot_local_status_block() {
+    openclaw_probe_cache_refresh >/dev/null 2>&1 || true
     if openclaw_memory_cache_fresh "$SKPL_BOT_STATUS_CACHE_FILE" 20 && [ -s "$SKPL_BOT_STATUS_CACHE_FILE" ]; then
       sed -n '1,80p' "$SKPL_BOT_STATUS_CACHE_FILE"
       return 0
@@ -6303,6 +6684,50 @@ EOF
     output=$(openclaw_render_bot_local_status_block_raw)
     printf '%s\n' "$output" > "$SKPL_BOT_STATUS_CACHE_FILE"
     printf '%s\n' "$output"
+  }
+
+  openclaw_whatsapp_status_label() {
+    local probe_status
+    probe_status=$(openclaw_probe_status_from_cache "whatsapp" 2>/dev/null || true)
+    case "$probe_status" in
+      connected) echo "已连接" ; return 0 ;;
+      pending) echo "待扫码或待批准" ; return 0 ;;
+      error) echo "异常" ; return 0 ;;
+      disabled) echo "未启用" ; return 0 ;;
+      configured) echo "已配置" ; return 0 ;;
+    esac
+    case "$(openclaw_whatsapp_status)" in
+      connected) echo "已连接" ;;
+      session_only) echo "已存在本地会话" ;;
+      *) echo "未就绪" ;;
+    esac
+  }
+
+  openclaw_telegram_status_text() {
+    local enabled cfg connected has_token probe_status
+    enabled=$(openclaw_json_get_bool '.channels.telegram.enabled // .plugins.entries.telegram.enabled // false')
+    cfg=$(openclaw_channel_has_cfg "telegram")
+    connected="false"
+    [ -d "${HOME}/.openclaw/telegram" ] && connected="true"
+    has_token=$(openclaw_json_get_string '.channels.telegram.botToken // empty' 2>/dev/null || true)
+    probe_status=$(openclaw_probe_status_from_cache "telegram" 2>/dev/null || true)
+    if [ "$enabled" != "true" ]; then
+      echo "未启用"
+    elif [ "$probe_status" = "connected" ]; then
+      echo "已连接"
+    elif [ "$probe_status" = "pending" ]; then
+      echo "待批准"
+    elif [ "$probe_status" = "error" ]; then
+      echo "异常"
+    elif [ "$connected" = "true" ]; then
+      echo "已连接"
+    elif [ -n "$has_token" ] && [ "$cfg" = "true" ]; then
+      echo "已配置待批准"
+    elif [ "$cfg" = "true" ]; then
+      echo "已配置"
+    else
+      echo "未配置"
+    fi
   }
 
   openclaw_render_bot_local_status_block_raw() {
@@ -6324,7 +6749,11 @@ EOF
     if [ "$tg_enabled" = "true" ] && [ "$json_ok" != "true" ]; then
       tg_abnormal="true"
     fi
-    tg_status=$(openclaw_bot_status_text "$tg_enabled" "$tg_cfg" "$tg_connected" "$tg_abnormal")
+    if [ "$tg_abnormal" = "true" ]; then
+      tg_status="异常"
+    else
+      tg_status=$(openclaw_telegram_status_text)
+    fi
 
     local feishu_enabled feishu_cfg feishu_connected feishu_abnormal feishu_status
     feishu_enabled=$(openclaw_json_get_bool '.plugins.entries.feishu.enabled // .plugins.entries["openclaw-lark"].enabled // .channels.feishu.enabled // .channels.lark.enabled // false')
@@ -6362,11 +6791,14 @@ EOF
     if [ "$wa_enabled" = "true" ] && [ "$json_ok" != "true" ]; then
       wa_abnormal="true"
     fi
-    if [ "$wa_connected" != "true" ] && [ "$wa_enabled" = "true" ] && [ "$wa_cfg" = "true" ] && { openclaw_plugin_local_installed "whatsapp" || openclaw_plugin_local_installed "openclaw-whatsapp"; }; then
-      wa_status="已配置"
-    fi
-    if [ -z "$wa_status" ]; then
-      wa_status=$(openclaw_bot_status_text "$wa_enabled" "$wa_cfg" "$wa_connected" "$wa_abnormal")
+    if [ "$wa_abnormal" = "true" ]; then
+      wa_status="异常"
+    elif [ "$wa_enabled" != "true" ]; then
+      wa_status="未启用"
+    elif [ "$wa_cfg" = "true" ]; then
+      wa_status=$(openclaw_whatsapp_status_label)
+    else
+      wa_status="未配置"
     fi
 
     local dc_enabled dc_cfg dc_connected dc_abnormal dc_status
@@ -6454,7 +6886,7 @@ EOF
       echo "本地规则：飞书 / QQ / 微信保持原有接入逻辑。"
       echo "官方规则：WebUI 新浏览器或新设备访问可能需要一次设备审批。"
       echo "设备规则：device pairing required 属于 OpenClaw 设备授权，和 WhatsApp 扫码关联是两条独立流程。"
-      echo "登录规则：WhatsApp 官方扫码登录仍可使用，但若触发 scope-upgrade，需要批准最新 requestId。"
+      echo "登录规则：WhatsApp 请先执行官方扫码登录，命令返回后优先检查 openclaw channels status。"
       echo
       skpl_ui_section "操作"
       skpl_ui_menu_item 1 "Telegram 对接" "自动写入代理并手动批准连接码"
@@ -6464,6 +6896,7 @@ EOF
       skpl_ui_menu_item 5 "Slack 对接" "自动写入代理并启用渠道"
       skpl_ui_menu_item 6 "QQ 对接" "查看官方接入地址"
       skpl_ui_menu_item 7 "微信对接" "安装 Weixin CLI"
+      skpl_ui_menu_item 8 "渠道诊断与高级设置" "官方诊断、单渠道 Probe、Telegram/WhatsApp/Gateway 设置"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e bot_choice
@@ -6477,7 +6910,7 @@ EOF
           npx -y @larksuite/openclaw-lark install
           openclaw config set channels.feishu.streaming true
           openclaw config set channels.feishu.requireMention true --json
-          start_gateway nosleep 5 >/dev/null 2>&1 || true
+          openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
           break_end
           ;;
         3)
@@ -6502,8 +6935,11 @@ EOF
           ;;
         7)
           npx -y @tencent-weixin/openclaw-weixin-cli@latest install
-          start_gateway nosleep 5 >/dev/null 2>&1 || true
+          openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
           break_end
+          ;;
+        8)
+          openclaw_channel_tools_menu
           ;;
         0)
           return 0
@@ -6561,10 +6997,34 @@ EOF
           *) return 1 ;;
         esac
         ;;
+      bundle)
+        case "$rel" in
+          openclaw-root/openclaw.json|openclaw-root/workspace/*|openclaw-root/extensions/*|openclaw-root/skills/*|openclaw-root/prompts/*|openclaw-root/tools/*|openclaw-root/telegram/*|openclaw-root/feishu/*|openclaw-root/whatsapp/*|openclaw-root/discord/*|openclaw-root/slack/*|openclaw-root/qqbot/*|openclaw-root/logs/*|agents/*/MEMORY.md|agents/*/memory/*|hybrid-memory/*|evomap/*|evomap-memory/*|evomap-backups/*|memory-config/openclaw.json) return 0 ;;
+          *) return 1 ;;
+        esac
+        ;;
       *)
         return 1
         ;;
     esac
+  }
+
+  openclaw_read_import_path() {
+    local prompt_text="$1"
+    local backup_root user_input archive_path
+    backup_root=$(openclaw_backup_root)
+    mkdir -p "$backup_root"
+    echo "备份目录: $backup_root"
+    echo "步骤 1: 把压缩包放到这个目录。"
+    echo "步骤 2: 这里只输入文件名，或直接输入完整路径。"
+    read -e -p "${prompt_text}: " user_input
+    [ -z "$user_input" ] && return 1
+    if [[ "$user_input" == /* ]]; then
+      archive_path="$user_input"
+    else
+      archive_path="$backup_root/$user_input"
+    fi
+    printf '%s\n' "$archive_path"
   }
 
   openclaw_pack_backup_archive() {
@@ -6723,6 +7183,190 @@ if os.path.isdir(agents_root):
     rm -rf "$tmp_unpack"; echo "✅ 记忆全量还原完成"; break_end
   }
 
+  openclaw_bundle_backup_export() {
+    send_stats "OpenClaw统一全量备份"
+    local backup_root ts out_file tmp_payload config_file openclaw_root workspaces_json
+    backup_root=$(openclaw_backup_root)
+    ts=$(date +%Y%m%d-%H%M%S)
+    out_file="$backup_root/openclaw-bundle-full-${ts}.tar.gz"
+    mkdir -p "$backup_root"
+    tmp_payload=$(mktemp -d) || return 1
+    config_file=$(openclaw_get_config_file)
+    openclaw_root=$(dirname "$config_file")
+
+    if [ -d "$openclaw_root" ]; then
+      mkdir -p "$tmp_payload/openclaw-root"
+      for d in workspace extensions skills prompts tools telegram feishu whatsapp discord slack qqbot logs; do
+        [ -e "$openclaw_root/$d" ] && cp -a "$openclaw_root/$d" "$tmp_payload/openclaw-root/"
+      done
+      [ -f "$openclaw_root/openclaw.json" ] && cp -a "$openclaw_root/openclaw.json" "$tmp_payload/openclaw-root/"
+    fi
+
+    workspaces_json=$(openclaw_get_all_agent_workspaces)
+    python3 -c "import json, sys, os, shutil;
+workspaces = json.loads(sys.argv[1]); root = sys.argv[2]
+for item in workspaces:
+    aid = item['id']; ws = item['ws']
+    if not os.path.isdir(ws):
+        continue
+    target_dir = os.path.join(root, 'agents', aid)
+    os.makedirs(target_dir, exist_ok=True)
+    for f in ['MEMORY.md', 'memory']:
+        src = os.path.join(ws, f)
+        if os.path.exists(src):
+            if os.path.isfile(src): shutil.copy2(src, target_dir)
+            else: shutil.copytree(src, os.path.join(target_dir, f), dirs_exist_ok=True)
+" "$workspaces_json" "$tmp_payload"
+
+    [ -d "$SKPL_HYBRID_MEMORY_ROOT" ] && cp -a "$SKPL_HYBRID_MEMORY_ROOT" "$tmp_payload/hybrid-memory"
+    [ -f "$(openclaw_memory_config_file)" ] && mkdir -p "$tmp_payload/memory-config" && cp -a "$(openclaw_memory_config_file)" "$tmp_payload/memory-config/openclaw.json"
+    [ -d "$EVOMAP_DIR" ] && cp -a "$EVOMAP_DIR" "$tmp_payload/evomap"
+    [ -d "$EVOMAP_MEMORY_DIR" ] && cp -a "$EVOMAP_MEMORY_DIR" "$tmp_payload/evomap-memory"
+    [ -d "$EVOMAP_BACKUP_DIR" ] && cp -a "$EVOMAP_BACKUP_DIR" "$tmp_payload/evomap-backups"
+
+    if ! find "$tmp_payload" -mindepth 1 -print -quit | grep -q .; then
+      echo "❌ 未找到可备份的数据"
+      rm -rf "$tmp_payload"
+      break_end
+      return 1
+    fi
+
+    if openclaw_pack_backup_archive "openclaw-bundle" "full" "$tmp_payload" "$out_file"; then
+      echo "✅ 统一全量备份完成: $out_file"
+      echo "包含: OpenClaw 项目、所有智能体记忆、记忆方案配置、混合记忆、EvoMap 目录与 EvoMap 备份目录。"
+      openclaw_offer_transfer_hint "$out_file"
+    else
+      echo "❌ 统一全量备份失败"
+    fi
+
+    rm -rf "$tmp_payload"
+    break_end
+  }
+
+  openclaw_bundle_backup_import() {
+    send_stats "OpenClaw统一全量还原"
+    local backup_root archive_path tmp_unpack pkg_dir config_file openclaw_root invalid valid_list workspaces_json
+    backup_root=$(openclaw_backup_root)
+    config_file=$(openclaw_get_config_file)
+    openclaw_root=$(dirname "$config_file")
+    mkdir -p "$openclaw_root"
+
+    skpl_ui_header "统一全量还原" "单压缩包恢复记忆、EvoMap 与项目配置"
+    echo "还原步骤："
+    echo "1. 把备份压缩包放到: $backup_root"
+    echo "2. 返回此菜单，输入文件名或完整路径"
+    echo "3. 面板会自动校验并还原"
+    skpl_ui_alert "danger" "该操作会覆盖现有记忆、EvoMap 与 OpenClaw 项目数据" "还原前会执行 manifest/sha256 校验，并在需要时停启 gateway。"
+    read -e -p "请输入确认词【我已知晓高风险并继续统一还原】后继续: " confirm_text
+    if [ "$confirm_text" != "我已知晓高风险并继续统一还原" ]; then
+      echo "❌ 确认词不匹配，已取消还原"
+      break_end
+      return 1
+    fi
+
+    archive_path=$(openclaw_read_import_path "请输入统一全量备份包文件名或路径")
+    [ -z "$archive_path" ] && { echo "❌ 未输入备份路径"; break_end; return 1; }
+
+    tmp_unpack=$(mktemp -d) || return 1
+    pkg_dir=$(openclaw_prepare_import_archive "openclaw-bundle" "$archive_path" "$tmp_unpack") || { rm -rf "$tmp_unpack"; break_end; return 1; }
+
+    invalid=0
+    valid_list=$(mktemp)
+    while IFS= read -r rel; do
+      [ -z "$rel" ] && continue
+      if ! openclaw_is_safe_relpath "$rel" || ! openclaw_restore_path_allowed bundle "$rel"; then
+        echo "❌ 检测到非法或越权路径: $rel"
+        invalid=1
+        break
+      fi
+      echo "$rel" >> "$valid_list"
+    done < "$pkg_dir/manifest.files"
+
+    if [ "$invalid" -ne 0 ]; then
+      rm -f "$valid_list"
+      rm -rf "$tmp_unpack"
+      echo "❌ 还原中止：存在不安全路径"
+      break_end
+      return 1
+    fi
+
+    if command -v openclaw >/dev/null 2>&1; then
+      echo "⏸️ 还原前停止 OpenClaw gateway..."
+      openclaw gateway stop >/dev/null 2>&1 || true
+    fi
+    evomap_stop_loop >/dev/null 2>&1 || true
+
+    workspaces_json=$(openclaw_get_all_agent_workspaces)
+    python3 - "$workspaces_json" "$pkg_dir/payload" "$openclaw_root" "$SKPL_HYBRID_MEMORY_ROOT" "$EVOMAP_DIR" "$EVOMAP_MEMORY_DIR" "$EVOMAP_BACKUP_DIR" <<'PY'
+import json, os, shutil, sys
+
+workspaces = {item['id']: item['ws'] for item in json.loads(sys.argv[1])}
+payload = sys.argv[2]
+openclaw_root = sys.argv[3]
+hybrid_root = sys.argv[4]
+evomap_dir = sys.argv[5]
+evomap_memory_dir = sys.argv[6]
+evomap_backup_dir = sys.argv[7]
+
+    def copy_replace(src, dest):
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if os.path.exists(dest):
+            backup = dest + '.pre-restore'
+            if os.path.exists(backup):
+                shutil.rmtree(backup, ignore_errors=True) if os.path.isdir(backup) else os.remove(backup)
+            shutil.move(dest, backup)
+        if os.path.isdir(src):
+            shutil.copytree(src, dest, dirs_exist_ok=False)
+        else:
+            shutil.copy2(src, dest)
+
+openclaw_src = os.path.join(payload, 'openclaw-root')
+if os.path.isdir(openclaw_src):
+    for name in os.listdir(openclaw_src):
+        copy_replace(os.path.join(openclaw_src, name), os.path.join(openclaw_root, name))
+
+agents_root = os.path.join(payload, 'agents')
+if os.path.isdir(agents_root):
+    for aid in os.listdir(agents_root):
+        ws = workspaces.get(aid)
+        if not ws:
+            continue
+        os.makedirs(ws, exist_ok=True)
+        src_agent_dir = os.path.join(agents_root, aid)
+        for name in os.listdir(src_agent_dir):
+            copy_replace(os.path.join(src_agent_dir, name), os.path.join(ws, name))
+
+for src_name, dest in [
+    ('hybrid-memory', hybrid_root),
+    ('evomap', evomap_dir),
+    ('evomap-memory', evomap_memory_dir),
+    ('evomap-backups', evomap_backup_dir),
+]:
+    src = os.path.join(payload, src_name)
+    if os.path.exists(src):
+        copy_replace(src, dest)
+
+memory_cfg = os.path.join(payload, 'memory-config', 'openclaw.json')
+if os.path.isfile(memory_cfg):
+    copy_replace(memory_cfg, os.path.expanduser('~/.openclaw/openclaw.json'))
+PY
+
+    if command -v openclaw >/dev/null 2>&1; then
+      echo "▶️ 还原后启动 OpenClaw gateway..."
+      openclaw_gateway_clear_sensitive_period
+      openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
+    fi
+    if [ -d "$EVOMAP_DIR" ]; then
+      evomap_start_loop >/dev/null 2>&1 || true
+    fi
+
+    rm -f "$valid_list"
+    rm -rf "$tmp_unpack"
+    echo "✅ 统一全量还原完成"
+    echo "已恢复: 记忆方案配置、所有智能体记忆、混合记忆、EvoMap 与 OpenClaw 项目配置。"
+    break_end
+  }
+
 
   openclaw_project_backup_export() {
     send_stats "OpenClaw项目备份"
@@ -6837,17 +7481,22 @@ if os.path.isdir(agents_root):
 
     if command -v openclaw >/dev/null 2>&1; then
       echo "⏸️ 还原前停止 OpenClaw gateway..."
-      openclaw gateway stop >/dev/null 2>&1
+      openclaw gateway stop >/dev/null 2>&1 || true
     fi
 
     while IFS= read -r rel; do
-      mkdir -p "$openclaw_root/$(dirname "$rel")"
-      cp -a "$pkg_dir/payload/$rel" "$openclaw_root/$rel"
+      if [ -d "$pkg_dir/payload/$rel" ]; then
+        openclaw_replace_path_from_backup "$pkg_dir/payload/$rel" "$openclaw_root/$rel"
+      else
+        mkdir -p "$openclaw_root/$(dirname "$rel")"
+        cp -a "$pkg_dir/payload/$rel" "$openclaw_root/$rel"
+      fi
     done < "$valid_list"
 
     if command -v openclaw >/dev/null 2>&1; then
       echo "▶️ 还原后启动 OpenClaw gateway..."
-      openclaw gateway start >/dev/null 2>&1
+      openclaw_gateway_clear_sensitive_period
+      openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
       sleep 2
       echo "🩺 gateway 健康检查："
       if openclaw_gateway_port_reachable || openclaw_gateway_process_running || openclaw_gateway_service_active; then
@@ -6865,7 +7514,9 @@ if os.path.isdir(agents_root):
 
   openclaw_backup_detect_type() {
     local file_name="$1"
-    if [[ "$file_name" == openclaw-memory-full-*.tar.gz ]]; then
+    if [[ "$file_name" == openclaw-bundle-full-*.tar.gz ]]; then
+      echo "统一全量备份文件"
+    elif [[ "$file_name" == openclaw-memory-full-*.tar.gz ]]; then
       echo "记忆备份文件"
     elif [[ "$file_name" == openclaw-project-*.tar.gz ]]; then
       echo "项目备份文件"
@@ -6884,7 +7535,7 @@ if os.path.isdir(agents_root):
 
   openclaw_backup_render_file_list() {
     local backup_root i file_name file_path file_type file_size file_time
-    local has_memory=0 has_project=0 has_other=0
+    local has_bundle=0 has_memory=0 has_project=0 has_other=0
     backup_root=$(openclaw_backup_root)
     openclaw_backup_collect_files
 
@@ -6897,11 +7548,25 @@ if os.path.isdir(agents_root):
     for i in "${!OPENCLAW_BACKUP_FILES[@]}"; do
       file_type=$(openclaw_backup_detect_type "${OPENCLAW_BACKUP_FILES[$i]}")
       case "$file_type" in
+        "统一全量备份文件") has_bundle=1 ;;
         "记忆备份文件") has_memory=1 ;;
         "项目备份文件") has_project=1 ;;
         "其他备份文件") has_other=1 ;;
       esac
     done
+
+    if [ "$has_bundle" -eq 1 ]; then
+      echo "统一全量备份文件"
+      for i in "${!OPENCLAW_BACKUP_FILES[@]}"; do
+        file_name="${OPENCLAW_BACKUP_FILES[$i]}"
+        file_type=$(openclaw_backup_detect_type "$file_name")
+        [ "$file_type" != "统一全量备份文件" ] && continue
+        file_path="$backup_root/$file_name"
+        file_size=$(ls -lh "$file_path" | awk '{print $5}')
+        file_time=$(date -d "$(stat -c %y "$file_path")" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || stat -c %y "$file_path" | awk '{print $1" "$2}')
+        printf "%s | %s | %s\n" "$file_name" "$file_size" "$file_time"
+      done
+    fi
 
     if [ "$has_memory" -eq 1 ]; then
       echo "记忆备份文件"
@@ -7232,7 +7897,7 @@ openclaw_memory_list_agents() {
   openclaw_memory_rebuild_index_safe() {
     local agent_id="${1:-main}"
     openclaw_memory_rebuild_index_single "$agent_id"
-    start_gateway nosleep 5 >/dev/null 2>&1 || true
+    openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
     echo "✅ 索引已重建并自动重启网关"
     echo ""
     openclaw_memory_render_status
@@ -7249,7 +7914,7 @@ openclaw_memory_list_agents() {
     done <<EOF
 $agent_lines
 EOF
-    start_gateway nosleep 5 >/dev/null 2>&1 || true
+    openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
     echo "✅ 索引已重建并自动重启网关"
     echo "✅ 已为 ${count} 个智能体重建索引"
     echo ""
@@ -8308,7 +8973,7 @@ PY
               done <<EOF
 $fl_agent_lines
 EOF
-              start_gateway nosleep 5 >/dev/null 2>&1 || true
+              openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
               echo "✅ 已对所有智能体执行 force 重建并自动重启网关"
             fi
           else
@@ -8433,7 +9098,7 @@ EOF
     fi
     echo "正在重启 OpenClaw Gateway..."
     if declare -F start_gateway >/dev/null 2>&1; then
-      start_gateway nosleep 5 >/dev/null 2>&1 || true
+      openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
     else
       openclaw gateway restart >/dev/null 2>&1 || {
         openclaw gateway stop >/dev/null 2>&1
@@ -9391,25 +10056,31 @@ openclaw_backup_restore_menu() {
     send_stats "OpenClaw备份与还原"
     while true; do
       clear
-      skpl_ui_header "备份与还原" "记忆与项目归档"
+      skpl_ui_header "备份与还原" "统一压缩包优先，兼容旧版分项备份"
       openclaw_backup_render_file_list
       echo
+      echo "推荐流程：先使用【统一全量备份】导出单个压缩包；还原时把压缩包放入备份目录后再执行统一还原。"
+      echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "备份记忆全量" "支持多智能体"
-      skpl_ui_menu_item 2 "还原记忆全量" "按包内容恢复"
-      skpl_ui_menu_item 3 "备份 OpenClaw 项目" "默认安全模式"
-      skpl_ui_menu_item_tone 4 "还原 OpenClaw 项目" "高级 / 高风险" "danger"
-      skpl_ui_menu_item_tone 5 "删除备份文件" "从备份目录移除归档" "danger"
+      skpl_ui_menu_item 1 "统一全量备份" "记忆方案、记忆数据、EvoMap、混合记忆、项目配置统一打包"
+      skpl_ui_menu_item_tone 2 "统一全量还原" "把压缩包放入备份目录后执行自动校验与还原" "danger"
+      skpl_ui_menu_item 3 "备份记忆全量" "旧版兼容：支持多智能体"
+      skpl_ui_menu_item 4 "还原记忆全量" "旧版兼容：按包内容恢复"
+      skpl_ui_menu_item 5 "备份 OpenClaw 项目" "旧版兼容：默认安全模式"
+      skpl_ui_menu_item_tone 6 "还原 OpenClaw 项目" "旧版兼容：高级 / 高风险" "danger"
+      skpl_ui_menu_item_tone 7 "删除备份文件" "从备份目录移除归档" "danger"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e backup_choice
 
       case "$backup_choice" in
-        1) openclaw_memory_backup_export ;;
-        2) openclaw_memory_backup_import ;;
-        3) openclaw_project_backup_export ;;
-        4) openclaw_project_backup_import ;;
-        5) openclaw_backup_delete_file ;;
+        1) openclaw_bundle_backup_export ;;
+        2) openclaw_bundle_backup_import ;;
+        3) openclaw_memory_backup_export ;;
+        4) openclaw_memory_backup_import ;;
+        5) openclaw_project_backup_export ;;
+        6) openclaw_project_backup_import ;;
+        7) openclaw_backup_delete_file ;;
         0) return 0 ;;
         *)
           echo "无效的选择，请重试。"
@@ -9712,7 +10383,7 @@ EOF
 
     echo
     skpl_ui_section "待处理设备授权"
-    echo "进入下方菜单后请先查看最新 devices list，再批准当前最新 requestId。"
+    echo "当前面板仅保留查看待处理请求。批准请在 root 终端手动执行官方命令。"
   }
 
 
@@ -9735,7 +10406,7 @@ EOF
     clear
     echo "访问地址:"
     echo "${proxy_scheme}://${yuming}/#token=$token"
-    echo "先访问URL触发设备ID，然后回车下一步进行配对。"
+    echo "先访问 URL 触发待处理请求，然后回车查看当前 devices list。"
     read
     echo -e "${gl_kjlan}正在加载设备列表……${gl_bai}"
     # 自动添加域名到 allowedOrigins
@@ -9747,7 +10418,7 @@ EOF
         if openclaw_webui_ensure_origins "${scheme}://127.0.0.1:${port}" "${scheme}://localhost:${port}" "${scheme}://127.0.0.1" "${scheme}://localhost" "$new_origin"; then
           echo -e "${gl_kjlan}已将域名 ${yuming} 加入 allowedOrigins 配置${gl_bai}"
           : > "$SKPL_WEBUI_DOMAIN_CACHE_FILE"
-          start_gateway nosleep 5 >/dev/null 2>&1 || true
+          openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
         else
           echo "❌ 写入 allowedOrigins 失败，请检查 OpenClaw 配置文件是否为合法 JSON。"
           return 1
@@ -9755,46 +10426,17 @@ EOF
       fi
     fi
 
-    if ! openclaw_panel_run_command_with_timeout 12 openclaw devices list; then
+    : > "$SKPL_DEVICES_LIST_CACHE_FILE" 2>/dev/null || true
+    if ! openclaw_devices_list_safe; then
       echo "❌ 设备列表加载超时或失败，请确认网关已就绪后重试。"
       return 1
     fi
-
-    local suggested_request_id
-    read -e -p "请输入 Request_Key: " Request_Key
-
-    [ -z "$Request_Key" ] && {
-      echo "Request_Key 不能为空"
-      return 1
-    }
-
-    if ! openclaw_request_id_is_pending "$Request_Key"; then
-      suggested_request_id=$(openclaw_best_current_request_id 2>/dev/null || true)
-      echo "❌ 这个 Request_Key 当前已经失效。"
-      if [ -n "$suggested_request_id" ]; then
-        echo "请批准当前有效 requestId: $suggested_request_id"
-      else
-        echo "当前 devices list 中没有可批准的 requestId，请先刷新列表或重新触发配对。"
-      fi
-      return 1
-    fi
-
-    local approve_exit_code approve_state
-    openclaw_panel_run_command_with_timeout 12 openclaw devices approve "$Request_Key"
-    approve_exit_code=$?
-    if [ "$approve_exit_code" -eq 0 ]; then
-      return 0
-    fi
-
-    approve_state=$(openclaw_panel_describe_timeout_result "$approve_exit_code")
-    if [ "$approve_state" = "timeout" ]; then
-      echo "⚠️ 批准命令在 12 秒内没有返回。"
-      echo "请立即重新执行 devices list，确认这个 requestId 是否已经从待处理列表中消失。"
-      return 1
-    fi
-
-    echo "❌ 设备授权失败，请稍后重试。"
-    return 1
+    echo
+    echo "请在 root 终端手动执行官方命令进行审批。"
+    echo "建议步骤："
+    echo "1. 复制上面 devices list 中当前有效的 requestId"
+    echo "2. 手动执行: openclaw devices approve <requestId>"
+    return 0
 
   }
 
@@ -9817,8 +10459,6 @@ EOF
       skpl_ui_menu_item 2 "添加域名访问" "自动写入 allowedOrigins"
       skpl_ui_menu_item_tone 3 "删除域名访问" "移除反向代理域名" "danger"
       skpl_ui_menu_item 4 "查看待处理请求" "显示 devices list 原始输出"
-      skpl_ui_menu_item 5 "批准设备请求" "按 requestId 执行 devices approve"
-      skpl_ui_menu_item 6 "预览最新请求" "执行 devices approve --latest"
       skpl_ui_menu_item 0 "退出"
       skpl_ui_footer_prompt "请选择: "
       read -e choice
@@ -9844,19 +10484,8 @@ EOF
           ;;
         4)
           echo
+          : > "$SKPL_DEVICES_LIST_CACHE_FILE" 2>/dev/null || true
           openclaw_devices_list_safe
-          echo
-          read -p "按回车返回菜单..."
-          ;;
-        5)
-          echo
-          openclaw_device_pairing_approve
-          echo
-          read -p "按回车返回菜单..."
-          ;;
-        6)
-          echo
-          openclaw_device_pairing_preview_latest
           echo
           read -p "按回车返回菜单..."
           ;;
@@ -9904,6 +10533,7 @@ EOF
         ;;
       13) openclaw_webui_menu ;;
       22) openclaw_network_diagnosis_menu ;;
+      23) openclaw_run_official_diagnostics ;;
       14) send_stats "TUI命令行对话"
         openclaw tui
         break_end
@@ -9957,7 +10587,7 @@ openclaw_enable_local_memory_auto() {
   openclaw_webui_reset_local_cache
   refresh_openclaw_gateway_service >/dev/null 2>&1 || true
   echo "提示：WebUI 首次浏览器访问可能需要设备审批。"
-  echo "提示：WhatsApp 官方扫码登录仍可使用；如出现 scope-upgrade pending approval，请批准最新 requestId。"
+  echo "提示：WhatsApp 官方扫码登录完成后，请先执行 openclaw channels status 确认绑定状态。"
 
   if [ "${SKPL_BATCH_MODE:-0}" = "1" ]; then
     echo "批量安装模式：跳过第 2 步网关启动，交由下一步网络优化统一接管。"
