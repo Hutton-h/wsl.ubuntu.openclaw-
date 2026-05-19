@@ -5743,13 +5743,29 @@ PY
     return 1
   }
 
+  openclaw_panel_run_command_with_timeout() {
+    local timeout_seconds="$1"
+    shift
+    timeout "$timeout_seconds" bash -lc '
+set -e
+if [ "$(id -u)" -eq 0 ]; then
+  exec "$@"
+fi
+if command -v sudo >/dev/null 2>&1; then
+  exec sudo "$@"
+fi
+echo "❌ 当前不是 root，且未检测到 sudo，无法执行需要 root 的面板操作。" >&2
+exit 1
+' _ "$@"
+  }
+
   openclaw_devices_list_safe() {
-    timeout 12 openclaw_panel_run_as_root openclaw devices list 2>/dev/null || true
+    openclaw_panel_run_command_with_timeout 12 openclaw devices list 2>/dev/null || true
   }
 
   openclaw_device_pairing_preview_latest() {
     echo "正在预览最新待处理设备请求..."
-    if timeout 12 openclaw_panel_run_as_root openclaw devices approve --latest; then
+    if openclaw_panel_run_command_with_timeout 12 openclaw devices approve --latest; then
       return 0
     fi
     echo "❌ 未能读取最新待处理请求，请先确认当前存在待批准设备。"
@@ -5758,7 +5774,7 @@ PY
 
   openclaw_pending_request_ids_summary() {
     local latest_request_id summary_ids
-    summary_ids=$(timeout 12 openclaw devices list 2>/dev/null | python3 - <<'PY'
+    summary_ids=$(openclaw_panel_run_command_with_timeout 12 openclaw devices list 2>/dev/null | python3 - <<'PY'
 import re
 import sys
 
@@ -5805,7 +5821,7 @@ PY
     [ -z "$request_id" ] && request_id="$raw_input"
 
     echo "正在批准设备请求: $request_id"
-    if timeout 12 openclaw_panel_run_as_root openclaw devices approve "$request_id"; then
+    if openclaw_panel_run_command_with_timeout 12 openclaw devices approve "$request_id"; then
       echo "✅ 设备授权已提交"
       return 0
     fi
@@ -9654,7 +9670,7 @@ EOF
       fi
     fi
 
-    if ! timeout 12 openclaw_panel_run_as_root openclaw devices list; then
+    if ! openclaw_panel_run_command_with_timeout 12 openclaw devices list; then
       echo "❌ 设备列表加载超时或失败，请确认网关已就绪后重试。"
       return 1
     fi
@@ -9666,7 +9682,7 @@ EOF
       return 1
     }
 
-    if ! timeout 12 openclaw_panel_run_as_root openclaw devices approve "$Request_Key"; then
+    if ! openclaw_panel_run_command_with_timeout 12 openclaw devices approve "$Request_Key"; then
       echo "❌ 设备授权超时或失败，请稍后重试。"
       return 1
     fi
