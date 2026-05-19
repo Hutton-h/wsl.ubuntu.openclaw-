@@ -615,8 +615,7 @@ openclaw_apply_channel_proxy_config() {
 openclaw_gateway_is_running() {
   openclaw_gateway_service_active \
     || openclaw_gateway_port_reachable \
-    || openclaw_gateway_process_running \
-    || openclaw_gateway_cli_status_ok
+    || openclaw_gateway_process_running
 }
 
 skpl_low_priority_prefix() {
@@ -2354,7 +2353,7 @@ openclaw_gateway_status_quick() {
   openclaw_gateway_is_running
 }
 
-openclaw_onboard_if_needed() {
+  openclaw_onboard_if_needed() {
   local config_file onboard_rc onboard_log
   config_file="$(openclaw_get_config_path_quick)"
   onboard_log="/root/.skpl/openclaw-onboard.log"
@@ -2375,6 +2374,8 @@ openclaw_onboard_if_needed() {
   if [ $onboard_rc -eq 0 ]; then
     log_msg "OpenClaw onboard 成功"
     echo "OpenClaw 初始化完成。"
+    echo "提示：官方新版 Control UI 在新浏览器或新设备上可能需要一次设备审批。"
+    echo "提示：WhatsApp 官方扫码登录仍然可用，但登录过程中若触发 scope-upgrade，需要再批准最新 requestId。"
     return 0
   fi
 
@@ -2428,13 +2429,15 @@ openclaw_ensure_gateway_ready() {
   return 1
 }
 
-openclaw_run_onboard_wizard() {
-  local onboard_log="/root/.skpl/openclaw-onboard.log"
-  echo "正在打开 OpenClaw 配置向导..."
-  echo "配置向导日志: ${onboard_log}"
-  : > "$onboard_log"
-  openclaw onboard --install-daemon 2>&1 | tee -a "$onboard_log"
-}
+  openclaw_run_onboard_wizard() {
+    local onboard_log="/root/.skpl/openclaw-onboard.log"
+    echo "正在打开 OpenClaw 配置向导..."
+    echo "配置向导日志: ${onboard_log}"
+    echo "提示：向导完成后，WebUI 首次浏览器访问可能需要设备审批。"
+    echo "提示：WhatsApp 官方扫码登录后若出现 scope-upgrade pending approval，请刷新 devices list 并批准最新 requestId。"
+    : > "$onboard_log"
+    openclaw onboard --install-daemon 2>&1 | tee -a "$onboard_log"
+  }
 
 openclaw_memory_prepare() {
   local model_name model_dir model_path
@@ -3088,7 +3091,7 @@ openclaw_panel_menu() {
     skpl_ui_menu_item 8 "插件管理" "扩展插件"
     skpl_ui_menu_item 9 "技能管理" "导入和管理技能"
     skpl_ui_menu_item 10 "编辑主配置" "openclaw.json"
-    skpl_ui_menu_item 11 "配置向导" "重新进入 onboard"
+      skpl_ui_menu_item 11 "配置向导" "重新进入 onboard，并同步新版设备审批说明"
 
     echo
       skpl_ui_section "运行与数据"
@@ -3516,6 +3519,8 @@ PY
     openclaw_onboard_if_needed
     start_gateway
     openclaw_webui_reset_local_cache
+    echo "提示：WebUI 在 127.0.0.1 / localhost 以外的浏览器入口通常需要一次设备审批。"
+    echo "提示：WhatsApp 仍走官方扫码登录；若扫码后提示 scope-upgrade pending approval，请批准最新 requestId。"
     refresh_panel_overview_cache >/dev/null 2>&1 || true
     add_app_id
     break_end
@@ -3547,6 +3552,24 @@ PY
     openclaw gateway status
     openclaw logs
     break_end
+  }
+
+  openclaw_latest_scope_upgrade_request_id() {
+    timeout 12 openclaw logs 2>/dev/null | python3 - <<'PY'
+import re
+import sys
+
+latest = ''
+for line in sys.stdin.read().splitlines():
+    if 'scope-upgrade' not in line and 'pending approval' not in line:
+        continue
+    matches = re.findall(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}\b', line)
+    if matches:
+        latest = matches[-1]
+
+if latest:
+    print(latest)
+PY
   }
 
 
@@ -5721,7 +5744,8 @@ PY
   }
 
   openclaw_pending_request_ids_summary() {
-    timeout 12 openclaw devices list 2>/dev/null | python3 - <<'PY'
+    local latest_request_id summary_ids
+    summary_ids=$(timeout 12 openclaw devices list 2>/dev/null | python3 - <<'PY'
 import re
 import sys
 
@@ -5736,13 +5760,30 @@ if ids:
 else:
     print('当前未识别到待处理 requestId')
 PY
+    )
+    latest_request_id=$(openclaw_latest_scope_upgrade_request_id 2>/dev/null || true)
+    if [ -n "$latest_request_id" ] && [ "$summary_ids" != "当前未识别到待处理 requestId" ]; then
+      printf '%s (日志最新: %s)\n' "$summary_ids" "$latest_request_id"
+      return 0
+    fi
+    if [ -n "$latest_request_id" ] && [ "$summary_ids" = "当前未识别到待处理 requestId" ]; then
+      printf '当前未识别到待处理 requestId (日志最新: %s)\n' "$latest_request_id"
+      return 0
+    fi
+    printf '%s\n' "$summary_ids"
   }
 
   openclaw_device_pairing_approve() {
-    local raw_input request_id
+    local raw_input request_id latest_request_id
     echo "当前待处理请求："
     openclaw_devices_list_safe
     echo
+    latest_request_id=$(openclaw_latest_scope_upgrade_request_id 2>/dev/null || true)
+    if [ -n "$latest_request_id" ]; then
+      echo "日志最新 requestId: $latest_request_id"
+      echo "建议优先批准这个 requestId。"
+      echo
+    fi
     echo "可直接粘贴完整报错，例如: device pairing required (requestId: xxxx)"
     echo "也可直接输入 Request_Key / requestId。"
     read -e -p "请输入待批准的设备请求: " raw_input
@@ -5762,9 +5803,15 @@ PY
 
   openclaw_device_pairing_menu() {
     while true; do
+      local latest_request_id
       clear
       skpl_ui_header "设备配对授权" "独立于 WhatsApp/Telegram 等渠道连接，用于批准 OpenClaw 设备访问"
       echo "当前配对页地址：$(openclaw_whatsapp_pairing_url)"
+      echo "说明：若日志里出现 scope-upgrade，新 requestId 会替换旧 requestId。批准前请先刷新列表。"
+      latest_request_id=$(openclaw_latest_scope_upgrade_request_id 2>/dev/null || true)
+      if [ -n "$latest_request_id" ]; then
+        echo "日志最新 requestId：$latest_request_id"
+      fi
       echo
       skpl_ui_section "待批准设备"
       openclaw_devices_list_safe
@@ -5773,6 +5820,7 @@ PY
       skpl_ui_menu_item 1 "刷新待批准设备" "重新加载 devices list"
       skpl_ui_menu_item 2 "批准设备请求" "支持粘贴 device pairing required 报错"
       skpl_ui_menu_item 3 "打开配对页" "在浏览器打开当前 WebUI 配对入口"
+      skpl_ui_menu_item 4 "查看日志最新ID" "优先关注最新 scope-upgrade requestId"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e device_choice
@@ -5789,6 +5837,16 @@ PY
           ;;
         3)
           openclaw_whatsapp_open_pairing_page
+          echo
+          read -p "按回车返回菜单..."
+          ;;
+        4)
+          latest_request_id=$(openclaw_latest_scope_upgrade_request_id 2>/dev/null || true)
+          if [ -n "$latest_request_id" ]; then
+            echo "日志最新 requestId: $latest_request_id"
+          else
+            echo "当前日志中未识别到 scope-upgrade requestId"
+          fi
           echo
           read -p "按回车返回菜单..."
           ;;
@@ -5946,7 +6004,7 @@ EOF
       openclaw_print_whatsapp_diagnosis
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "一键修复并执行登录" "修复网关、代理与凭据状态"
+      skpl_ui_menu_item 1 "一键修复并执行登录" "修复后执行官方登录，再去刷新并批准最新 requestId"
       skpl_ui_menu_item 2 "WhatsApp 官方 QR 登录" "执行 channels login --channel whatsapp"
       skpl_ui_menu_item 3 "仅打开 WebUI 页" "仅用于控制台访问与设备授权"
       skpl_ui_menu_item 4 "批准连接码" "输入 WhatsApp 收到的配对码"
@@ -5963,6 +6021,8 @@ EOF
           ;;
         2)
           openclaw_whatsapp_open_qr_connection
+          echo
+          echo "若随后日志出现 scope-upgrade pending approval，请立刻进入【设备配对授权】刷新列表，并批准最新 requestId。"
           echo
           read -p "按回车返回菜单..."
           ;;
@@ -6278,7 +6338,9 @@ EOF
       echo
       echo "代理规则：Telegram / WhatsApp / Discord / Slack 自动使用安装时输入的代理端口。"
       echo "本地规则：飞书 / QQ / 微信保持原有接入逻辑。"
+      echo "官方规则：WebUI 新浏览器或新设备访问可能需要一次设备审批。"
       echo "设备规则：device pairing required 属于 OpenClaw 设备授权，和 WhatsApp 扫码关联是两条独立流程。"
+      echo "登录规则：WhatsApp 官方扫码登录仍可使用，但若触发 scope-upgrade，需要批准最新 requestId。"
       echo
       skpl_ui_section "操作"
       skpl_ui_menu_item 1 "Telegram 对接" "自动写入代理并手动批准连接码"
@@ -6674,7 +6736,11 @@ if os.path.isdir(agents_root):
       openclaw gateway start >/dev/null 2>&1
       sleep 2
       echo "🩺 gateway 健康检查："
-      openclaw gateway status || true
+      if openclaw_gateway_port_reachable || openclaw_gateway_process_running || openclaw_gateway_service_active; then
+        echo "gateway 已启动"
+      else
+        echo "gateway 状态未就绪，请稍后手动检查"
+      fi
     fi
 
     rm -f "$valid_list"
@@ -9532,7 +9598,7 @@ EOF
 
     echo
     skpl_ui_section "待处理设备授权"
-    echo "进入下方菜单后可按需查看 devices list 与批准 requestId。"
+    echo "进入下方菜单后请先查看最新 devices list，再批准当前最新 requestId。"
   }
 
 
@@ -9736,7 +9802,7 @@ openclaw_enable_local_memory_auto() {
   echo "后台日志: ${bootstrap_log}"
 }
 
-install_openclaw_direct() {
+  install_openclaw_direct() {
   echo "开始直装 OpenClaw..."
   install git jq
   install_node_and_tools
@@ -9752,6 +9818,8 @@ install_openclaw_direct() {
   openclaw_ensure_local_gateway_config >/dev/null 2>&1 || true
   openclaw_webui_reset_local_cache
   refresh_openclaw_gateway_service >/dev/null 2>&1 || true
+  echo "提示：WebUI 首次浏览器访问可能需要设备审批。"
+  echo "提示：WhatsApp 官方扫码登录仍可使用；如出现 scope-upgrade pending approval，请批准最新 requestId。"
 
   if [ "${SKPL_BATCH_MODE:-0}" = "1" ]; then
     echo "批量安装模式：跳过第 2 步网关启动，交由下一步网络优化统一接管。"
