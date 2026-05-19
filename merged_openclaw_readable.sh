@@ -5759,6 +5759,21 @@ exit 1
 ' _ "$@"
   }
 
+  openclaw_panel_describe_timeout_result() {
+    local exit_code="$1"
+    case "$exit_code" in
+      0)
+        echo "success"
+        ;;
+      124)
+        echo "timeout"
+        ;;
+      *)
+        echo "error"
+        ;;
+    esac
+  }
+
   openclaw_devices_list_safe() {
     openclaw_panel_run_command_with_timeout 12 openclaw devices list 2>/dev/null || true
   }
@@ -5853,7 +5868,7 @@ PY
   }
 
   openclaw_device_pairing_approve() {
-    local raw_input request_id latest_request_id suggested_request_id
+    local raw_input request_id latest_request_id suggested_request_id approve_exit_code approve_state
     echo "当前待处理请求："
     openclaw_devices_list_safe
     echo
@@ -5882,9 +5897,18 @@ PY
     fi
 
     echo "正在批准设备请求: $request_id"
-    if openclaw_panel_run_command_with_timeout 12 openclaw devices approve "$request_id"; then
+    openclaw_panel_run_command_with_timeout 12 openclaw devices approve "$request_id"
+    approve_exit_code=$?
+    if [ "$approve_exit_code" -eq 0 ]; then
       echo "✅ 设备授权已提交"
       return 0
+    fi
+
+    approve_state=$(openclaw_panel_describe_timeout_result "$approve_exit_code")
+    if [ "$approve_state" = "timeout" ]; then
+      echo "⚠️ 批准命令在 12 秒内没有返回。"
+      echo "请立即重新执行 devices list，确认这个 requestId 是否已经从待处理列表中消失。"
+      return 1
     fi
 
     echo "❌ 设备授权失败，请先确认该 requestId 仍然有效。"
@@ -9755,10 +9779,22 @@ EOF
       return 1
     fi
 
-    if ! openclaw_panel_run_command_with_timeout 12 openclaw devices approve "$Request_Key"; then
-      echo "❌ 设备授权超时或失败，请稍后重试。"
+    local approve_exit_code approve_state
+    openclaw_panel_run_command_with_timeout 12 openclaw devices approve "$Request_Key"
+    approve_exit_code=$?
+    if [ "$approve_exit_code" -eq 0 ]; then
+      return 0
+    fi
+
+    approve_state=$(openclaw_panel_describe_timeout_result "$approve_exit_code")
+    if [ "$approve_state" = "timeout" ]; then
+      echo "⚠️ 批准命令在 12 秒内没有返回。"
+      echo "请立即重新执行 devices list，确认这个 requestId 是否已经从待处理列表中消失。"
       return 1
     fi
+
+    echo "❌ 设备授权失败，请稍后重试。"
+    return 1
 
   }
 
