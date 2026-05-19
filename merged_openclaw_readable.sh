@@ -537,35 +537,40 @@ openclaw_gateway_process_running() {
   pgrep -f "openclaw-gateway|dist/index\.js.*gateway|node .*openclaw.*gateway|openclaw[[:space:]]+gateway" >/dev/null 2>&1
 }
 
-openclaw_whatsapp_proxy_host() {
-  local active_proxy port host
+openclaw_channel_proxy_endpoint() {
+  local port active_proxy host
   port="$(skpl_effective_proxy_port)"
   active_proxy=$(resolve_active_proxy "$port" 2>/dev/null || true)
   if [ -n "$active_proxy" ]; then
-    printf '%s\n' "${active_proxy%%:*}"
+    printf '%s\n' "$active_proxy"
     return 0
   fi
 
-  host=$(getent ahostsv4 host.docker.internal 2>/dev/null | awk 'NR==1{print $1}')
-  if [ -n "$host" ]; then
-    printf '%s\n' "$host"
-    return 0
+  if openclaw_is_wsl; then
+    host=$(getent ahostsv4 host.docker.internal 2>/dev/null | awk 'NR==1{print $1}')
+    if [ -n "$host" ]; then
+      printf '%s:%s\n' "$host" "$port"
+      return 0
+    fi
+
+    host=$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf 2>/dev/null)
+    if [ -n "$host" ]; then
+      printf '%s:%s\n' "$host" "$port"
+      return 0
+    fi
+
+    host=$(ip route 2>/dev/null | awk '/^default /{print $3; exit}')
+    if [ -n "$host" ]; then
+      printf '%s:%s\n' "$host" "$port"
+      return 0
+    fi
   fi
 
-  host=$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf 2>/dev/null)
-  if [ -n "$host" ]; then
-    printf '%s\n' "$host"
-    return 0
-  fi
-
-  printf '%s\n' "127.0.0.1"
+  printf '127.0.0.1:%s\n' "$port"
 }
 
-openclaw_whatsapp_proxy_url() {
-  local port host
-  port="$(skpl_effective_proxy_port)"
-  host="$(openclaw_whatsapp_proxy_host)"
-  printf 'http://%s:%s\n' "$host" "$port"
+openclaw_channel_http_proxy_url() {
+  printf 'http://%s\n' "$(openclaw_channel_proxy_endpoint)"
 }
 
 openclaw_channel_uses_install_proxy() {
@@ -585,10 +590,10 @@ openclaw_apply_channel_proxy_config() {
   if ! openclaw_channel_uses_install_proxy "$channel"; then
     return 0
   fi
-  proxy_url="$(openclaw_whatsapp_proxy_url)"
+  proxy_url="$(openclaw_channel_http_proxy_url)"
   openclaw config set "channels.${channel}.proxy" "$proxy_url" >/dev/null 2>&1 || true
   openclaw config set "channels.${channel}.proxyUrl" "$proxy_url" >/dev/null 2>&1 || true
-  openclaw config set "channels.${channel}.socksProxy" "$proxy_url" >/dev/null 2>&1 || true
+  openclaw config unset "channels.${channel}.socksProxy" >/dev/null 2>&1 || true
   return 0
 }
 
@@ -1223,11 +1228,6 @@ npm_query_openclaw_latest_version() {
   return 1
 }
 
-configure_openclaw_git_transport() {
-  git config --global url."https://github.com/".insteadOf ssh://git@github.com/ >/dev/null 2>&1 || true
-  git config --global url."https://github.com/".insteadOf git@github.com: >/dev/null 2>&1 || true
-}
-
 install_openclaw_global() {
   local country="unknown"
   local preferred_registry="https://registry.npmjs.org"
@@ -1245,7 +1245,6 @@ install_openclaw_global() {
     fi
   fi
 
-  configure_openclaw_git_transport
   npm config set registry "$preferred_registry" >/dev/null 2>&1 || true
   npm config set fund false >/dev/null 2>&1 || true
   npm config set audit false >/dev/null 2>&1 || true
@@ -5146,7 +5145,7 @@ PYTHON_EOF
 
           if echo "$plugin_list" | grep -qw "$plugin_id" && echo "$plugin_list" | grep "$plugin_id" | grep -q "disabled"; then
             echo "💡 插件 [$plugin_id] 已预装，正在激活..."
-            if openclaw plugins enable "$plugin_id"; then
+            if openclaw_plugin_exec_with_core_sync "enable" "$plugin_id" "$plugin_id"; then
               sync_openclaw_plugin_allowlist "$plugin_id"
               success_list="$success_list $plugin_id"
               changed=true
@@ -5158,7 +5157,7 @@ PYTHON_EOF
 
           if [ -d "/usr/lib/node_modules/openclaw/extensions/$plugin_id" ]; then
             echo "💡 发现系统内置目录存在该插件，尝试直接启用..."
-            if openclaw plugins enable "$plugin_id"; then
+            if openclaw_plugin_exec_with_core_sync "enable" "$plugin_id" "$plugin_id"; then
               sync_openclaw_plugin_allowlist "$plugin_id"
               success_list="$success_list $plugin_id"
               changed=true
@@ -5171,9 +5170,9 @@ PYTHON_EOF
           echo "📥 本地未发现，尝试下载安装: $plugin_full"
           rm -rf "${HOME}/.openclaw/extensions/$plugin_id"
           [ "$HOME" != "/root" ] && rm -rf "/root/.openclaw/extensions/$plugin_id"
-          if openclaw plugins install "$plugin_full"; then
+          if openclaw_plugin_exec_with_core_sync "install" "$plugin_full" "$plugin_id"; then
             echo "✅ 下载成功，正在启用..."
-            if openclaw plugins enable "$plugin_id"; then
+            if openclaw_plugin_exec_with_core_sync "enable" "$plugin_id" "$plugin_id"; then
               sync_openclaw_plugin_allowlist "$plugin_id"
               success_list="$success_list $plugin_id"
               changed=true
@@ -5406,6 +5405,68 @@ openclaw_plugin_local_installed() {
     return 0
   }
 
+  openclaw_plugin_runtime_mismatch_log() {
+    local log_file="$1"
+    [ -s "$log_file" ] || return 1
+    grep -Eq "does not provide an export named|fetch-runtime|createHttp1EnvHttpProxyAgent|SyntaxError: The requested module" "$log_file"
+  }
+
+  openclaw_remove_plugin_local_dirs() {
+    local plugin_id="$1"
+    [ -z "$plugin_id" ] && return 0
+    mv "${HOME}/.openclaw/extensions/${plugin_id}" "${HOME}/.openclaw/extensions/${plugin_id}.disabled.$(date +%s)" >/dev/null 2>&1 || true
+    mv "${HOME}/.openclaw/extensions/openclaw-${plugin_id}" "${HOME}/.openclaw/extensions/openclaw-${plugin_id}.disabled.$(date +%s)" >/dev/null 2>&1 || true
+    if [ "$HOME" != "/root" ]; then
+      mv "/root/.openclaw/extensions/${plugin_id}" "/root/.openclaw/extensions/${plugin_id}.disabled.$(date +%s)" >/dev/null 2>&1 || true
+      mv "/root/.openclaw/extensions/openclaw-${plugin_id}" "/root/.openclaw/extensions/openclaw-${plugin_id}.disabled.$(date +%s)" >/dev/null 2>&1 || true
+    fi
+  }
+
+  openclaw_plugin_exec_with_core_sync() {
+    local action="$1"
+    local plugin_ref="$2"
+    local plugin_id="$3"
+    local log_file first_rc=1
+    log_file=$(mktemp)
+
+    set +e
+    if [ "$action" = "enable" ]; then
+      openclaw plugins enable "$plugin_ref" >"$log_file" 2>&1
+    else
+      openclaw plugins install "$plugin_ref" >"$log_file" 2>&1
+    fi
+    first_rc=$?
+    set -e
+
+    if [ $first_rc -eq 0 ]; then
+      cat "$log_file" 2>/dev/null || true
+      return 0
+    fi
+
+    if openclaw_plugin_runtime_mismatch_log "$log_file"; then
+      echo "检测到插件与 OpenClaw 核心版本不兼容，正在自动同步核心版本..."
+      cat "$log_file" 2>/dev/null || true
+      openclaw_remove_plugin_local_dirs "$plugin_id"
+      install_openclaw_global || true
+      ensure_openclaw_cli_on_path >/dev/null 2>&1 || true
+      refresh_openclaw_gateway_service >/dev/null 2>&1 || true
+      openclaw_get_plugins_list_cached true >/dev/null 2>&1 || true
+      set +e
+      if [ "$action" = "enable" ]; then
+        openclaw plugins enable "$plugin_ref" >"$log_file" 2>&1
+      else
+        openclaw plugins install "$plugin_ref" >"$log_file" 2>&1
+      fi
+      first_rc=$?
+      set -e
+      cat "$log_file" 2>/dev/null || true
+      return $first_rc
+    fi
+
+    cat "$log_file" 2>/dev/null || true
+    return $first_rc
+  }
+
   openclaw_ensure_channel_plugin_enabled() {
     local plugin_id="$1"
     local plugin_list
@@ -5414,18 +5475,18 @@ openclaw_plugin_local_installed() {
     plugin_list=$(openclaw_get_plugins_list_cached)
 
     if echo "$plugin_list" | grep -qw "$plugin_id" && echo "$plugin_list" | grep "$plugin_id" | grep -q "disabled"; then
-      openclaw plugins enable "$plugin_id" || return 1
+      openclaw_plugin_exec_with_core_sync "enable" "$plugin_id" "$plugin_id" || return 1
       sync_openclaw_plugin_allowlist "$plugin_id" || true
       return 0
     fi
 
     if openclaw_plugin_local_installed "$plugin_id"; then
-      openclaw plugins enable "$plugin_id" >/dev/null 2>&1 || true
+      openclaw_plugin_exec_with_core_sync "enable" "$plugin_id" "$plugin_id" >/dev/null 2>&1 || true
       sync_openclaw_plugin_allowlist "$plugin_id" || true
       return 0
     fi
 
-    openclaw plugins install "$plugin_id" || return 1
+    openclaw_plugin_exec_with_core_sync "install" "$plugin_id" "$plugin_id" || return 1
     sync_openclaw_plugin_allowlist "$plugin_id" || true
     return 0
   }
@@ -5499,7 +5560,7 @@ openclaw_plugin_local_installed() {
     pair_url=$(openclaw_whatsapp_pairing_url)
     active_proxy=$(resolve_active_proxy "$(skpl_effective_proxy_port)" 2>/dev/null || true)
     configured_port=$(skpl_effective_proxy_port)
-    whatsapp_proxy_url=$(openclaw_whatsapp_proxy_url)
+    whatsapp_proxy_url=$(openclaw_channel_http_proxy_url)
 
     skpl_ui_header "WhatsApp 连接诊断" "聚焦 WSL、代理、网关与会话状态"
     skpl_ui_kv "WSL 环境" "$(openclaw_is_wsl && echo 是 || echo 否)"
@@ -5516,6 +5577,7 @@ openclaw_plugin_local_installed() {
     echo "1. 18789 是本地网关端口，10808 或自定义端口用于 WhatsApp 出站代理。"
     echo "2. WSL 环境可正常承载 OpenClaw，扫码展示通常依赖 WebUI 或宿主浏览器。"
     echo "3. 二维码异常通常来自网关未就绪、浏览器未打开配对页、旧会话残留或代理未生效。"
+    echo "4. 若出现 fetch-runtime / createHttp1EnvHttpProxyAgent 报错，说明插件与 OpenClaw 核心版本不匹配，脚本已会自动同步核心后重试。"
   }
 
   openclaw_whatsapp_open_pairing_page() {
@@ -5557,7 +5619,7 @@ openclaw_plugin_local_installed() {
     fi
     openclaw_print_whatsapp_diagnosis
     echo
-    echo "已为 WhatsApp 通道写入代理：$(openclaw_whatsapp_proxy_url)"
+    echo "已为 WhatsApp 通道写入代理：$(openclaw_channel_http_proxy_url)"
     echo
     openclaw_whatsapp_open_pairing_page
     return 0
@@ -5898,13 +5960,13 @@ openclaw_plugin_local_installed() {
         4)
           echo "正在准备 Discord 通道..."
           openclaw_prepare_discord_channel
-          echo "Discord 已启用，并继承安装代理端口：$(openclaw_whatsapp_proxy_url)"
+          echo "Discord 已启用，并继承安装代理端口：$(openclaw_channel_http_proxy_url)"
           break_end
           ;;
         5)
           echo "正在准备 Slack 通道..."
           openclaw_prepare_slack_channel
-          echo "Slack 已启用，并继承安装代理端口：$(openclaw_whatsapp_proxy_url)"
+          echo "Slack 已启用，并继承安装代理端口：$(openclaw_channel_http_proxy_url)"
           break_end
           ;;
         6)
