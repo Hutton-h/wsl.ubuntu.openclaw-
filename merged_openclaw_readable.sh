@@ -5730,13 +5730,26 @@ raise SystemExit(1)
 PY
   }
 
+  openclaw_panel_run_as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+      "$@"
+      return $?
+    fi
+    if command -v sudo >/dev/null 2>&1; then
+      sudo "$@"
+      return $?
+    fi
+    echo "❌ 当前不是 root，且未检测到 sudo，无法执行需要 root 的面板操作。"
+    return 1
+  }
+
   openclaw_devices_list_safe() {
-    timeout 12 openclaw devices list 2>/dev/null || true
+    timeout 12 openclaw_panel_run_as_root openclaw devices list 2>/dev/null || true
   }
 
   openclaw_device_pairing_preview_latest() {
     echo "正在预览最新待处理设备请求..."
-    if timeout 12 openclaw devices approve --latest; then
+    if timeout 12 openclaw_panel_run_as_root openclaw devices approve --latest; then
       return 0
     fi
     echo "❌ 未能读取最新待处理请求，请先确认当前存在待批准设备。"
@@ -5792,7 +5805,7 @@ PY
     [ -z "$request_id" ] && request_id="$raw_input"
 
     echo "正在批准设备请求: $request_id"
-    if timeout 12 openclaw devices approve "$request_id"; then
+    if timeout 12 openclaw_panel_run_as_root openclaw devices approve "$request_id"; then
       echo "✅ 设备授权已提交"
       return 0
     fi
@@ -9641,7 +9654,7 @@ EOF
       fi
     fi
 
-    if ! timeout 12 openclaw devices list; then
+    if ! timeout 12 openclaw_panel_run_as_root openclaw devices list; then
       echo "❌ 设备列表加载超时或失败，请确认网关已就绪后重试。"
       return 1
     fi
@@ -9653,7 +9666,7 @@ EOF
       return 1
     }
 
-    if ! timeout 12 openclaw devices approve "$Request_Key"; then
+    if ! timeout 12 openclaw_panel_run_as_root openclaw devices approve "$Request_Key"; then
       echo "❌ 设备授权超时或失败，请稍后重试。"
       return 1
     fi
