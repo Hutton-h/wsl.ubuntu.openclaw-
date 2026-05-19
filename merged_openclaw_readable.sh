@@ -2237,6 +2237,7 @@ openclaw_ensure_local_gateway_config() {
   python3 - "$config_file" "$gateway_port" <<'PY'
 import json
 import os
+import secrets
 import sys
 
 path, port_raw = sys.argv[1:3]
@@ -2260,6 +2261,11 @@ if not isinstance(gateway, dict):
     gateway = {}
     data['gateway'] = gateway
 
+auth = gateway.get('auth')
+if not isinstance(auth, dict):
+    auth = {}
+    gateway['auth'] = auth
+
 control_ui = gateway.get('controlUi')
 if not isinstance(control_ui, dict):
     control_ui = {}
@@ -2275,6 +2281,11 @@ if not isinstance(gateway.get('port'), int):
 
 if control_ui.get('allowInsecureAuth') is not True:
     control_ui['allowInsecureAuth'] = True
+    changed = True
+
+token_value = auth.get('token')
+if not isinstance(token_value, str) or not token_value.strip() or token_value.strip().startswith('${'):
+    auth['token'] = secrets.token_urlsafe(32)
     changed = True
 
 expected_origins = [
@@ -5666,7 +5677,7 @@ openclaw_plugin_local_installed() {
   openclaw_whatsapp_pairing_url() {
     local token scheme
     scheme=$(openclaw_webui_scheme)
-    token=$(openclaw_webui_refresh_token_cache 2>/dev/null || openclaw_webui_get_cached_token 2>/dev/null || true)
+    token=$(openclaw_webui_token_from_config 2>/dev/null || openclaw_webui_get_cached_token 2>/dev/null || true)
     if [ -n "$token" ]; then
       printf '%s://127.0.0.1:%s/#token=%s\n' "$scheme" "$(openclaw_gateway_port)" "$token"
     else
@@ -5838,8 +5849,7 @@ PY
     local scheme port token domains active_proxy configured_port whatsapp_proxy_url whatsapp_session provider_summary
     scheme=$(openclaw_webui_scheme)
     port=$(openclaw_gateway_port)
-    token=$(openclaw_webui_get_cached_token 2>/dev/null || true)
-    [ -z "$token" ] && token=$(openclaw_webui_refresh_token_cache 2>/dev/null || true)
+    token=$(openclaw_webui_token_from_config 2>/dev/null || openclaw_webui_get_cached_token 2>/dev/null || true)
     domains=$(openclaw_find_webui_domain)
     active_proxy=$(resolve_active_proxy "$(skpl_effective_proxy_port)" 2>/dev/null || true)
     configured_port=$(skpl_effective_proxy_port)
@@ -9426,18 +9436,12 @@ PY
   }
 
   openclaw_webui_refresh_token_cache() {
-    local dashboard_output token
+    local token
 
     openclaw_webui_ensure_local_origins >/dev/null 2>&1 || true
     refresh_openclaw_gateway_service >/dev/null 2>&1 || true
 
-    dashboard_output=$(timeout 12 openclaw dashboard 2>/dev/null || true)
-    if [ -n "$dashboard_output" ]; then
-      token=$(printf '%s\n' "$dashboard_output" | openclaw_webui_extract_token 2>/dev/null || true)
-    fi
-    if [ -z "$token" ]; then
-      token=$(openclaw_webui_token_from_config 2>/dev/null || true)
-    fi
+    token=$(openclaw_webui_token_from_config 2>/dev/null || true)
     if [ -n "$token" ]; then
       printf '%s' "$token" > "$SKPL_WEBUI_TOKEN_CACHE_FILE"
       echo "$token"
@@ -9501,7 +9505,7 @@ PY
     scheme=$(openclaw_webui_scheme)
     port=$(openclaw_gateway_port)
 
-    token=$(openclaw_webui_get_cached_token 2>/dev/null || true)
+    token=$(openclaw_webui_token_from_config 2>/dev/null || openclaw_webui_get_cached_token 2>/dev/null || true)
     skpl_ui_section "本机地址"
     if [ -n "$token" ]; then
       echo "${scheme}://${local_ip}:${port}/#token=${token}"
@@ -9546,7 +9550,7 @@ EOF
     scheme=$(openclaw_webui_scheme)
     port=$(openclaw_gateway_port)
 
-    token=$(openclaw_webui_refresh_token_cache 2>/dev/null || openclaw_webui_get_cached_token 2>/dev/null || true)
+    token=$(openclaw_webui_token_from_config 2>/dev/null || openclaw_webui_get_cached_token 2>/dev/null || true)
 
     clear
     echo "访问地址:"
@@ -9605,7 +9609,7 @@ EOF
       openclaw_show_webui_addr
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "刷新访问 Token" "重新获取 dashboard token"
+      skpl_ui_menu_item 1 "重载访问 Token" "读取本地持久 token"
       skpl_ui_menu_item 2 "添加域名访问" "自动写入 allowedOrigins"
       skpl_ui_menu_item_tone 3 "删除域名访问" "移除反向代理域名" "danger"
       skpl_ui_menu_item 4 "查看待处理请求" "显示 devices list 原始输出"
@@ -9618,9 +9622,9 @@ EOF
       case "$choice" in
         1)
           if openclaw_webui_refresh_token_cache >/dev/null 2>&1; then
-            echo "✅ WebUI Token 已刷新"
+            echo "✅ WebUI Token 已重载"
           else
-            echo "⚠️ Token 刷新失败，请确认网关与 dashboard 可用"
+            echo "⚠️ Token 读取失败，请确认本地配置中已存在 gateway.auth.token"
           fi
           echo
           read -p "按回车返回菜单..."
