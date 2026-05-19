@@ -5763,6 +5763,56 @@ exit 1
     openclaw_panel_run_command_with_timeout 12 openclaw devices list 2>/dev/null || true
   }
 
+  openclaw_devices_list_raw() {
+    openclaw_panel_run_command_with_timeout 12 openclaw devices list 2>/dev/null
+  }
+
+  openclaw_extract_request_ids_from_text() {
+    python3 - <<'PY'
+import re
+import sys
+
+ids = []
+for line in sys.stdin.read().splitlines():
+    for value in re.findall(r'\b[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}\b', line):
+        if value not in ids:
+            ids.append(value)
+
+for value in ids:
+    print(value)
+PY
+  }
+
+  openclaw_current_pending_request_ids() {
+    openclaw_devices_list_raw | openclaw_extract_request_ids_from_text
+  }
+
+  openclaw_request_id_is_pending() {
+    local request_id="$1"
+    [ -z "$request_id" ] && return 1
+    openclaw_current_pending_request_ids | grep -Fxq "$request_id"
+  }
+
+  openclaw_best_current_request_id() {
+    local latest_request_id pending_ids first_pending
+    latest_request_id=$(openclaw_latest_scope_upgrade_request_id 2>/dev/null || true)
+    pending_ids=$(openclaw_current_pending_request_ids 2>/dev/null || true)
+    if [ -n "$latest_request_id" ] && printf '%s\n' "$pending_ids" | grep -Fxq "$latest_request_id"; then
+      printf '%s\n' "$latest_request_id"
+      return 0
+    fi
+    first_pending=$(printf '%s\n' "$pending_ids" | python3 - <<'PY'
+import sys
+for line in sys.stdin.read().splitlines():
+    text = line.strip()
+    if text:
+        print(text)
+        break
+PY
+    )
+    [ -n "$first_pending" ] && printf '%s\n' "$first_pending"
+  }
+
   openclaw_device_pairing_preview_latest() {
     echo "正在预览最新待处理设备请求..."
     if openclaw_panel_run_command_with_timeout 12 openclaw devices approve --latest; then
@@ -5774,7 +5824,7 @@ exit 1
 
   openclaw_pending_request_ids_summary() {
     local latest_request_id summary_ids
-    summary_ids=$(openclaw_panel_run_command_with_timeout 12 openclaw devices list 2>/dev/null | python3 - <<'PY'
+    summary_ids=$(openclaw_devices_list_raw | python3 - <<'PY'
 import re
 import sys
 
@@ -5803,7 +5853,7 @@ PY
   }
 
   openclaw_device_pairing_approve() {
-    local raw_input request_id latest_request_id
+    local raw_input request_id latest_request_id suggested_request_id
     echo "当前待处理请求："
     openclaw_devices_list_safe
     echo
@@ -5819,6 +5869,17 @@ PY
     [ -z "$raw_input" ] && { echo "输入不能为空"; return 1; }
     request_id=$(printf '%s' "$raw_input" | openclaw_extract_request_id 2>/dev/null || true)
     [ -z "$request_id" ] && request_id="$raw_input"
+
+    if ! openclaw_request_id_is_pending "$request_id"; then
+      suggested_request_id=$(openclaw_best_current_request_id 2>/dev/null || true)
+      echo "❌ 这个 requestId 当前已经失效。"
+      if [ -n "$suggested_request_id" ]; then
+        echo "请批准当前有效 requestId: $suggested_request_id"
+      else
+        echo "当前 devices list 中没有可批准的 requestId，请先刷新列表或重新触发配对。"
+      fi
+      return 1
+    fi
 
     echo "正在批准设备请求: $request_id"
     if openclaw_panel_run_command_with_timeout 12 openclaw devices approve "$request_id"; then
@@ -9675,12 +9736,24 @@ EOF
       return 1
     fi
 
+    local suggested_request_id
     read -e -p "请输入 Request_Key: " Request_Key
 
     [ -z "$Request_Key" ] && {
       echo "Request_Key 不能为空"
       return 1
     }
+
+    if ! openclaw_request_id_is_pending "$Request_Key"; then
+      suggested_request_id=$(openclaw_best_current_request_id 2>/dev/null || true)
+      echo "❌ 这个 Request_Key 当前已经失效。"
+      if [ -n "$suggested_request_id" ]; then
+        echo "请批准当前有效 requestId: $suggested_request_id"
+      else
+        echo "当前 devices list 中没有可批准的 requestId，请先刷新列表或重新触发配对。"
+      fi
+      return 1
+    fi
 
     if ! openclaw_panel_run_command_with_timeout 12 openclaw devices approve "$Request_Key"; then
       echo "❌ 设备授权超时或失败，请稍后重试。"
