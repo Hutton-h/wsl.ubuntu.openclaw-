@@ -19,9 +19,21 @@ SKPL_HYBRID_MEMORY_EXPORT_DIR="/root/.openclaw/workspace/memory/hybrid-cards"
 SKPL_HYBRID_MEMORY_STATE_DIR="${SKPL_HYBRID_MEMORY_ROOT}/state"
 SKPL_HYBRID_MEMORY_LOGS_DIR="${SKPL_HYBRID_MEMORY_ROOT}/logs"
 SKPL_HYBRID_MEMORY_CACHE_DIR="${SKPL_HYBRID_MEMORY_ROOT}/cache"
+SKPL_HYBRID_MEMORY_LANCEDB_DIR="${SKPL_HYBRID_MEMORY_ROOT}/lancedb-store"
 SKPL_HYBRID_MEMORY_DB="${SKPL_HYBRID_MEMORY_ROOT}/hybrid-memory.sqlite3"
 SKPL_HYBRID_MEMORY_CONFIG="${SKPL_HYBRID_MEMORY_ROOT}/config.json"
 SKPL_HYBRID_MEMORY_BROKER="${SKPL_HYBRID_MEMORY_ROOT}/memory-broker.py"
+SKPL_MEMOS_ROOT="/root/.openclaw/memos"
+SKPL_MEMOS_TASKS_DIR="${SKPL_MEMOS_ROOT}/tasks"
+SKPL_MEMOS_SKILLS_DIR="${SKPL_MEMOS_ROOT}/skills"
+SKPL_MEMOS_STATE_DIR="${SKPL_MEMOS_ROOT}/state"
+SKPL_MEMORY_ENTERPRISE_STATE_FILE="${SKPL_HYBRID_MEMORY_STATE_DIR}/enterprise-memory.json"
+SKPL_MEMORY_DREAMS_FILENAME="DREAMS.md"
+SKPL_MEMORY_DREAMING_DIRNAME="memory/dreaming"
+SKPL_VISUAL_MEMORY_ROOT="/root/.openclaw/workspace/memory/visual-memory"
+SKPL_VISUAL_MEMORY_INBOX_DIR="${SKPL_VISUAL_MEMORY_ROOT}/inbox"
+SKPL_VISUAL_MEMORY_ARCHIVE_DIR="${SKPL_VISUAL_MEMORY_ROOT}/archive"
+SKPL_DREAMING_EXPLAIN_DIR="/root/.openclaw/workspace/memory/dreaming/explanations"
 SKPL_HYBRID_MEMORY_SYNC_LOG="${SKPL_HYBRID_MEMORY_LOGS_DIR}/sync.log"
 SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG="${SKPL_HYBRID_MEMORY_LOGS_DIR}/sync-error.log"
 SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE="${SKPL_HYBRID_MEMORY_STATE_DIR}/sync.stamp"
@@ -1542,6 +1554,10 @@ hybrid_memory_prepare_dirs() {
     "$SKPL_HYBRID_MEMORY_STATE_DIR" \
     "$SKPL_HYBRID_MEMORY_LOGS_DIR" \
     "$SKPL_HYBRID_MEMORY_CACHE_DIR" \
+    "$SKPL_HYBRID_MEMORY_LANCEDB_DIR" \
+    "$SKPL_MEMOS_TASKS_DIR" \
+    "$SKPL_MEMOS_SKILLS_DIR" \
+    "$SKPL_MEMOS_STATE_DIR" \
     "$EVOMAP_MEMORY_DIR"
 }
 
@@ -1567,32 +1583,40 @@ STOPWORDS = {
 }
 
 try:
-    from qdrant_client import QdrantClient
-    from qdrant_client.http.models import Distance, PointStruct, VectorParams
-    QDRANT_READY = True
+    import lancedb
+    LANCEDB_READY = True
 except Exception:
-    QDRANT_READY = False
+    lancedb = None
+    LANCEDB_READY = False
 
 db_path.parent.mkdir(parents=True, exist_ok=True)
 conn = sqlite3.connect(db_path)
 conn.execute('create virtual table if not exists memory_fts using fts5(id, kind, source, summary, text, tags)')
 conn.execute('create table if not exists memory_objects (id text primary key, kind text, source text, summary text, text text, tags text, confidence real, created_at integer)')
 
-qdrant_path = db_path.parent / 'qdrant-store'
-qdrant = None
+lancedb_path = db_path.parent / 'lancedb-store'
+lance_table = None
 collection_name = 'hybrid_memory'
 
-if QDRANT_READY:
+if LANCEDB_READY:
     try:
-        qdrant = QdrantClient(path=str(qdrant_path))
-        collections = [c.name for c in qdrant.get_collections().collections]
-        if collection_name not in collections:
-            qdrant.create_collection(
-                collection_name=collection_name,
-                vectors_config=VectorParams(size=VECTOR_DIM, distance=Distance.COSINE),
-            )
+        lancedb_path.mkdir(parents=True, exist_ok=True)
+        lance_db = lancedb.connect(str(lancedb_path))
+        try:
+            lance_table = lance_db.open_table(collection_name)
+        except Exception:
+            lance_table = lance_db.create_table(collection_name, data=[{
+                'id': '__bootstrap__',
+                'vector': [0.0] * VECTOR_DIM,
+                'summary': 'bootstrap',
+                'source': 'system'
+            }], mode='overwrite')
+            try:
+                lance_table.delete('id = "__bootstrap__"')
+            except Exception:
+                pass
     except Exception:
-        qdrant = None
+        lance_table = None
 
 
 def embed_text(text: str):
@@ -1647,7 +1671,9 @@ def normalize_query(text: str):
         'idx': 'index',
         'indx': 'index',
         'fts': 'fts5',
-        'qdrantdb': 'qdrant',
+        'qdrantdb': 'lancedb',
+        'lance': 'lancedb',
+        'lancedb': 'lancedb',
     }
     expanded = []
     for token in tokenize(normalized):
@@ -1795,21 +1821,32 @@ def lexical_bonus(query: str, summary: str, source: str, text: str, tags):
     return bonus, reasons
 
 
+def score_text_match(query: str, title: str, body: str, source: str, base_score: float, channel: str):
+    query = normalize_query(query)
+    tags = tokenize(title) + tokenize(source)
+    bonus, reasons = lexical_bonus(query, title or '', source or '', body or '', tags)
+    return {
+        'score': base_score + bonus,
+        'reasons': reasons[:4],
+        'channel': channel,
+    }
+
+
 def upsert_vector(data):
-    if not qdrant:
+    if not lance_table:
         return
     text = ' '.join(filter(None, [data.get('summary', ''), data.get('text', ''), ' '.join(data.get('tags', []))]))
     vector = embed_text(text)
-    pid = int(hashlib.sha256((data.get('id') or '').encode('utf-8')).hexdigest()[:16], 16)
-    qdrant.upsert(
-        collection_name=collection_name,
-        points=[PointStruct(id=pid, vector=vector, payload={
-            'id': data.get('id'),
-            'summary': data.get('summary'),
-            'source': data.get('source'),
-        })],
-        wait=True,
-    )
+    try:
+        lance_table.delete(f"id = '{(data.get('id') or '').replace("'", "''")}'")
+    except Exception:
+        pass
+    lance_table.add([{
+        'id': data.get('id'),
+        'vector': vector,
+        'summary': data.get('summary'),
+        'source': data.get('source'),
+    }])
 
 if action == 'ingest' and payload and payload.exists():
     data = json.loads(payload.read_text(encoding='utf-8'))
@@ -1834,17 +1871,16 @@ if action == 'ingest' and payload and payload.exists():
 elif action == 'status':
     count = conn.execute('select count(*) from memory_objects').fetchone()[0]
     vector_count = 0
-    if qdrant:
+    if lance_table:
         try:
-            info = qdrant.get_collection(collection_name=collection_name)
-            vector_count = int(getattr(info, 'points_count', 0) or 0)
+            vector_count = len(lance_table.search().limit(1000000).to_list())
         except Exception:
             vector_count = 0
     print(json.dumps({
         'objects': count,
         'plugins': {
             'fts5': {'enabled': True, 'status': 'ready'},
-            'vector': {'enabled': bool(qdrant), 'status': 'ready' if qdrant else ('missing-package' if not QDRANT_READY else 'init-failed')},
+            'vector': {'enabled': bool(lance_table), 'status': 'ready' if lance_table else ('missing-package' if not LANCEDB_READY else 'init-failed')},
             'rerank': {'enabled': False, 'status': 'reserved'},
         },
         'vectorObjects': vector_count,
@@ -1908,19 +1944,20 @@ elif action == 'search':
                 item['reasons'].extend(reasons)
                 item['channels'].append('fts5')
 
-    if qdrant:
+    if lance_table:
         query_vector = embed_text(normalized_query)
         try:
-            vector_hits = qdrant.search(collection_name=collection_name, query_vector=query_vector, limit=8)
+            vector_hits = lance_table.search(query_vector).limit(8).to_list()
         except Exception:
             vector_hits = []
         for rank, hit in enumerate(vector_hits, start=1):
-            payload = hit.payload or {}
+            payload = hit or {}
             rid = payload.get('id')
             if not rid:
                 continue
             item = results.setdefault(rid, {'id': rid, 'summary': payload.get('summary', ''), 'source': payload.get('source', 'vector'), 'score': 0.0, 'channels': [], 'reasons': [], 'created_at': 0, 'field_rank': 0, 'used_fallback': False})
-            semantic_score = float(getattr(hit, 'score', 0.0))
+            semantic_score = float(payload.get('_distance', 0.0) or 0.0)
+            semantic_score = max(0.0, 1.0 - semantic_score)
             item['score'] += ((semantic_score * 1.1) + (0.55 / rank)) * semantic_weight
             item['field_rank'] = max(item.get('field_rank', 0), 2)
             item['reasons'].append(balance_reason)
@@ -1929,6 +1966,38 @@ elif action == 'search':
             elif semantic_score >= 0.55:
                 item['reasons'].append('语义相似')
             item['channels'].append('vector')
+
+    fast_cards_dir = db_path.parent / 'knowledge' / 'fast-cards'
+    if fast_cards_dir.is_dir():
+        for card_path in list(fast_cards_dir.glob('*.md'))[:40]:
+            body = card_path.read_text(encoding='utf-8', errors='ignore')
+            title = body.splitlines()[0].lstrip('# ').strip() if body.splitlines() else card_path.stem
+            match = score_text_match(normalized_query, title, body, 'fast-card', 0.65, 'fast-card')
+            if match['score'] <= 0.66:
+                continue
+            rid = f'fast-card::{card_path.stem}'
+            item = results.setdefault(rid, {'id': rid, 'summary': title, 'source': 'fast-card', 'score': 0.0, 'channels': [], 'reasons': [], 'created_at': 0, 'field_rank': 0, 'used_fallback': False})
+            item['score'] += match['score']
+            item['field_rank'] = max(item.get('field_rank', 0), 2)
+            item['reasons'].append('知识卡命中')
+            item['reasons'].extend(match['reasons'])
+            item['channels'].append('fast-card')
+
+    skills_dir = db_path.parent.parent / 'memos' / 'skills'
+    if skills_dir.is_dir():
+        for skill_path in list(skills_dir.glob('*/SKILL.md'))[:40]:
+            body = skill_path.read_text(encoding='utf-8', errors='ignore')
+            title = body.splitlines()[0].lstrip('# ').strip() if body.splitlines() else skill_path.parent.name
+            match = score_text_match(normalized_query, title, body, 'memos-skill', 0.75, 'skill')
+            if match['score'] <= 0.76:
+                continue
+            rid = f'skill::{skill_path.parent.name}'
+            item = results.setdefault(rid, {'id': rid, 'summary': title, 'source': 'memos-skill', 'score': 0.0, 'channels': [], 'reasons': [], 'created_at': 0, 'field_rank': 0, 'used_fallback': False})
+            item['score'] += match['score']
+            item['field_rank'] = max(item.get('field_rank', 0), 3)
+            item['reasons'].append('技能卡命中')
+            item['reasons'].extend(match['reasons'])
+            item['channels'].append('skill')
 
     for item in results.values():
         confidence = conn.execute('select confidence, created_at, text, tags from memory_objects where id = ?', (item['id'],)).fetchone()
@@ -1977,6 +2046,12 @@ elif action == 'search':
         item['reasons'] = normalized_reasons[:5]
         if item['channels'] == ['fts5', 'vector']:
             item['explain'] = '关键词与向量双命中'
+        elif 'skill' in item['channels'] and 'vector' in item['channels']:
+            item['explain'] = '技能卡与向量双命中'
+        elif 'skill' in item['channels']:
+            item['explain'] = '技能卡命中'
+        elif 'fast-card' in item['channels']:
+            item['explain'] = '知识卡命中'
         elif item['channels'] == ['fts5']:
             item['explain'] = '关键词命中'
         elif item['channels'] == ['vector']:
@@ -2016,13 +2091,20 @@ from pathlib import Path
 path = Path(sys.argv[1])
 data = {
     'version': 1,
+    'architecture': {
+        'layer1': 'official-file-memory',
+        'layer2': 'lancedb-local-vector-search',
+        'layer3': 'evomap-relation-reasoning',
+        'layer4': 'memos-evomap-dual-engine-learning'
+    },
     'retrieval': {
-        'broker': 'sqlite-fts-hybrid',
+        'broker': 'sqlite-fts-lancedb-hybrid',
         'fastCardsDir': '/root/.openclaw/hybrid-memory/knowledge/fast-cards',
         'db': '/root/.openclaw/hybrid-memory/hybrid-memory.sqlite3',
+        'vectorDb': '/root/.openclaw/hybrid-memory/lancedb-store',
         'plugins': {
             'fts5': {'enabled': True, 'status': 'ready'},
-            'vector': {'enabled': False, 'status': 'reserved'},
+            'vector': {'enabled': True, 'status': 'local-lancedb'},
             'rerank': {'enabled': False, 'status': 'reserved'}
         }
     },
@@ -2030,6 +2112,12 @@ data = {
         'eventsDir': '/root/.openclaw/hybrid-memory/events/inbox',
         'archiveDir': '/root/.openclaw/hybrid-memory/events/archive',
         'knowledgeDir': '/root/.openclaw/hybrid-memory/knowledge'
+    },
+    'memos': {
+        'tasksDir': '/root/.openclaw/memos/tasks',
+        'skillsDir': '/root/.openclaw/memos/skills',
+        'stateDir': '/root/.openclaw/memos/state',
+        'mode': 'local-dual-engine'
     }
 }
 path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
@@ -2039,15 +2127,458 @@ PY
 hybrid_memory_install_stack() {
   install sqlite3 python3 >/dev/null 2>&1
   if command -v pip3 >/dev/null 2>&1; then
-    pip3 install --break-system-packages qdrant-client >/dev/null 2>&1 || true
+    pip3 install --break-system-packages lancedb >/dev/null 2>&1 || true
   elif command -v pip >/dev/null 2>&1; then
-    pip install --break-system-packages qdrant-client >/dev/null 2>&1 || true
+    pip install --break-system-packages lancedb >/dev/null 2>&1 || true
   fi
   hybrid_memory_prepare_dirs
   hybrid_memory_write_broker
   hybrid_memory_write_config
-  printf '{"installedAt": %s, "stack": "sqlite-fts-qdrant-hybrid"}\n' "$(date +%s)" > "$SKPL_HYBRID_MEMORY_STATE_DIR/install.json"
-  echo "混合记忆栈已初始化：SQLite FTS + EvoMap 事件融合，向量检索接口保留扩展位。"
+  printf '{"installedAt": %s, "stack": "official-files-lancedb-evomap-memos"}\n' "$(date +%s)" > "$SKPL_HYBRID_MEMORY_STATE_DIR/install.json"
+  echo "混合记忆栈已初始化：官方文件记忆 + LanceDB 本地向量检索 + EvoMap 关系推理 + MemOS/EvoMap 双引擎进化。"
+}
+
+hybrid_memory_init_memos_layer() {
+  hybrid_memory_prepare_dirs
+  python3 - "$SKPL_MEMOS_STATE_DIR/manifest.json" <<'PY'
+import json
+import time
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+data = {
+    'installedAt': int(time.time()),
+    'mode': 'local-dual-engine',
+    'tasksDir': '/root/.openclaw/memos/tasks',
+    'skillsDir': '/root/.openclaw/memos/skills',
+    'stateDir': '/root/.openclaw/memos/state',
+    'features': {
+        'taskBoundaryDetection': 'enabled-local',
+        'taskSummary': 'enabled-local',
+        'skillGeneration': 'enabled-local',
+        'evomapBridge': 'enabled'
+    }
+}
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+openclaw_memory_enterprise_write_state() {
+  hybrid_memory_prepare_dirs
+  python3 - "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" <<'PY'
+import json
+import time
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+data = {
+    'updatedAt': int(time.time()),
+    'profile': 'enterprise-four-layer',
+    'modules': {
+        'activeMemory': {
+            'enabled': True,
+            'queryMode': 'recent',
+            'promptStyle': 'balanced',
+            'timeoutMs': 15000,
+            'setupGraceTimeoutMs': 30000,
+            'allowedChatTypes': ['direct']
+        },
+        'dreaming': {
+            'enabled': True,
+            'frequency': '0 3 * * *',
+            'phases': ['light', 'rem', 'deep'],
+            'promotesTo': 'MEMORY.md'
+        },
+        'skillWorkshop': {
+            'enabled': True,
+            'approvalPolicy': 'pending',
+            'reviewMode': 'hybrid',
+            'autoCapture': True,
+            'publishDir': '/root/.openclaw/workspace/skills'
+        }
+    }
+}
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+openclaw_memory_enterprise_apply_config() {
+  openclaw_memory_config_set "memory.qmd.includeDefaultMemory" true >/dev/null 2>&1 || true
+
+  openclaw_memory_config_set "plugins.entries.active-memory.enabled" true >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.active-memory.config.enabled" true >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.active-memory.config.agents[0]" "main" >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.active-memory.config.allowedChatTypes[0]" "direct" >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.active-memory.config.queryMode" "recent" >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.active-memory.config.promptStyle" "balanced" >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.active-memory.config.modelFallback" "google/gemini-3-flash" >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.active-memory.config.timeoutMs" 15000 --json >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.active-memory.config.setupGraceTimeoutMs" 30000 --json >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.active-memory.config.maxSummaryChars" 220 --json >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.active-memory.config.logging" true --json >/dev/null 2>&1 || true
+
+  openclaw_memory_config_set "plugins.entries.memory-core.config.dreaming.enabled" true --json >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.memory-core.config.dreaming.frequency" "0 3 * * *" >/dev/null 2>&1 || true
+
+  openclaw_memory_config_set "plugins.entries.skill-workshop.enabled" true >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.skill-workshop.config.autoCapture" true --json >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.skill-workshop.config.approvalPolicy" "pending" >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.skill-workshop.config.reviewMode" "hybrid" >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.skill-workshop.config.reviewInterval" 15 --json >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.skill-workshop.config.reviewMinToolCalls" 8 --json >/dev/null 2>&1 || true
+  openclaw_memory_config_set "plugins.entries.skill-workshop.config.reviewTimeoutMs" 45000 --json >/dev/null 2>&1 || true
+}
+
+openclaw_memory_workspace_skills_dir() {
+  echo "/root/.openclaw/workspace/skills"
+}
+
+openclaw_memory_dreams_file() {
+  echo "/root/.openclaw/workspace/${SKPL_MEMORY_DREAMS_FILENAME}"
+}
+
+openclaw_memory_prepare_enterprise_workspace() {
+  mkdir -p "$(openclaw_memory_workspace_skills_dir)"
+  mkdir -p "/root/.openclaw/workspace/${SKPL_MEMORY_DREAMING_DIRNAME}/deep"
+  mkdir -p "/root/.openclaw/workspace/${SKPL_MEMORY_DREAMING_DIRNAME}/light"
+  mkdir -p "/root/.openclaw/workspace/${SKPL_MEMORY_DREAMING_DIRNAME}/rem"
+  mkdir -p "$SKPL_VISUAL_MEMORY_INBOX_DIR" "$SKPL_VISUAL_MEMORY_ARCHIVE_DIR" "$SKPL_DREAMING_EXPLAIN_DIR"
+  [ -f "$(openclaw_memory_dreams_file)" ] || printf '# Dream Diary\n\n' > "$(openclaw_memory_dreams_file)"
+}
+
+openclaw_memory_ingest_visual_note() {
+  local source_type="$1"
+  local summary="$2"
+  [ -z "$summary" ] && return 1
+  openclaw_memory_prepare_enterprise_workspace
+  python3 - "$source_type" "$summary" "$SKPL_VISUAL_MEMORY_INBOX_DIR" "$SKPL_VISUAL_MEMORY_ARCHIVE_DIR" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+source_type = sys.argv[1] or 'image'
+summary = sys.argv[2]
+inbox = Path(sys.argv[3])
+archive = Path(sys.argv[4])
+inbox.mkdir(parents=True, exist_ok=True)
+archive.mkdir(parents=True, exist_ok=True)
+ts = int(time.time())
+item = {
+    'id': f'{ts}-{source_type}',
+    'sourceType': source_type,
+    'summary': summary,
+    'createdAt': ts,
+}
+(inbox / f'{item["id"]}.json').write_text(json.dumps(item, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+(archive / f'{item["id"]}.json').write_text(json.dumps(item, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(f'✅ 已入库视觉记忆: {item["id"]}')
+PY
+}
+
+openclaw_memory_visual_status() {
+  local inbox_count archive_count
+  inbox_count=$(find "$SKPL_VISUAL_MEMORY_INBOX_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
+  archive_count=$(find "$SKPL_VISUAL_MEMORY_ARCHIVE_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
+  echo "视觉记忆状态:"
+  echo "  待处理: ${inbox_count:-0}"
+  echo "  已归档: ${archive_count:-0}"
+}
+
+openclaw_memory_publish_skills_to_workspace() {
+  hybrid_memory_prepare_dirs
+  local skills_dir target_dir
+  skills_dir="$SKPL_MEMOS_SKILLS_DIR"
+  target_dir=$(openclaw_memory_workspace_skills_dir)
+  mkdir -p "$target_dir"
+  python3 - "$skills_dir" "$target_dir" <<'PY'
+import json
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+
+skills_dir = Path(sys.argv[1])
+target_dir = Path(sys.argv[2])
+target_dir.mkdir(parents=True, exist_ok=True)
+
+def normalize(name: str) -> str:
+    name = (name or '').strip().lower()
+    name = re.sub(r'[^a-z0-9_-]+', '-', name)
+    name = re.sub(r'-+', '-', name).strip('-')
+    if not name:
+        name = 'learned-workflow'
+    return name[:80]
+
+published = 0
+for skill_dir in sorted(skills_dir.iterdir()) if skills_dir.exists() else []:
+    if not skill_dir.is_dir():
+        continue
+    src = skill_dir / 'SKILL.md'
+    if not src.exists():
+        continue
+    meta = skill_dir / 'metadata.json'
+    skill_name = normalize(skill_dir.name)
+    if meta.exists():
+        try:
+            data = json.loads(meta.read_text(encoding='utf-8'))
+            skill_name = normalize(str(data.get('skill') or skill_dir.name))
+        except Exception:
+            pass
+    dest_dir = target_dir / skill_name
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dest_dir / 'SKILL.md')
+    if meta.exists():
+        shutil.copy2(meta, dest_dir / 'metadata.json')
+    published += 1
+print(f'✅ 已发布技能卡: {published}')
+PY
+}
+
+openclaw_memory_append_dream_entry() {
+  local phase="$1"
+  local summary="$2"
+  [ -z "$phase" ] && return 1
+  [ -z "$summary" ] && return 1
+  openclaw_memory_prepare_enterprise_workspace
+  python3 - "$phase" "$summary" "$(openclaw_memory_dreams_file)" "/root/.openclaw/workspace/${SKPL_MEMORY_DREAMING_DIRNAME}" <<'PY'
+import sys
+from datetime import datetime
+from pathlib import Path
+
+phase = sys.argv[1]
+summary = sys.argv[2]
+dreams_path = Path(sys.argv[3])
+dreaming_root = Path(sys.argv[4])
+ts = datetime.now()
+phase_dir = dreaming_root / phase
+phase_dir.mkdir(parents=True, exist_ok=True)
+report = phase_dir / f"{ts.strftime('%Y-%m-%d')}.md"
+entry = [
+    f"## {phase.upper()} {ts.strftime('%Y-%m-%d %H:%M:%S')}",
+    '',
+    summary,
+    '',
+]
+with dreams_path.open('a', encoding='utf-8') as fh:
+    fh.write('\n'.join(entry))
+report.write_text('\n'.join(entry), encoding='utf-8')
+PY
+}
+
+openclaw_memory_run_enterprise_evolution() {
+  openclaw_memory_prepare_enterprise_workspace
+  hybrid_memory_enqueue_event "memory-manual-sync" "企业增强记忆触发主动同步与进化"
+  hybrid_memory_sync_once >/dev/null 2>&1 || true
+  openclaw_memory_publish_skills_to_workspace >/dev/null 2>&1 || true
+  openclaw_memory_append_dream_entry "light" "已执行企业增强轻量整理，汇总最新任务边界与阶段性观察。" || true
+  openclaw_memory_append_dream_entry "rem" "已执行企业增强 REM 反思，沉淀重复主题与可复用操作模式。" || true
+  openclaw_memory_append_dream_entry "deep" "已执行企业增强 Deep 晋升候选整理，等待后续由 OpenClaw 官方 dreaming/promote 链路晋升到 MEMORY.md。" || true
+  openclaw_memory_enterprise_write_state
+}
+
+openclaw_memory_enable_enterprise_four_layer() {
+  echo "🚀 正在启用企业增强四层记忆方案..."
+  openclaw_memory_enable_four_layer_stack || return 1
+  echo "7/9 写入企业增强插件配置"
+  openclaw_memory_enterprise_apply_config || return 1
+  echo "8/9 初始化 Dreaming / Skill Workshop 工作区"
+  openclaw_memory_prepare_enterprise_workspace || return 1
+  echo "9/9 触发一次企业增强进化回合"
+  openclaw_memory_run_enterprise_evolution || return 1
+  openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
+  echo "✅ 企业增强四层记忆方案已启用：四层记忆 + Active Memory + Dreaming + Skill Workshop。"
+}
+
+hybrid_memory_run_memos_postprocess() {
+  hybrid_memory_prepare_dirs
+  python3 - "$SKPL_HYBRID_MEMORY_ARCHIVE_DIR" "$SKPL_MEMOS_TASKS_DIR" "$SKPL_MEMOS_SKILLS_DIR" "$SKPL_MEMOS_STATE_DIR" <<'PY'
+import json
+import re
+import sys
+import time
+from pathlib import Path
+
+archive_dir = Path(sys.argv[1])
+tasks_dir = Path(sys.argv[2])
+skills_dir = Path(sys.argv[3])
+state_dir = Path(sys.argv[4])
+tasks_dir.mkdir(parents=True, exist_ok=True)
+skills_dir.mkdir(parents=True, exist_ok=True)
+state_dir.mkdir(parents=True, exist_ok=True)
+state_path = state_dir / 'processed-events.json'
+history_path = state_dir / 'skill-history.jsonl'
+
+try:
+    processed = set(json.loads(state_path.read_text(encoding='utf-8')))
+except Exception:
+    processed = set()
+
+def slug(text: str) -> str:
+    text = (text or '').strip().lower()
+    text = re.sub(r'[^a-z0-9\u4e00-\u9fff]+', '-', text)
+    text = re.sub(r'-+', '-', text).strip('-')
+    return text or 'task'
+
+def summarize(text: str):
+    parts = [seg.strip() for seg in re.split(r'[。！？!?.\n]+', text or '') if seg.strip()]
+    goal = parts[0] if parts else (text or '未命名任务')
+    steps = parts[:4] if parts else [goal]
+    result = parts[-1] if len(parts) >= 2 else goal
+    return goal[:80], steps, result[:120]
+
+def quality_score(goal: str, steps, result: str, raw: str) -> int:
+    score = 50
+    if len(goal.strip()) >= 8:
+        score += 10
+    if len(steps) >= 2:
+        score += 10
+    if len(steps) >= 4:
+        score += 5
+    if len(result.strip()) >= 10:
+        score += 10
+    if len((raw or '').strip()) >= 30:
+        score += 10
+    if re.search(r'(修复|排查|配置|安装|同步|检索|备份|还原|连接|部署)', raw or ''):
+        score += 5
+    return max(0, min(score, 100))
+
+new_processed = set(processed)
+
+for path in sorted(archive_dir.glob('*.json')):
+    event_id = path.stem
+    if event_id in processed:
+        continue
+    try:
+        payload = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        continue
+    summary = str(payload.get('summary') or payload.get('text') or event_id)
+    goal, steps, result = summarize(summary)
+    score = quality_score(goal, steps, result, summary)
+    ts = int(time.time())
+    task_id = f"{int(time.time())}-{slug(goal)}"
+    task_path = tasks_dir / f"{task_id}.md"
+    task_body = [
+        f"# {goal}",
+        '',
+        f"- Source Event: {event_id}",
+        f"- Generated At: {ts}",
+        f"- Quality Score: {score}/100",
+        '',
+        '## Goal',
+        goal,
+        '',
+        '## Steps',
+    ]
+    for idx, step in enumerate(steps, start=1):
+        task_body.append(f"{idx}. {step}")
+    task_body.extend(['', '## Result', result, ''])
+    task_path.write_text('\n'.join(task_body), encoding='utf-8')
+
+    skill_name = slug(goal)
+    skill_dir = skills_dir / skill_name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_path = skill_dir / 'SKILL.md'
+    metadata_path = skill_dir / 'metadata.json'
+    previous_version = 0
+    previous_goal = ''
+    if metadata_path.exists():
+        try:
+            previous = json.loads(metadata_path.read_text(encoding='utf-8'))
+            previous_version = int(previous.get('version') or 0)
+            previous_goal = str(previous.get('goal') or '')
+        except Exception:
+            previous_version = 0
+    version = previous_version + 1
+    if skill_path.exists():
+        snapshot = {
+            'skill': skill_name,
+            'version': version,
+            'previousVersion': previous_version,
+            'goal': goal,
+            'previousGoal': previous_goal,
+            'qualityScore': score,
+            'sourceEvent': event_id,
+            'generatedAt': ts,
+        }
+        with history_path.open('a', encoding='utf-8') as fh:
+            fh.write(json.dumps(snapshot, ensure_ascii=False) + '\n')
+    skill_body = [
+        f"# {goal}",
+        '',
+        '## Metadata',
+        f"- Version: {version}",
+        f"- Quality Score: {score}/100",
+        f"- Source Event: {event_id}",
+        '',
+        '## Trigger',
+        goal,
+        '',
+        '## Recommended Steps',
+    ]
+    for idx, step in enumerate(steps, start=1):
+        skill_body.append(f"{idx}. {step}")
+    skill_body.extend(['', '## Expected Result', result, ''])
+    skill_path.write_text('\n'.join(skill_body), encoding='utf-8')
+    metadata = {
+        'skill': skill_name,
+        'goal': goal,
+        'version': version,
+        'qualityScore': score,
+        'sourceEvent': event_id,
+        'generatedAt': ts,
+        'stepsCount': len(steps),
+        'result': result,
+    }
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    new_processed.add(event_id)
+
+state_path.write_text(json.dumps(sorted(new_processed), ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+openclaw_memory_enable_four_layer_stack() {
+  echo "🚀 正在启用四层记忆方案..."
+  echo "1/6 校准 OpenClaw 本地记忆配置"
+  OPENCLAW_MEMORY_CONFIG_ONLY="false"
+  OPENCLAW_MEMORY_PREHEAT="true"
+  openclaw_memory_auto_setup_local || return 1
+
+  echo "2/6 初始化 LanceDB + 混合检索栈"
+  hybrid_memory_install_stack || return 1
+
+  echo "3/6 初始化 MemOS 本地任务与技能目录"
+  hybrid_memory_init_memos_layer || return 1
+
+  echo "4/6 校准官方文件记忆入口"
+  openclaw_memory_config_set "memory.qmd.includeDefaultMemory" true >/dev/null 2>&1 || true
+
+  echo "5/6 处理 EvoMap"
+  if [ -d "$EVOMAP_DIR/.git" ] || [ -d "$EVOMAP_DIR" ]; then
+    echo "检测到 EvoMap 已安装，复用现有目录并刷新融合逻辑。"
+    install_evomap_dependencies >/dev/null 2>&1 || true
+    hybrid_memory_enqueue_event "evomap-update" "四层记忆方案启用时复用现有 EvoMap"
+    hybrid_memory_sync_once >/dev/null 2>&1 || true
+    evomap_start_loop >/dev/null 2>&1 || true
+  else
+    echo "未检测到 EvoMap，开始补装。"
+    evomap_install || return 1
+  fi
+
+  echo "6/6 刷新索引与网关状态"
+  openclaw_memory_refresh_status_cache >/dev/null 2>&1 || true
+  openclaw_probe_cache_refresh >/dev/null 2>&1 || true
+  openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
+  hybrid_memory_enqueue_event "memory-manual-sync" "用户启用四层记忆方案"
+  hybrid_memory_sync_once >/dev/null 2>&1 || true
+
+  echo "✅ 四层记忆方案已启用：官方文件记忆 + LanceDB + EvoMap + MemOS/EvoMap。"
 }
 
 hybrid_memory_status_json() {
@@ -2058,7 +2589,7 @@ hybrid_memory_status_json() {
   fi
 }
 
-hybrid_memory_status_report() {
+  hybrid_memory_status_report() {
   local status_json install_time sync_time lock_state load_state sync_stamp
   hybrid_memory_prepare_dirs
   status_json=$(hybrid_memory_status_json 2>/dev/null || echo '{"objects":0}')
@@ -2109,6 +2640,10 @@ print(f"{load1:.2f} / limit {limit:.2f}")
 PY
 )
   echo "融合根目录: $SKPL_HYBRID_MEMORY_ROOT"
+  echo "LanceDB 目录: $SKPL_HYBRID_MEMORY_LANCEDB_DIR"
+  echo "MemOS 目录: $SKPL_MEMOS_ROOT"
+  echo "任务目录: $SKPL_MEMOS_TASKS_DIR"
+  echo "技能目录: $SKPL_MEMOS_SKILLS_DIR"
   echo "安装时间: $install_time"
   echo "最近同步: $sync_time"
   echo "同步版本: $sync_stamp"
@@ -2139,6 +2674,196 @@ for key in ('fts5', 'vector', 'rerank'):
     meta = plugins.get(key) or {}
     enabled = 'on' if meta.get('enabled') else 'off'
     print(f"插件 {key}: {enabled} / {meta.get('status', 'unknown')}")
+PY
+  openclaw_memory_memos_overview
+  openclaw_memory_enterprise_status
+  openclaw_memory_model_enhancement_status
+}
+
+openclaw_memory_memos_overview() {
+  python3 - "$SKPL_MEMOS_TASKS_DIR" "$SKPL_MEMOS_SKILLS_DIR" "$SKPL_MEMOS_STATE_DIR/skill-history.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+tasks_dir = Path(sys.argv[1])
+skills_dir = Path(sys.argv[2])
+history_path = Path(sys.argv[3])
+task_count = len(list(tasks_dir.glob('*.md'))) if tasks_dir.exists() else 0
+skill_dirs = [p for p in skills_dir.iterdir() if p.is_dir()] if skills_dir.exists() else []
+skill_count = len(skill_dirs)
+scores = []
+for item in skill_dirs:
+    meta = item / 'metadata.json'
+    if not meta.exists():
+        continue
+    try:
+        scores.append(int(json.loads(meta.read_text(encoding='utf-8')).get('qualityScore') or 0))
+    except Exception:
+        pass
+avg_score = round(sum(scores) / len(scores), 1) if scores else 0
+history_count = 0
+if history_path.exists():
+    history_count = len([line for line in history_path.read_text(encoding='utf-8', errors='ignore').splitlines() if line.strip()])
+print(f"任务产物: {task_count}")
+print(f"技能产物: {skill_count}")
+print(f"平均质量: {avg_score}")
+print(f"升级记录: {history_count}")
+PY
+}
+
+openclaw_memory_enterprise_status() {
+  local active_enabled dream_enabled skill_enabled dreams_file workspace_skills_dir
+  active_enabled=$(openclaw_json_get_bool '.plugins.entries["active-memory"].enabled // false' 2>/dev/null || echo false)
+  dream_enabled=$(openclaw_json_get_bool '.plugins.entries["memory-core"].config.dreaming.enabled // false' 2>/dev/null || echo false)
+  skill_enabled=$(openclaw_json_get_bool '.plugins.entries["skill-workshop"].enabled // false' 2>/dev/null || echo false)
+  dreams_file=$(openclaw_memory_dreams_file)
+  workspace_skills_dir=$(openclaw_memory_workspace_skills_dir)
+  echo "企业增强层:"
+  echo "  Active Memory: $active_enabled"
+  echo "  Dreaming: $dream_enabled"
+  echo "  Skill Workshop: $skill_enabled"
+  echo "  Dreams 文件: $dreams_file"
+  echo "  工作区技能目录: $workspace_skills_dir"
+  [ -f "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" ] && echo "  企业状态文件: $SKPL_MEMORY_ENTERPRISE_STATE_FILE"
+}
+
+openclaw_memory_view_dreams() {
+  local dreams_file
+  dreams_file=$(openclaw_memory_dreams_file)
+  if [ ! -f "$dreams_file" ]; then
+    echo "暂无 DREAMS.md 产物。"
+    return 0
+  fi
+  python3 - "$dreams_file" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+lines = path.read_text(encoding='utf-8', errors='ignore').splitlines()
+print('\n'.join(lines[-120:]))
+PY
+}
+
+openclaw_memory_list_workspace_skills() {
+  local target_dir
+  target_dir=$(openclaw_memory_workspace_skills_dir)
+  if [ ! -d "$target_dir" ]; then
+    echo "工作区技能目录尚未生成。"
+    return 0
+  fi
+  python3 - "$target_dir" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+items = []
+for skill_dir in sorted(root.iterdir()):
+    if not skill_dir.is_dir():
+        continue
+    meta = skill_dir / 'metadata.json'
+    score = '-'
+    version = '-'
+    title = skill_dir.name
+    if meta.exists():
+        try:
+            data = json.loads(meta.read_text(encoding='utf-8'))
+            score = data.get('qualityScore', '-')
+            version = data.get('version', '-')
+            title = data.get('goal') or title
+        except Exception:
+            pass
+    print(f"- {title} | slug={skill_dir.name} | v{version} | score={score}")
+PY
+}
+
+openclaw_memory_list_tasks() {
+  python3 - "$SKPL_MEMOS_TASKS_DIR" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+tasks_dir = Path(sys.argv[1])
+if not tasks_dir.exists():
+    print('暂无任务产物。')
+    raise SystemExit(0)
+files = sorted(tasks_dir.glob('*.md'), key=lambda p: p.stat().st_mtime, reverse=True)
+if not files:
+    print('暂无任务产物。')
+    raise SystemExit(0)
+print('最近任务:')
+for idx, path in enumerate(files[:12], start=1):
+    text = path.read_text(encoding='utf-8', errors='ignore')
+    title = next((line[2:].strip() for line in text.splitlines() if line.startswith('# ')), path.stem)
+    score_match = re.search(r'^- Quality Score: (\d+)/100$', text, re.M)
+    score = score_match.group(1) if score_match else '-'
+    print(f"{idx}. {title} | score={score} | file={path.name}")
+PY
+}
+
+openclaw_memory_list_skills() {
+  python3 - "$SKPL_MEMOS_SKILLS_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+skills_dir = Path(sys.argv[1])
+if not skills_dir.exists():
+    print('暂无技能产物。')
+    raise SystemExit(0)
+items = []
+for skill_dir in skills_dir.iterdir():
+    if not skill_dir.is_dir():
+        continue
+    meta = skill_dir / 'metadata.json'
+    score = 0
+    version = 0
+    goal = skill_dir.name
+    if meta.exists():
+        try:
+            data = json.loads(meta.read_text(encoding='utf-8'))
+            score = int(data.get('qualityScore') or 0)
+            version = int(data.get('version') or 0)
+            goal = str(data.get('goal') or goal)
+        except Exception:
+            pass
+    items.append((skill_dir.name, goal, score, version))
+if not items:
+    print('暂无技能产物。')
+    raise SystemExit(0)
+items.sort(key=lambda item: (-item[2], item[0]))
+print('技能清单:')
+for idx, (name, goal, score, version) in enumerate(items[:12], start=1):
+    print(f"{idx}. {goal} | slug={name} | v{version} | score={score}")
+PY
+}
+
+openclaw_memory_skill_history() {
+  python3 - "$SKPL_MEMOS_STATE_DIR/skill-history.jsonl" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    print('暂无技能升级记录。')
+    raise SystemExit(0)
+rows = []
+for line in path.read_text(encoding='utf-8', errors='ignore').splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        rows.append(json.loads(line))
+    except Exception:
+        continue
+if not rows:
+    print('暂无技能升级记录。')
+    raise SystemExit(0)
+print('最近升级记录:')
+for idx, item in enumerate(rows[-12:][::-1], start=1):
+    print(f"{idx}. {item.get('goal', item.get('skill', '-'))} | v{item.get('version', '-')} | prev={item.get('previousVersion', '-')} | score={item.get('qualityScore', '-')}")
 PY
 }
 
@@ -2335,6 +3060,13 @@ PY
       sync_status="error"
       sync_message="fast cards 导出失败"
       error_detail="hybrid_memory_export_fast_cards returned non-zero"
+    fi
+  fi
+  if [ "$sync_status" = "ok" ]; then
+    if ! hybrid_memory_run_memos_postprocess >/dev/null 2>&1; then
+      sync_status="error"
+      sync_message="MemOS 本地后处理失败"
+      error_detail="hybrid_memory_run_memos_postprocess returned non-zero"
     fi
   fi
   rm -f "$SKPL_HYBRID_MEMORY_SYNC_LOCK_FILE"
@@ -2552,6 +3284,18 @@ openclaw_default_memory_model_path() {
   echo "/root/.openclaw/models/embedding/embeddinggemma-300M-Q8_0.gguf"
 }
 
+openclaw_default_memory_q4km_model_path() {
+  echo "/root/.openclaw/models/embedding/embeddinggemma-300M-Q4_K_M.gguf"
+}
+
+openclaw_default_cloud_vision_model() {
+  echo "google/gemini-2.5-flash"
+}
+
+openclaw_default_cloud_ocr_model() {
+  echo "google/gemini-2.5-pro"
+}
+
 install_node_and_tools() {
   ensure_node_runtime
 }
@@ -2683,6 +3427,181 @@ openclaw_memory_prepare() {
   openclaw config set agents.defaults.memorySearch.local.modelPath "${model_path}" >/dev/null 2>&1 || true
 
   printf '%s\n' "$model_path"
+}
+
+openclaw_memory_apply_local_q4km_model() {
+  local model_name model_dir model_dest model_url
+  model_name="embeddinggemma-300M-Q4_K_M.gguf"
+  model_dir="$HOME/.openclaw/models/embedding"
+  model_dest="$model_dir/$model_name"
+  model_url="${OPENCLAW_MEMORY_HF_BASE}/ggml-org/embeddinggemma-300M-GGUF/resolve/main/$model_name"
+
+  mkdir -p "$model_dir" /root/.openclaw/workspace/memory
+  openclaw_memory_config_set "memory.backend" "builtin"
+  openclaw_memory_config_set "agents.defaults.memorySearch.provider" "local"
+  openclaw_memory_config_set "memory.qmd.includeDefaultMemory" true >/dev/null 2>&1 || true
+  if [ "$OPENCLAW_MEMORY_CONFIG_ONLY" = "true" ]; then
+    echo "ℹ️ 仅写配置模式：跳过 Q4_K_M 模型下载"
+  else
+    if [ ! -f "$model_dest" ]; then
+      echo "⬇️ 下载 Q4_K_M 量化模型: $model_url"
+      openclaw_memory_download_file "$model_url" "$model_dest" || return 1
+    fi
+  fi
+  openclaw_memory_config_set "agents.defaults.memorySearch.local.modelPath" "$model_dest"
+  OPENCLAW_MEMORY_MODEL_PATH="$model_dest"
+  echo "✅ 已切换为本地 Q4_K_M 量化模型: $model_dest"
+}
+
+openclaw_memory_enable_local_q8o_model() {
+  local model_name model_dir model_dest model_url
+  model_name="embeddinggemma-300M-Q8_0.gguf"
+  model_dir="$HOME/.openclaw/models/embedding"
+  model_dest="$model_dir/$model_name"
+  model_url="${OPENCLAW_MEMORY_HF_BASE}/ggml-org/embeddinggemma-300M-GGUF/resolve/main/$model_name"
+
+  mkdir -p "$model_dir" /root/.openclaw/workspace/memory
+  openclaw_memory_config_set "memory.backend" "builtin"
+  openclaw_memory_config_set "agents.defaults.memorySearch.provider" "local"
+  openclaw_memory_config_set "memory.qmd.includeDefaultMemory" true >/dev/null 2>&1 || true
+  if [ "$OPENCLAW_MEMORY_CONFIG_ONLY" = "true" ]; then
+    echo "ℹ️ 仅写配置模式：跳过 Q8_0 模型下载"
+  else
+    if [ ! -f "$model_dest" ]; then
+      echo "⬇️ 下载 Q8_0 模型: $model_url"
+      openclaw_memory_download_file "$model_url" "$model_dest" || return 1
+    fi
+  fi
+  openclaw_memory_config_set "agents.defaults.memorySearch.local.modelPath" "$model_dest"
+  OPENCLAW_MEMORY_MODEL_PATH="$model_dest"
+  echo "✅ 已切换为本地 Q8_0 量化模型: $model_dest"
+}
+
+openclaw_enable_cloud_vision_recognition() {
+  local default_model vision_model
+  default_model=$(openclaw_json_get_string '.agents.defaults.model.primary // empty' 2>/dev/null || true)
+  vision_model=$(openclaw_default_cloud_vision_model)
+  if [ -z "$default_model" ] || [ "$default_model" = "null" ]; then
+    default_model="$vision_model"
+  fi
+
+  openclaw_memory_config_set "agents.defaults.model.imageModelFallback" "$vision_model"
+  openclaw_memory_config_set "agents.defaults.modelFallback" "$default_model"
+  openclaw_memory_config_set "plugins.entries.active-memory.config.modelFallback" "$vision_model"
+  openclaw_memory_config_set "plugins.entries.active-memory.config.promptAppend" "Prefer image-capable recall and visual understanding when screenshots, photos, diagrams, UI pages, or image attachments appear in the session." >/dev/null 2>&1 || true
+  echo "✅ 已启用云端图像识别 fallback: $vision_model"
+  echo "主模型保持: $default_model"
+}
+
+openclaw_enable_cloud_ocr_recognition() {
+  local ocr_model
+  ocr_model=$(openclaw_default_cloud_ocr_model)
+  openclaw_memory_config_set "agents.defaults.model.imageModelFallback" "$ocr_model"
+  openclaw_memory_config_set "agents.defaults.modelFallback" "$ocr_model"
+  openclaw_memory_config_set "plugins.entries.active-memory.config.modelFallback" "$ocr_model"
+  openclaw_memory_config_set "plugins.entries.active-memory.config.promptAppend" "Prefer cloud OCR for PDF pages, scans, screenshots, charts, tables, and image attachments that contain text." >/dev/null 2>&1 || true
+  echo "✅ 已启用云端 OCR fallback: $ocr_model"
+}
+
+openclaw_memory_route_visual_model() {
+  local media_hint="$1"
+  case "$media_hint" in
+    pdf|document|doc|scan|ocr)
+      openclaw_enable_cloud_ocr_recognition
+      ;;
+    screenshot|ui|image|diagram|photo)
+      openclaw_enable_cloud_vision_recognition
+      ;;
+    *)
+      openclaw_enable_cloud_vision_recognition
+      ;;
+  esac
+}
+
+openclaw_memory_model_enhancement_status() {
+  local local_model image_model fallback_model
+  local_model=$(openclaw_memory_get_local_model_path)
+  image_model=$(openclaw_json_get_string '.agents.defaults.model.imageModelFallback // empty' 2>/dev/null || true)
+  fallback_model=$(openclaw_json_get_string '.agents.defaults.modelFallback // empty' 2>/dev/null || true)
+  echo "模型增强状态:"
+  echo "  本地记忆模型: ${local_model:-未配置}"
+  echo "  图像识别 fallback: ${image_model:-未配置}"
+  echo "  通用 fallback: ${fallback_model:-未配置}"
+  echo "  视觉记忆: $(find "$SKPL_VISUAL_MEMORY_ARCHIVE_DIR" -type f 2>/dev/null | wc -l | tr -d ' ') 条"
+}
+
+openclaw_memory_prompt_hint_auto_route() {
+  local hint="$1"
+  case "$hint" in
+    pdf|document|scan|ocr)
+      openclaw_enable_cloud_ocr_recognition
+      ;;
+    screenshot|ui|image|diagram|photo)
+      openclaw_enable_cloud_vision_recognition
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+openclaw_memory_model_enhancement_menu() {
+  while true; do
+    clear
+    skpl_ui_header "模型增强" "云端图形识别与本地量化模型"
+    openclaw_memory_model_enhancement_status
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "云端图形识别" "截图/UI/图片自动走云端视觉"
+    skpl_ui_menu_item 2 "切换本地 Q4_K_M" "使用本地 Q4_K_M 量化 embedding 模型"
+    skpl_ui_menu_item 3 "切换本地 Q8_0" "使用本地 Q8_0 量化 embedding 模型"
+    skpl_ui_menu_item 4 "启用云端 OCR" "PDF / 文档 / 扫描件自动走 OCR"
+    skpl_ui_menu_item 5 "企业增强全开" "云端视觉 + 本地量化 + 企业增强四层"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请选择: "
+    read -e choice
+    case "$choice" in
+      1)
+        openclaw_memory_route_visual_model "image"
+        openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
+        break_end
+        ;;
+      2)
+        openclaw_memory_detect_region
+        openclaw_memory_select_sources
+        openclaw_memory_apply_local_q4km_model
+        openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
+        break_end
+        ;;
+      3)
+        openclaw_memory_detect_region
+        openclaw_memory_select_sources
+        openclaw_memory_enable_local_q8o_model
+        openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
+        break_end
+        ;;
+      4)
+        openclaw_memory_route_visual_model "pdf"
+        openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
+        break_end
+        ;;
+      5)
+        openclaw_memory_detect_region
+        openclaw_memory_select_sources
+        openclaw_memory_apply_local_q4km_model || { break_end; continue; }
+        openclaw_enable_cloud_vision_recognition
+        openclaw_memory_enable_enterprise_four_layer
+        break_end
+        ;;
+      0)
+        return 0
+        ;;
+      *)
+        echo "无效的选择，请重试。"
+        sleep 1
+        ;;
+    esac
+  done
 }
 
 openclaw_memory_prepare_prefetch() {
@@ -7009,13 +7928,13 @@ PY
         ;;
       project)
         case "$rel" in
-          openclaw.json|workspace/*|extensions/*|skills/*|prompts/*|tools/*|telegram/*|feishu/*|whatsapp/*|discord/*|slack/*|qqbot/*|logs/*) return 0 ;;
+          openclaw.json|workspace/*|extensions/*|skills/*|prompts/*|tools/*|telegram/*|feishu/*|whatsapp/*|discord/*|slack/*|qqbot/*|logs/*|memos/*|DREAMS.md|memory/dreaming/*) return 0 ;;
           *) return 1 ;;
         esac
         ;;
       bundle)
         case "$rel" in
-          openclaw-root/openclaw.json|openclaw-root/workspace/*|openclaw-root/extensions/*|openclaw-root/skills/*|openclaw-root/prompts/*|openclaw-root/tools/*|openclaw-root/telegram/*|openclaw-root/feishu/*|openclaw-root/whatsapp/*|openclaw-root/discord/*|openclaw-root/slack/*|openclaw-root/qqbot/*|openclaw-root/logs/*|agents/*/MEMORY.md|agents/*/memory/*|hybrid-memory/*|evomap/*|evomap-memory/*|evomap-backups/*|memory-config/openclaw.json) return 0 ;;
+          openclaw-root/openclaw.json|openclaw-root/workspace/*|openclaw-root/extensions/*|openclaw-root/skills/*|openclaw-root/prompts/*|openclaw-root/tools/*|openclaw-root/telegram/*|openclaw-root/feishu/*|openclaw-root/whatsapp/*|openclaw-root/discord/*|openclaw-root/slack/*|openclaw-root/qqbot/*|openclaw-root/logs/*|openclaw-root/memos/*|openclaw-root/DREAMS.md|openclaw-root/memory/dreaming/*|agents/*/MEMORY.md|agents/*/memory/*|hybrid-memory/*|evomap/*|evomap-memory/*|evomap-backups/*|memos/*|memory-config/openclaw.json) return 0 ;;
           *) return 1 ;;
         esac
         ;;
@@ -7165,11 +8084,14 @@ for item in workspaces:
             if os.path.isfile(src): shutil.copy2(src, target_dir)
             else: shutil.copytree(src, os.path.join(target_dir, f), dirs_exist_ok=True)
 " "$workspaces_json" "$tmp_payload"
+    [ -d "$SKPL_HYBRID_MEMORY_ROOT" ] && cp -a "$SKPL_HYBRID_MEMORY_ROOT" "$tmp_payload/hybrid-memory"
+    [ -d "$SKPL_MEMOS_ROOT" ] && cp -a "$SKPL_MEMOS_ROOT" "$tmp_payload/memos"
+    [ -d "$EVOMAP_MEMORY_DIR" ] && cp -a "$EVOMAP_MEMORY_DIR" "$tmp_payload/evomap-memory"
     if ! find "$tmp_payload" -mindepth 1 -print -quit | grep -q .; then
       echo "❌ 未找到可备份的记忆文件"; rm -rf "$tmp_payload"; break_end; return 1
     fi
     if openclaw_pack_backup_archive "memory-full" "multi-agent" "$tmp_payload" "$out_file"; then
-      echo "✅ 记忆全量备份完成 (含多智能体): $out_file"; openclaw_offer_transfer_hint "$out_file"
+      echo "✅ 记忆全量备份完成 (含多智能体/混合记忆/MemOS): $out_file"; openclaw_offer_transfer_hint "$out_file"
     else
       echo "❌ 记忆全量备份失败"
     fi
@@ -7183,19 +8105,53 @@ for item in workspaces:
     local tmp_unpack=$(mktemp -d) || return 1
     local pkg_dir=$(openclaw_prepare_import_archive "memory-full" "$archive_path" "$tmp_unpack") || { rm -rf "$tmp_unpack"; break_end; return 1; }
     local workspaces_json=$(openclaw_get_all_agent_workspaces)
-    python3 -c 'import json, sys, os, shutil;
-workspaces = {item["id"]: item["ws"] for item in json.loads(sys.argv[1])};
-payload_dir = sys.argv[2]; agents_root = os.path.join(payload_dir, "agents")
+    python3 - "$workspaces_json" "$pkg_dir/payload" "$SKPL_HYBRID_MEMORY_ROOT" "$SKPL_MEMOS_ROOT" "$EVOMAP_MEMORY_DIR" <<'PY'
+import json, sys, os, shutil
+
+workspaces = {item["id"]: item["ws"] for item in json.loads(sys.argv[1])}
+payload_dir = sys.argv[2]
+hybrid_root = sys.argv[3]
+memos_root = sys.argv[4]
+evomap_memory_dir = sys.argv[5]
+
+def copy_replace(src, dest):
+    parent = os.path.dirname(dest)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if os.path.exists(dest):
+        backup = dest + '.pre-restore'
+        if os.path.exists(backup):
+            if os.path.isdir(backup):
+                shutil.rmtree(backup, ignore_errors=True)
+            else:
+                os.remove(backup)
+        shutil.move(dest, backup)
+    if os.path.isdir(src):
+        shutil.copytree(src, dest, dirs_exist_ok=False)
+    else:
+        shutil.copy2(src, dest)
+
+agents_root = os.path.join(payload_dir, "agents")
 if os.path.isdir(agents_root):
     for aid in os.listdir(agents_root):
         if aid in workspaces:
-            src_agent_dir = os.path.join(agents_root, aid); dest_ws = workspaces[aid]
+            src_agent_dir = os.path.join(agents_root, aid)
+            dest_ws = workspaces[aid]
             os.makedirs(dest_ws, exist_ok=True)
             for f in os.listdir(src_agent_dir):
-                src = os.path.join(src_agent_dir, f); dest = os.path.join(dest_ws, f)
-                if os.path.isfile(src): shutil.copy2(src, dest)
-                else: shutil.copytree(src, dest, dirs_exist_ok=True)
-            print(f"✅ 已还原智能体记忆: {aid}")' "$workspaces_json" "$pkg_dir/payload"
+                copy_replace(os.path.join(src_agent_dir, f), os.path.join(dest_ws, f))
+            print(f"✅ 已还原智能体记忆: {aid}")
+
+for src_name, dest in [
+    ("hybrid-memory", hybrid_root),
+    ("memos", memos_root),
+    ("evomap-memory", evomap_memory_dir),
+]:
+    src = os.path.join(payload_dir, src_name)
+    if os.path.exists(src):
+        copy_replace(src, dest)
+        print(f"✅ 已还原目录: {src_name}")
+PY
     rm -rf "$tmp_unpack"; echo "✅ 记忆全量还原完成"; break_end
   }
 
@@ -7212,10 +8168,12 @@ if os.path.isdir(agents_root):
 
     if [ -d "$openclaw_root" ]; then
       mkdir -p "$tmp_payload/openclaw-root"
-      for d in workspace extensions skills prompts tools telegram feishu whatsapp discord slack qqbot logs; do
+      for d in workspace extensions skills prompts tools telegram feishu whatsapp discord slack qqbot logs memos; do
         [ -e "$openclaw_root/$d" ] && cp -a "$openclaw_root/$d" "$tmp_payload/openclaw-root/"
       done
       [ -f "$openclaw_root/openclaw.json" ] && cp -a "$openclaw_root/openclaw.json" "$tmp_payload/openclaw-root/"
+      [ -f "$openclaw_root/DREAMS.md" ] && cp -a "$openclaw_root/DREAMS.md" "$tmp_payload/openclaw-root/"
+      [ -d "$openclaw_root/memory/dreaming" ] && mkdir -p "$tmp_payload/openclaw-root/memory" && cp -a "$openclaw_root/memory/dreaming" "$tmp_payload/openclaw-root/memory/"
     fi
 
     workspaces_json=$(openclaw_get_all_agent_workspaces)
@@ -7239,6 +8197,7 @@ for item in workspaces:
     [ -d "$EVOMAP_DIR" ] && cp -a "$EVOMAP_DIR" "$tmp_payload/evomap"
     [ -d "$EVOMAP_MEMORY_DIR" ] && cp -a "$EVOMAP_MEMORY_DIR" "$tmp_payload/evomap-memory"
     [ -d "$EVOMAP_BACKUP_DIR" ] && cp -a "$EVOMAP_BACKUP_DIR" "$tmp_payload/evomap-backups"
+    [ -f "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" ] && mkdir -p "$tmp_payload/enterprise-memory" && cp -a "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" "$tmp_payload/enterprise-memory/state.json"
 
     if ! find "$tmp_payload" -mindepth 1 -print -quit | grep -q .; then
       echo "❌ 未找到可备份的数据"
@@ -7249,7 +8208,7 @@ for item in workspaces:
 
     if openclaw_pack_backup_archive "openclaw-bundle" "full" "$tmp_payload" "$out_file"; then
       echo "✅ 统一全量备份完成: $out_file"
-      echo "包含: OpenClaw 项目、所有智能体记忆、记忆方案配置、混合记忆、EvoMap 目录与 EvoMap 备份目录。"
+      echo "包含: OpenClaw 项目、所有智能体记忆、记忆方案配置、混合记忆、MemOS、Dream Diary、企业增强状态、EvoMap 目录与 EvoMap 备份目录。"
       openclaw_offer_transfer_hint "$out_file"
     else
       echo "❌ 统一全量备份失败"
@@ -7313,7 +8272,7 @@ for item in workspaces:
     evomap_stop_loop >/dev/null 2>&1 || true
 
     workspaces_json=$(openclaw_get_all_agent_workspaces)
-    python3 - "$workspaces_json" "$pkg_dir/payload" "$openclaw_root" "$SKPL_HYBRID_MEMORY_ROOT" "$EVOMAP_DIR" "$EVOMAP_MEMORY_DIR" "$EVOMAP_BACKUP_DIR" <<'PY'
+    python3 - "$workspaces_json" "$pkg_dir/payload" "$openclaw_root" "$SKPL_HYBRID_MEMORY_ROOT" "$EVOMAP_DIR" "$EVOMAP_MEMORY_DIR" "$EVOMAP_BACKUP_DIR" "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" <<'PY'
 import json, os, shutil, sys
 
 workspaces = {item['id']: item['ws'] for item in json.loads(sys.argv[1])}
@@ -7323,6 +8282,7 @@ hybrid_root = sys.argv[4]
 evomap_dir = sys.argv[5]
 evomap_memory_dir = sys.argv[6]
 evomap_backup_dir = sys.argv[7]
+enterprise_state_file = sys.argv[8]
 
     def copy_replace(src, dest):
         os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -7365,6 +8325,10 @@ for src_name, dest in [
 memory_cfg = os.path.join(payload, 'memory-config', 'openclaw.json')
 if os.path.isfile(memory_cfg):
     copy_replace(memory_cfg, os.path.expanduser('~/.openclaw/openclaw.json'))
+
+enterprise_state = os.path.join(payload, 'enterprise-memory', 'state.json')
+if os.path.isfile(enterprise_state):
+    copy_replace(enterprise_state, enterprise_state_file)
 PY
 
     if command -v openclaw >/dev/null 2>&1; then
@@ -8535,6 +9499,8 @@ EOF
       skpl_ui_menu_item 1 "QMD" "轻量索引方案"
       skpl_ui_menu_item 2 "Local" "本地向量检索方案"
       skpl_ui_menu_item 3 "Auto" "自动选择推荐方案"
+      skpl_ui_menu_item 4 "四层方案" "一键启用 官方文件记忆 + LanceDB + EvoMap + MemOS/EvoMap"
+      skpl_ui_menu_item 5 "Local Q4_K_M" "本地量化 embedding 模型方案"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e auto_choice
@@ -8549,6 +9515,19 @@ EOF
           ;;
         3)
           openclaw_memory_auto_setup_run "auto"
+          break_end
+          ;;
+        4)
+          openclaw_memory_enable_four_layer_stack
+          break_end
+          ;;
+        5)
+          openclaw_memory_detect_region
+          openclaw_memory_select_sources
+          OPENCLAW_MEMORY_CONFIG_ONLY="false"
+          OPENCLAW_MEMORY_PREHEAT="true"
+          openclaw_memory_apply_local_q4km_model
+          openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
           break_end
           ;;
         0)
@@ -8650,26 +9629,36 @@ EOF
   openclaw_memory_scheme_menu() {
     while true; do
       clear
-      skpl_ui_header "记忆方案" "QMD / Local / Auto"
+      skpl_ui_header "记忆方案" "官方文件记忆 / LanceDB / EvoMap / MemOS"
       local backend current_label
       backend=$(openclaw_memory_get_backend)
       case "$backend" in
-        qmd) current_label="QMD" ;;
-        builtin|local) current_label="Local" ;;
+        qmd) current_label="QMD 基础方案" ;;
+        builtin|local) current_label="Local 四层方案" ;;
         *) current_label="未配置" ;;
       esac
       skpl_ui_section "当前设置"
       skpl_ui_kv "当前方案" "$current_label"
       echo ""
       skpl_ui_section "说明"
-      echo "QMD  : 轻量索引，依赖 qmd 命令（适合网络受限）"
-      echo "Local: 本地向量检索，依赖 embedding 模型文件"
-      echo "Auto : 自动推荐（基于可用性 + 网络探测）"
+      echo "QMD  : 官方文件记忆基础方案，轻量、易维护，适合先跑通"
+      echo "Local: 官方文件记忆 + LanceDB 本地向量检索 + EvoMap 关系推理 + MemOS/EvoMap 双引擎进化"
+      echo "Auto : 自动推荐，优先落到本地四层方案"
+      echo ""
+      echo "推荐搭配："
+      echo "1. 官方文件记忆负责核心事实，继续维护 MEMORY.md 与 memory/*.md"
+      echo "2. LanceDB 负责本地向量召回，解决找得到"
+      echo "3. EvoMap 负责关系推理与知识卡融合，解决想得深"
+      echo "4. MemOS 目录负责任务总结与技能沉淀，解决学得会"
+      echo "5. 企业增强层叠加 Active Memory、Dreaming 与 Skill Workshop，解决想得早、升得稳、用得久"
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "切换 QMD" "自动部署 / 已装则跳过"
-      skpl_ui_menu_item 2 "切换 Local" "自动部署 / 已装则跳过"
-      skpl_ui_menu_item 3 "Auto" "自动推荐并部署"
+      skpl_ui_menu_item 1 "切换 QMD 基础方案" "仅官方文件记忆 + 轻量索引"
+      skpl_ui_menu_item 2 "切换 Local 四层方案" "官方文件记忆 + LanceDB + EvoMap + MemOS/EvoMap"
+      skpl_ui_menu_item 3 "Auto" "自动推荐并部署本地四层方案"
+      skpl_ui_menu_item 4 "一键启用四层方案" "复用已装 EvoMap，缺失时补装，并校准 LanceDB 与 MemOS 目录"
+      skpl_ui_menu_item 5 "企业增强四层方案" "叠加 Active Memory、Dreaming、Skill Workshop"
+      skpl_ui_menu_item 6 "模型增强" "云端图形识别 / 云端 OCR / 本地 Q4_K_M / Q8_0"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e scheme_choice
@@ -8685,6 +9674,17 @@ EOF
         3)
           openclaw_memory_auto_setup_run "auto"
           break_end
+          ;;
+        4)
+          openclaw_memory_enable_four_layer_stack
+          break_end
+          ;;
+        5)
+          openclaw_memory_enable_enterprise_four_layer
+          break_end
+          ;;
+        6)
+          openclaw_memory_model_enhancement_menu
           ;;
         0)
           return 0
@@ -8888,7 +9888,9 @@ openclaw_memory_benchmark_search_test() {
     "evomap"
     "gateway"
     "index"
-    "qdrant"
+    "lancedb"
+    "skill"
+    "task"
   )
   python3 - <<'PY' "${benchmark_queries[@]}"
 import sys
@@ -8946,16 +9948,25 @@ PY
       skpl_ui_menu_item 2 "更新记忆索引" "增量或全量重建"
       skpl_ui_menu_item 3 "查看记忆文件" "浏览 MEMORY.md 与 memory/"
       skpl_ui_menu_item 4 "索引修复" "处理 Indexed 异常"
-      skpl_ui_menu_item 5 "记忆方案" "QMD / Local / Auto"
+      skpl_ui_menu_item 5 "记忆方案" "基础方案 / 本地四层方案 / 自动推荐"
       skpl_ui_menu_item 6 "搜索测试" "验证索引是否工作"
       skpl_ui_menu_item 7 "深度状态探测" "检查嵌入模型"
       skpl_ui_menu_item 8 "后台预热日志" "查看 bootstrap 输出"
       skpl_ui_menu_item 9 "融合记忆同步" "同步 EvoMap 与混合检索栈"
       skpl_ui_menu_item 10 "混合检索测试" "测试检索并显示来源解释"
-      skpl_ui_menu_item 11 "融合栈状态" "查看插件、负载与同步状态"
+      skpl_ui_menu_item 11 "融合栈状态" "查看插件、负载、任务与技能状态"
       skpl_ui_menu_item 12 "查看混合知识卡" "浏览独立导出的 hybrid-cards"
       skpl_ui_menu_item 13 "检索结果对照" "原生搜索与混合检索并排比对"
       skpl_ui_menu_item 14 "批量检索评测" "固定查询集快速验证检索效果"
+      skpl_ui_menu_item 15 "查看任务产物" "浏览 MemOS 归档出的任务摘要"
+      skpl_ui_menu_item 16 "查看技能产物" "浏览技能卡、版本与质量"
+      skpl_ui_menu_item 17 "技能升级历史" "查看同名技能的升级轨迹"
+      skpl_ui_menu_item 18 "企业增强状态" "查看 Active Memory、Dreaming、Skill Workshop"
+      skpl_ui_menu_item 19 "查看 Dream Diary" "浏览 DREAMS.md 与 dreaming 产物"
+      skpl_ui_menu_item 20 "发布技能到工作区" "把 MemOS 技能卡同步到 workspace/skills"
+      skpl_ui_menu_item 21 "查看工作区技能" "查看已发布的工作区技能卡"
+      skpl_ui_menu_item 22 "执行企业进化回合" "手动触发同步、技能发布与 Dream Diary 记录"
+      skpl_ui_menu_item 23 "模型增强" "启用云端图形识别与本地量化模型"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e memory_choice
@@ -9043,6 +10054,42 @@ EOF
         14)
           openclaw_memory_benchmark_search_test
           break_end
+          ;;
+        15)
+          openclaw_memory_list_tasks
+          break_end
+          ;;
+        16)
+          openclaw_memory_list_skills
+          break_end
+          ;;
+        17)
+          openclaw_memory_skill_history
+          break_end
+          ;;
+        18)
+          openclaw_memory_enterprise_status
+          break_end
+          ;;
+        19)
+          openclaw_memory_view_dreams
+          break_end
+          ;;
+        20)
+          openclaw_memory_publish_skills_to_workspace
+          break_end
+          ;;
+        21)
+          openclaw_memory_list_workspace_skills
+          break_end
+          ;;
+        22)
+          openclaw_memory_run_enterprise_evolution
+          echo "✅ 企业进化回合已完成"
+          break_end
+          ;;
+        23)
+          openclaw_memory_model_enhancement_menu
           ;;
         0)
           return 0
