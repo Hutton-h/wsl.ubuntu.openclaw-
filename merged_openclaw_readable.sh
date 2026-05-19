@@ -55,6 +55,11 @@ SKPL_DEVICES_LIST_CACHE_FILE="${SKPL_HOME}/devices-list.txt"
 SKPL_PLUGIN_LIST_CACHE_FILE="${SKPL_HOME}/plugins-list.txt"
 SKPL_PANEL_OVERVIEW_CACHE_FILE="${SKPL_HOME}/panel-overview.tsv"
 SKPL_CHANNEL_PROBE_CACHE_FILE="${SKPL_HOME}/channel-probe.txt"
+SKPL_NPM_INSTALL_TIMEOUT="240"
+SKPL_NPM_FETCH_RETRIES="2"
+SKPL_NPM_FETCH_TIMEOUT_MS="180000"
+SKPL_NPM_REGISTRY_FALLBACK_LIMIT="2"
+SKPL_GATEWAY_READY_TIMEOUT_SECONDS="6"
 SKPL_REMOTE_SCRIPT_URL="https://raw.githubusercontent.com/Hutton-h/wsl.ubuntu.openclaw-/main/merged_openclaw_readable.sh"
 SKPL_REMOTE_SCRIPT_PROXIES="https://gh-proxy.com/ https://ghproxy.net/ https://github.moeyy.xyz/ https://gh-proxy.llyke.com/ https://ghproxy.cc/"
 SKPL_BASE_NO_PROXY_RULE="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.ustc.edu.cn,.163.com,.huaweicloud.com,.tencent.com,.cn,mirrors.aliyun.com,mirrors.tuna.tsinghua.edu.cn,archive.ubuntu.com,security.ubuntu.com,deb.debian.org,packages.microsoft.com"
@@ -1421,11 +1426,17 @@ https://registry.npmmirror.com"
 
 npm_try_with_registries() {
   local registry rc=1
-  local npm_timeout_seconds="${SKPL_NPM_INSTALL_TIMEOUT:-600}"
+  local npm_timeout_seconds="${SKPL_NPM_INSTALL_TIMEOUT:-240}"
+  local fallback_limit="${SKPL_NPM_REGISTRY_FALLBACK_LIMIT:-2}"
+  local tried=0
   local -a npm_args=("$@")
 
   while IFS= read -r registry; do
     [ -z "$registry" ] && continue
+    if [ "$tried" -ge "$fallback_limit" ]; then
+      break
+    fi
+    tried=$((tried + 1))
     log_msg "npm 尝试 registry: $registry | timeout: ${npm_timeout_seconds}s | args: ${npm_args[*]}"
     echo "正在尝试 npm 源: ${registry}（超时 ${npm_timeout_seconds}s）..."
     set +e
@@ -1462,6 +1473,8 @@ install_openclaw_global() {
   local country="unknown"
   local preferred_registry="https://registry.npmjs.org"
   local active_proxy=""
+  local fetch_retries="${SKPL_NPM_FETCH_RETRIES:-2}"
+  local fetch_timeout_ms="${SKPL_NPM_FETCH_TIMEOUT_MS:-180000}"
 
   refresh_runtime_proxy_env
 
@@ -1479,26 +1492,27 @@ install_openclaw_global() {
   npm config set fund false >/dev/null 2>&1 || true
   npm config set audit false >/dev/null 2>&1 || true
   npm config set progress true >/dev/null 2>&1 || true
-  npm config set fetch-retries 5 >/dev/null 2>&1 || true
-  npm config set fetch-timeout 600000 >/dev/null 2>&1 || true
+  npm config set fetch-retries "$fetch_retries" >/dev/null 2>&1 || true
+  npm config set fetch-timeout "$fetch_timeout_ms" >/dev/null 2>&1 || true
 
   echo "正在安装 OpenClaw CLI..."
   echo "Node 版本: $(node -v 2>/dev/null || echo unknown)"
   echo "npm 版本: $(npm -v 2>/dev/null || echo unknown)"
   echo "当前 npm 源: ${preferred_registry}"
+  echo "安装超时: ${SKPL_NPM_INSTALL_TIMEOUT:-240}s | fetch-retries: ${fetch_retries} | fetch-timeout: ${fetch_timeout_ms}ms"
   if [ -n "$active_proxy" ]; then
     echo "当前检测到代理: ${active_proxy}"
   else
     echo "当前未检测到可用代理监听，按直连方式安装。"
   fi
 
-  if npm install -g openclaw@latest --no-fund --no-audit --prefer-online --fetch-retries=5 --fetch-timeout=600000; then
+  if timeout "${SKPL_NPM_INSTALL_TIMEOUT:-240}" npm install -g openclaw@latest --no-fund --no-audit --prefer-online --fetch-retries="$fetch_retries" --fetch-timeout="$fetch_timeout_ms"; then
     ensure_openclaw_cli_on_path >/dev/null 2>&1 || true
     return 0
   fi
 
   echo "首选 npm 源安装失败，开始尝试备用 npm 源..."
-  npm_try_with_registries install -g openclaw@latest --no-fund --no-audit --prefer-online --fetch-retries=5 --fetch-timeout=600000
+  npm_try_with_registries install -g openclaw@latest --no-fund --no-audit --prefer-online --fetch-retries="$fetch_retries" --fetch-timeout="$fetch_timeout_ms"
   ensure_openclaw_cli_on_path >/dev/null 2>&1 || true
 }
 
@@ -2605,7 +2619,8 @@ openclaw_gateway_status_quick() {
 }
 
 openclaw_ensure_gateway_ready() {
-  local i
+  local i max_wait
+  max_wait="${SKPL_GATEWAY_READY_TIMEOUT_SECONDS:-6}"
 
   if ! command -v openclaw >/dev/null 2>&1; then
     echo "OpenClaw CLI 未安装，无法启动网关。"
@@ -2632,7 +2647,8 @@ openclaw_ensure_gateway_ready() {
     openclaw_gateway_fallback_start >/dev/null 2>&1 || true
   fi
 
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  echo "正在等待 OpenClaw 网关就绪（最长 ${max_wait} 秒）..."
+  for ((i = 1; i <= max_wait; i++)); do
     if openclaw_gateway_is_running; then
       return 0
     fi
