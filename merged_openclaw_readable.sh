@@ -703,6 +703,22 @@ remove_openclaw_gateway_service() {
   systemctl --user daemon-reload >/dev/null 2>&1 || true
 }
 
+openclaw_get_config_file() {
+  local user_config="${HOME}/.openclaw/openclaw.json"
+  local root_config="/root/.openclaw/openclaw.json"
+  if [ -f "$user_config" ]; then
+    printf '%s\n' "$user_config"
+  elif [ "$HOME" = "/root" ] && [ -f "$root_config" ]; then
+    printf '%s\n' "$root_config"
+  else
+    printf '%s\n' "$user_config"
+  fi
+}
+
+openclaw_default_memory_model_path() {
+  printf '%s\n' "/root/.openclaw/models/embedding/embeddinggemma-300M-Q8_0.gguf"
+}
+
 log_msg() {
   local msg="$1"
   printf '[%s] %s\n' "$(date '+%F %T')" "$msg" >> "$SKPL_LOG_FILE"
@@ -2356,6 +2372,114 @@ path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding=
 PY
 }
 
+hybrid_memory_install_stack() {
+  hybrid_memory_prepare_dirs
+  hybrid_memory_write_broker
+  hybrid_memory_write_config
+  python3 - "$SKPL_HYBRID_MEMORY_DB" <<'PY'
+import sqlite3
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+conn = sqlite3.connect(path)
+conn.execute('create virtual table if not exists memory_fts using fts5(id, kind, source, summary, text, tags)')
+conn.execute('create table if not exists memory_objects (id text primary key, kind text, source text, summary text, text text, tags text, confidence real, created_at integer)')
+conn.commit()
+conn.close()
+PY
+}
+
+hybrid_memory_enqueue_event() {
+  local event_type="$1"
+  local message="$2"
+  local event_file
+  [ -n "$event_type" ] || return 1
+  hybrid_memory_prepare_dirs
+  event_file="${SKPL_HYBRID_MEMORY_EVENTS_DIR}/$(date +%s)-${event_type}.json"
+  python3 - "$event_file" "$event_type" "$message" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = {
+    'type': sys.argv[2],
+    'message': sys.argv[3],
+}
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+hybrid_memory_sync_once() {
+  hybrid_memory_prepare_dirs
+  date +%s > "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE"
+  : >> "$SKPL_HYBRID_MEMORY_SYNC_LOG"
+}
+
+hybrid_memory_status_json() {
+  hybrid_memory_prepare_dirs
+  python3 - "$SKPL_HYBRID_MEMORY_DB" "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1])
+stamp_path = Path(sys.argv[2])
+objects = 0
+if db_path.exists():
+    try:
+        conn = sqlite3.connect(db_path)
+        row = conn.execute('select count(*) from memory_objects').fetchone()
+        objects = int(row[0] or 0)
+        conn.close()
+    except Exception:
+        objects = 0
+sync_stamp = ''
+if stamp_path.exists():
+    sync_stamp = stamp_path.read_text(encoding='utf-8', errors='ignore').strip()
+print(json.dumps({'objects': objects, 'syncStamp': sync_stamp}, ensure_ascii=False))
+PY
+}
+
+hybrid_memory_status_report() {
+  local status_json
+  status_json="$(hybrid_memory_status_json 2>/dev/null || echo '{"objects":0}')"
+  python3 - "$status_json" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+print('Hybrid Memory 状态')
+print(f"- objects: {data.get('objects', 0)}")
+print(f"- syncStamp: {data.get('syncStamp') or '-'}")
+PY
+}
+
+hybrid_memory_show_sync_log() {
+  if [ ! -f "$SKPL_HYBRID_MEMORY_SYNC_LOG" ]; then
+    echo "暂无同步日志。"
+    return 0
+  fi
+  python3 - "$SKPL_HYBRID_MEMORY_SYNC_LOG" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+    lines = f.readlines()
+for line in lines[-80:]:
+    print(line.rstrip())
+PY
+}
+
+hybrid_memory_search() {
+  local query="$1"
+  [ -n "$query" ] || return 1
+  echo "混合记忆检索暂返回最小实现结果: $query"
+}
+
 # ==========================================
 # 🌌 新一代极致记忆与智能路由系统 (Ultra-Light)
 # ==========================================
@@ -2521,6 +2645,7 @@ openclaw_memory_model_enhancement_menu() {
 }
 
 openclaw_memory_prepare_prefetch() {
+  local model_path model_dir
   model_path="$(openclaw_default_memory_model_path)"
   model_dir="$(dirname "$model_path")"
   mkdir -p "$model_dir" /root/.openclaw/workspace/memory
