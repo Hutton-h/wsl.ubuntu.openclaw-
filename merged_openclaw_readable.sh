@@ -10622,17 +10622,28 @@ OPENCLAW_PANEL_EOF
 
 openclaw_enable_local_memory_auto() {
   local model_path bootstrap_log
-  model_path="$(openclaw_memory_prepare_prefetch)"
+  if declare -F openclaw_memory_prepare_prefetch >/dev/null 2>&1; then
+    model_path="$(openclaw_memory_prepare_prefetch)"
+  elif declare -F openclaw_default_memory_model_path >/dev/null 2>&1; then
+    model_path="$(openclaw_default_memory_model_path)"
+  else
+    model_path="$HOME/.openclaw/models/embedding/embeddinggemma-300M-Q8_0.gguf"
+    mkdir -p "$(dirname "$model_path")"
+  fi
 
   if [ -f "${model_path}" ]; then
     echo "记忆模型已存在，安装阶段跳过后台预热。"
     return 0
   fi
 
-  bootstrap_log="$(openclaw_memory_prefetch_bootstrap "$model_path")"
-  echo "记忆模型将在后台预热下载，不阻塞安装流程。"
-  echo "安装阶段不会提前切换到 Local 记忆方案。"
-  echo "后台日志: ${bootstrap_log}"
+  if declare -F openclaw_memory_prefetch_bootstrap >/dev/null 2>&1; then
+    bootstrap_log="$(openclaw_memory_prefetch_bootstrap "$model_path")"
+    echo "记忆模型将在后台预热下载，不阻塞安装流程。"
+    echo "安装阶段不会提前切换到 Local 记忆方案。"
+    echo "后台日志: ${bootstrap_log}"
+  else
+    echo "⚠️ 记忆预热函数不可用，已跳过后台预热。"
+  fi
 }
 
   install_openclaw_direct() {
@@ -10647,9 +10658,17 @@ openclaw_enable_local_memory_auto() {
     return 1
   fi
 
-  openclaw_onboard_if_needed
+  if declare -F openclaw_onboard_if_needed >/dev/null 2>&1; then
+    openclaw_onboard_if_needed
+  else
+    echo "⚠️ 未检测到 openclaw_onboard_if_needed，跳过首次引导。"
+  fi
   openclaw_ensure_local_gateway_config >/dev/null 2>&1 || true
-  openclaw_webui_reset_local_cache
+  if declare -F openclaw_webui_reset_local_cache >/dev/null 2>&1; then
+    openclaw_webui_reset_local_cache
+  else
+    echo "⚠️ 未检测到 openclaw_webui_reset_local_cache，跳过 WebUI 本地缓存重置。"
+  fi
   refresh_openclaw_gateway_service >/dev/null 2>&1 || true
   echo "提示：WebUI 首次浏览器访问可能需要设备审批。"
   echo "提示：WhatsApp 官方扫码登录完成后，请先执行 openclaw channels status 确认绑定状态。"
@@ -10791,6 +10810,11 @@ evomap_install() {
   install sqlite3 python3 >/dev/null 2>&1
   mkdir -p /root/.openclaw
 
+  if ! declare -F hybrid_memory_install_stack >/dev/null 2>&1; then
+    echo "⚠️ 混合记忆栈函数不可用，跳过 EvoMap 安装。"
+    return 0
+  fi
+
   last_saved_node_id="$(state_get EVOMAP_NODE_ID)"
   if ! node_id="$(prompt_evomap_node_id "" "$last_saved_node_id")"; then
     return 1
@@ -10829,8 +10853,12 @@ EOF_GENE
 {"capsules":[{"id":"core-repair-kit","name":"核心修复胶囊","version":"1.0.0","targets":["agent-loop","execution-failure","stagnation"],"steps":["识别循环停滞并输出修复建议","识别执行错误并输出标准方案","生成可审计修复记录"]}]}
 EOF_CAP
 
-  hybrid_memory_enqueue_event "evomap-install" "EvoMap 与混合记忆栈安装完成"
-  hybrid_memory_sync_once >/dev/null 2>&1 || true
+  if declare -F hybrid_memory_enqueue_event >/dev/null 2>&1; then
+    hybrid_memory_enqueue_event "evomap-install" "EvoMap 与混合记忆栈安装完成"
+  fi
+  if declare -F hybrid_memory_sync_once >/dev/null 2>&1; then
+    hybrid_memory_sync_once >/dev/null 2>&1 || true
+  fi
   evomap_start_loop
   sleep 2
   evomap_refresh_gateway_if_needed
@@ -10852,13 +10880,21 @@ evomap_update() {
     echo "EvoMap 未安装，先执行安装。"
     return 1
   fi
+  if ! declare -F hybrid_memory_install_stack >/dev/null 2>&1; then
+    echo "⚠️ 混合记忆栈函数不可用，跳过 EvoMap 更新。"
+    return 0
+  fi
   evomap_backup_current
   cd "$EVOMAP_DIR"
   git pull --rebase
   install_evomap_dependencies
   hybrid_memory_install_stack
-  hybrid_memory_enqueue_event "evomap-update" "EvoMap 与混合记忆栈已更新"
-  hybrid_memory_sync_once >/dev/null 2>&1 || true
+  if declare -F hybrid_memory_enqueue_event >/dev/null 2>&1; then
+    hybrid_memory_enqueue_event "evomap-update" "EvoMap 与混合记忆栈已更新"
+  fi
+  if declare -F hybrid_memory_sync_once >/dev/null 2>&1; then
+    hybrid_memory_sync_once >/dev/null 2>&1 || true
+  fi
   evomap_start_loop
   evomap_refresh_gateway_if_needed
   echo "EvoMap 与混合记忆栈更新完成。"
@@ -10940,12 +10976,20 @@ run_full_pipeline_once() {
   [ -z "$step" ] && step=4
   if [ "$step" -le 4 ]; then
     echo "[4/5] 初始化混合记忆栈..."
-    if ! run_step_guard "step4_hybrid_memory" hybrid_memory_install_stack; then
-      print_failure_hint
-      return 1
+    if declare -F hybrid_memory_install_stack >/dev/null 2>&1; then
+      if ! run_step_guard "step4_hybrid_memory" hybrid_memory_install_stack; then
+        print_failure_hint
+        return 1
+      fi
+      if declare -F hybrid_memory_enqueue_event >/dev/null 2>&1; then
+        hybrid_memory_enqueue_event "install-pipeline" "OpenClaw 安装流程已完成混合记忆栈初始化"
+      fi
+      if declare -F hybrid_memory_sync_once >/dev/null 2>&1; then
+        hybrid_memory_sync_once >/dev/null 2>&1 || true
+      fi
+    else
+      echo "⚠️ 未检测到 hybrid_memory_install_stack，跳过混合记忆栈初始化。"
     fi
-    hybrid_memory_enqueue_event "install-pipeline" "OpenClaw 安装流程已完成混合记忆栈初始化"
-    hybrid_memory_sync_once >/dev/null 2>&1 || true
     state_set STEP 5
   fi
 
