@@ -3516,11 +3516,19 @@ PY
     echo "开始安装 OpenClaw..."
     send_stats "开始安装 OpenClaw..."
     run_openclaw_install_step || return 1
+    if ! openclaw_gateway_is_running; then
+      openclaw_ensure_gateway_ready || true
+    fi
     config_file=$(openclaw_get_config_file)
     if [ -s "$config_file" ]; then
       echo "✅ 配置文件已就绪: $config_file"
     else
       echo "⚠️ 配置文件仍未落盘: $config_file"
+    fi
+    if openclaw_gateway_is_running; then
+      echo "✅ OpenClaw 网关已就绪"
+    else
+      echo "⚠️ OpenClaw 网关暂未就绪，可在菜单中执行健康检测与修复"
     fi
     echo "提示：WebUI 在 127.0.0.1 / localhost 以外的浏览器入口通常需要一次设备审批。"
     echo "提示：WhatsApp 仍走官方扫码登录；登录命令返回后请优先执行 openclaw channels status。"
@@ -3534,7 +3542,12 @@ PY
   start_bot() {
     echo "启动 OpenClaw..."
     send_stats "启动 OpenClaw..."
-    start_gateway
+    openclaw_ensure_gateway_ready || start_gateway
+    if openclaw_gateway_is_running; then
+      echo "✅ OpenClaw 网关已启动"
+    else
+      echo "⚠️ OpenClaw 网关状态暂未就绪"
+    fi
     refresh_panel_overview_cache >/dev/null 2>&1 || true
     break_end
   }
@@ -3543,8 +3556,9 @@ PY
     echo "停止 OpenClaw..."
     send_stats "停止 OpenClaw..."
     tmux kill-session -t gateway > /dev/null 2>&1
-    openclaw gateway stop
+    openclaw gateway stop >/dev/null 2>&1 || true
     refresh_panel_overview_cache >/dev/null 2>&1 || true
+    echo "✅ 已执行停止操作"
     break_end
   }
 
@@ -10447,7 +10461,7 @@ update_openclaw_panel() {
   hybrid_memory_enqueue_event "openclaw-update" "OpenClaw CLI 已更新，混合记忆栈已对齐"
   hybrid_memory_sync_once >/dev/null 2>&1 || true
   crontab -l 2>/dev/null | grep -v "s gateway" | crontab -
-  start_gateway
+  openclaw_ensure_gateway_ready || start_gateway
     if ! openclaw_gateway_status_quick; then
       echo "⚠️ OpenClaw 网关状态暂未就绪，可稍后在面板中执行健康检测与修复。"
     fi
@@ -10825,7 +10839,7 @@ EOF
       skpl_ui_menu_item 2 "添加域名访问" "自动写入 allowedOrigins"
       skpl_ui_menu_item_tone 3 "删除域名访问" "移除反向代理域名" "danger"
       skpl_ui_menu_item 4 "查看待处理请求" "显示 devices list 原始输出"
-      skpl_ui_menu_item 0 "退出"
+      skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请选择: "
       read -e choice
 
@@ -10872,7 +10886,7 @@ EOF
   # 主循环
   while true; do
     show_menu
-    read choice
+    read -r choice
     case $choice in
       1) install_openclaw_panel ;;
       2) start_bot ;;
@@ -10892,7 +10906,7 @@ EOF
         openclaw doctor --fix
         send_stats "OpenClaw API同步触发"
         if sync_openclaw_api_models; then
-          start_gateway
+          openclaw_ensure_gateway_ready || start_gateway
         else
           echo "❌ API 模型同步失败，已中止重启网关。请检查 provider /models 返回后重试。"
         fi
@@ -10912,7 +10926,8 @@ EOF
       19) update_openclaw_panel ;;
       20) uninstall_openclaw_panel ;;
       21) openclaw_evomap_menu ;;
-      *) break ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
     esac
   done
 
@@ -10993,12 +11008,22 @@ run_openclaw_install_step() {
   ensure_openclaw_cli_on_path >/dev/null 2>&1 || true
   if ! command -v openclaw >/dev/null 2>&1 || ! openclaw --version >/dev/null 2>&1; then
     install_openclaw_direct
-  else
-    refresh_runtime_proxy_env
-    refresh_openclaw_gateway_service >/dev/null 2>&1 || true
-    if ! openclaw_gateway_is_running; then
-      openclaw_ensure_gateway_ready || true
-    fi
+  fi
+
+  ensure_openclaw_cli_on_path >/dev/null 2>&1 || true
+  if ! command -v openclaw >/dev/null 2>&1; then
+    echo "OpenClaw CLI 安装失败：未检测到 openclaw 命令。"
+    return 1
+  fi
+
+  if declare -F openclaw_onboard_if_needed >/dev/null 2>&1; then
+    openclaw_onboard_if_needed || true
+  fi
+
+  refresh_runtime_proxy_env
+  refresh_openclaw_gateway_service >/dev/null 2>&1 || true
+  if ! openclaw_gateway_is_running; then
+    openclaw_ensure_gateway_ready || true
   fi
 }
 
