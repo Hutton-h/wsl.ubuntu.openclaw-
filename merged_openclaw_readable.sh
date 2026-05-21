@@ -508,6 +508,75 @@ EOF_SKPL_GATEWAY_SERVICE
   fi
 }
 
+openclaw_ensure_local_gateway_config() {
+  local config_file
+  config_file=$(openclaw_get_config_file)
+  mkdir -p "$(dirname "$config_file")"
+  python3 - "$config_file" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = {}
+if path.exists() and path.stat().st_size > 0:
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+
+data.setdefault('gateway', {})
+if not isinstance(data['gateway'], dict):
+    data['gateway'] = {}
+data['gateway'].setdefault('mode', 'local')
+data['gateway'].setdefault('controlUi', {})
+if not isinstance(data['gateway']['controlUi'], dict):
+    data['gateway']['controlUi'] = {}
+origins = data['gateway']['controlUi'].get('allowedOrigins')
+if not isinstance(origins, list):
+    origins = []
+for origin in ['http://127.0.0.1:18789', 'http://localhost:18789', 'http://127.0.0.1', 'http://localhost']:
+    if origin not in origins:
+        origins.append(origin)
+data['gateway']['controlUi']['allowedOrigins'] = origins
+
+data.setdefault('models', {})
+if not isinstance(data['models'], dict):
+    data['models'] = {}
+data['models'].setdefault('mode', 'merge')
+data['models'].setdefault('providers', {})
+
+data.setdefault('agents', {})
+if not isinstance(data['agents'], dict):
+    data['agents'] = {}
+data['agents'].setdefault('defaults', {})
+defs = data['agents']['defaults']
+if not isinstance(defs, dict):
+    defs = {}
+    data['agents']['defaults'] = defs
+defs.setdefault('workspace', '~/.openclaw/workspace')
+defs.setdefault('model', {'primary': 'ollama/qwen2.5:7b'})
+defs.setdefault('models', {'ollama/qwen2.5:7b': {}})
+defs.setdefault('imageModel', {'primary': 'ollama/qwen2.5vl:7b'})
+defs.setdefault('experimental', {'localModelLean': True})
+defs.setdefault('memorySearch', {'provider': 'local'})
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+PY
+  mkdir -p "$HOME/.openclaw/workspace" "$HOME/.openclaw/workspace/skills" "$HOME/.openclaw/workspace/memory"
+  echo "✅ 已生成最小可启动配置: $config_file"
+}
+
+openclaw_onboard_if_needed() {
+  openclaw_ensure_local_gateway_config
+}
+
+openclaw_webui_reset_local_cache() {
+  rm -f "$SKPL_WEBUI_TOKEN_CACHE_FILE" "$SKPL_WEBUI_DOMAIN_CACHE_FILE" >/dev/null 2>&1 || true
+}
+
 openclaw_gateway_fallback_start() {
   local openclaw_entry node_bin proxy_port gateway_port fallback_log
   openclaw_entry=$(resolve_openclaw_js_entry 2>/dev/null || true)
@@ -8467,13 +8536,14 @@ openclaw_configure_local_ollama_provider() {
     provider_model="${1:-qwen2.5:7b}"
     model_role="${2:-text}"
     full_model="ollama/${provider_model}"
-    python3 - "$config_file" "$provider_model" "$full_model" "$model_role" <<'PY'
+    python3 - "$config_file" "$provider_model" "$full_model" "$model_role" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" <<'PY'
 import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])
 raw_model = sys.argv[2]
 full_model = sys.argv[3]
 role = sys.argv[4]
+ollama_bin = sys.argv[5]
 cfg = {}
 if path.exists():
     try:
@@ -8507,6 +8577,13 @@ provider['baseUrl'] = provider.get('baseUrl') or 'http://127.0.0.1:11434'
 provider['apiKey'] = provider.get('apiKey') or 'ollama-local'
 provider['api'] = 'ollama'
 provider['timeoutSeconds'] = max(int(provider.get('timeoutSeconds', 0) or 0), 300)
+provider['localService'] = {
+    'command': ollama_bin,
+    'args': ['serve'],
+    'healthUrl': 'http://127.0.0.1:11434/api/tags',
+    'readyTimeoutMs': 180000,
+    'idleStopMs': 0,
+}
 models = provider.setdefault('models', [])
 entry = build_entry(raw_model, role)
 updated = False
@@ -8549,11 +8626,11 @@ openclaw_apply_recommended_model_profile() {
     local code_model="ollama/qwen2.5-coder:7b"
     local config_file
     config_file=$(openclaw_get_config_file)
-    python3 - "$config_file" "$text_model" "$image_model" "$code_model" <<'PY'
+    python3 - "$config_file" "$text_model" "$image_model" "$code_model" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" <<'PY'
 import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])
-text_model, image_model, code_model = sys.argv[2:5]
+text_model, image_model, code_model, ollama_bin = sys.argv[2:6]
 cfg = {}
 if path.exists():
     try:
@@ -8566,6 +8643,13 @@ cfg['models']['providers']['ollama'] = {
     'apiKey': 'ollama-local',
     'api': 'ollama',
     'timeoutSeconds': 300,
+    'localService': {
+        'command': ollama_bin,
+        'args': ['serve'],
+        'healthUrl': 'http://127.0.0.1:11434/api/tags',
+        'readyTimeoutMs': 180000,
+        'idleStopMs': 0
+    },
     'models': [
         {'id': 'qwen2.5:7b', 'name': 'qwen2.5:7b', 'input': ['text'], 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}},
         {'id': 'qwen2.5vl:7b', 'name': 'qwen2.5vl:7b', 'input': ['text', 'image'], 'params': {'keep_alive': '15m', 'num_ctx': 4096, 'thinking': False}},
@@ -8599,7 +8683,7 @@ openclaw_postinstall_acceptance_check() {
     fi
     if openclaw_has_command ollama; then
       echo "✅ ollama 命令存在"
-      ollama list >/dev/null 2>&1 && echo "✅ ollama 服务可访问" || echo "⚠️ ollama 已安装，但服务未就绪"
+      openclaw_ensure_ollama_running >/dev/null 2>&1 && echo "✅ ollama 服务可访问" || echo "⚠️ ollama 已安装，但服务未就绪"
     else
       echo "⚠️ ollama 未安装"
     fi
@@ -8646,15 +8730,83 @@ openclaw_ollama_status() {
     fi
 }
 
+openclaw_ollama_endpoint_ready() {
+    if ! openclaw_has_command curl; then
+      return 1
+    fi
+    curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:11434/api/tags >/dev/null 2>&1
+}
+
+openclaw_resolve_ollama_bin() {
+    if command -v ollama >/dev/null 2>&1; then
+      command -v ollama
+      return 0
+    fi
+    if [ -x /usr/local/bin/ollama ]; then
+      printf '%s\n' /usr/local/bin/ollama
+      return 0
+    fi
+    if [ -x /usr/bin/ollama ]; then
+      printf '%s\n' /usr/bin/ollama
+      return 0
+    fi
+    return 1
+}
+
+openclaw_ensure_ollama_running() {
+    local ollama_bin
+    if openclaw_ollama_endpoint_ready; then
+      echo "✅ ollama 服务已就绪"
+      return 0
+    fi
+
+    ollama_bin=$(openclaw_resolve_ollama_bin 2>/dev/null || true)
+    if [ -z "$ollama_bin" ]; then
+      echo "⚠️ 未找到 ollama 可执行文件"
+      return 1
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl enable ollama >/dev/null 2>&1 || true
+      systemctl start ollama >/dev/null 2>&1 || true
+      sleep 2
+      if openclaw_ollama_endpoint_ready; then
+        echo "✅ 已通过 systemd 启动 ollama"
+        return 0
+      fi
+    fi
+
+    if pgrep -f "ollama serve" >/dev/null 2>&1; then
+      sleep 2
+      if openclaw_ollama_endpoint_ready; then
+        echo "✅ ollama serve 已在运行"
+        return 0
+      fi
+    fi
+
+    nohup "$ollama_bin" serve >/tmp/ollama-serve.log 2>&1 &
+    disown 2>/dev/null || true
+    sleep 3
+    if openclaw_ollama_endpoint_ready; then
+      echo "✅ 已启动 ollama serve"
+      return 0
+    fi
+
+    echo "⚠️ ollama 服务尚未就绪，请检查 /tmp/ollama-serve.log，然后手动执行: $ollama_bin serve"
+    return 1
+}
+
 openclaw_install_ollama_runtime() {
     if openclaw_has_command ollama; then
       echo "✅ ollama 已安装"
+      openclaw_ensure_ollama_running || true
       return 0
     fi
     install curl ca-certificates >/dev/null 2>&1
     echo "⬇️ 正在安装 ollama 本地模型运行时..."
     if curl -fsSL https://ollama.com/install.sh | sh; then
       echo "✅ ollama 安装完成"
+      openclaw_ensure_ollama_running || true
     else
       echo "❌ ollama 安装失败，请检查网络后重试"
       return 1
@@ -8665,6 +8817,7 @@ openclaw_ollama_pull_model() {
     local model_name="$1"
     [ -z "$model_name" ] && return 1
     openclaw_install_ollama_runtime || return 1
+    openclaw_ensure_ollama_running || return 1
     echo "⬇️ 正在拉取本地模型: $model_name"
     ollama pull "$model_name" || return 1
     local model_role="text"
@@ -10408,6 +10561,7 @@ PY
 
   openclaw_webui_reset_local_cache() {
     : > "$SKPL_WEBUI_TOKEN_CACHE_FILE" 2>/dev/null || true
+    : > "$SKPL_WEBUI_DOMAIN_CACHE_FILE" 2>/dev/null || true
   }
 
 
@@ -10533,7 +10687,8 @@ EOF
           if openclaw_webui_refresh_token_cache >/dev/null 2>&1; then
             echo "✅ WebUI Token 已重载"
           else
-            echo "⚠️ Token 读取失败，请确认本地配置中已存在 gateway.auth.token"
+            echo "⚠️ Token 读取失败"
+            openclaw_webui_token_status_hint
           fi
           echo
           read -p "按回车返回菜单..."
