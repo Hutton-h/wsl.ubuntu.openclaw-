@@ -548,6 +548,7 @@ gateway['mode'] = 'local'
 gateway['bind'] = '127.0.0.1'
 gateway['port'] = port
 gateway['host'] = '127.0.0.1'
+gateway['hostname'] = '127.0.0.1'
 
 auth = gateway.get('auth')
 if not isinstance(auth, dict):
@@ -1267,6 +1268,20 @@ OPENCLAW_ENTRY="$2"
 PROXY_PORT="$3"
 shift 3
 
+extract_gateway_port() {
+  local fallback="${OPENCLAW_GATEWAY_PORT:-18789}"
+  local prev=""
+  local arg
+  for arg in "$@"; do
+    if [ "$prev" = "--port" ] && [ -n "$arg" ]; then
+      printf '%s\n' "$arg"
+      return 0
+    fi
+    prev="$arg"
+  done
+  printf '%s\n' "$fallback"
+}
+
 merge_no_proxy_csv() {
   python3 - "$1" "$2" <<'PY'
 import sys
@@ -1349,6 +1364,11 @@ fi
 
 if [ ! -x "$NODE_BIN" ]; then
   NODE_BIN="$(command -v node 2>/dev/null || true)"
+fi
+
+if [ "${1:-}" = "gateway" ] && command -v openclaw >/dev/null 2>&1; then
+  GATEWAY_PORT="$(extract_gateway_port "$@")"
+  exec openclaw gateway start --port "$GATEWAY_PORT"
 fi
 
 case "$OPENCLAW_ENTRY" in
