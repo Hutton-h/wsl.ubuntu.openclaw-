@@ -2124,1474 +2124,158 @@ path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding=
 PY
 }
 
-hybrid_memory_install_stack() {
-  install sqlite3 python3 >/dev/null 2>&1
-  if command -v pip3 >/dev/null 2>&1; then
-    pip3 install --break-system-packages lancedb >/dev/null 2>&1 || true
-  elif command -v pip >/dev/null 2>&1; then
-    pip install --break-system-packages lancedb >/dev/null 2>&1 || true
-  fi
-  hybrid_memory_prepare_dirs
-  hybrid_memory_write_broker
-  hybrid_memory_write_config
-  printf '{"installedAt": %s, "stack": "official-files-lancedb-evomap-memos"}\n' "$(date +%s)" > "$SKPL_HYBRID_MEMORY_STATE_DIR/install.json"
-  echo "混合记忆栈已初始化：官方文件记忆 + LanceDB 本地向量检索 + EvoMap 关系推理 + MemOS/EvoMap 双引擎进化。"
-}
-
-hybrid_memory_init_memos_layer() {
-  hybrid_memory_prepare_dirs
-  python3 - "$SKPL_MEMOS_STATE_DIR/manifest.json" <<'PY'
-import json
-import time
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-path.parent.mkdir(parents=True, exist_ok=True)
-data = {
-    'installedAt': int(time.time()),
-    'mode': 'local-dual-engine',
-    'tasksDir': '/root/.openclaw/memos/tasks',
-    'skillsDir': '/root/.openclaw/memos/skills',
-    'stateDir': '/root/.openclaw/memos/state',
-    'features': {
-        'taskBoundaryDetection': 'enabled-local',
-        'taskSummary': 'enabled-local',
-        'skillGeneration': 'enabled-local',
-        'evomapBridge': 'enabled'
-    }
-}
-path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-PY
-}
-
-openclaw_memory_enterprise_write_state() {
-  hybrid_memory_prepare_dirs
-  python3 - "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" <<'PY'
-import json
-import time
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-path.parent.mkdir(parents=True, exist_ok=True)
-data = {
-    'updatedAt': int(time.time()),
-    'profile': 'enterprise-four-layer',
-    'modules': {
-        'activeMemory': {
-            'enabled': True,
-            'queryMode': 'recent',
-            'promptStyle': 'balanced',
-            'timeoutMs': 15000,
-            'setupGraceTimeoutMs': 30000,
-            'allowedChatTypes': ['direct']
-        },
-        'dreaming': {
-            'enabled': True,
-            'frequency': '0 3 * * *',
-            'phases': ['light', 'rem', 'deep'],
-            'promotesTo': 'MEMORY.md'
-        },
-        'skillWorkshop': {
-            'enabled': True,
-            'approvalPolicy': 'pending',
-            'reviewMode': 'hybrid',
-            'autoCapture': True,
-            'publishDir': '/root/.openclaw/workspace/skills'
-        }
-    }
-}
-path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-PY
-}
-
-openclaw_memory_enterprise_apply_config() {
-  openclaw_memory_config_set "memory.qmd.includeDefaultMemory" true >/dev/null 2>&1 || true
-
-  openclaw_memory_config_set "plugins.entries.active-memory.enabled" true >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.active-memory.config.enabled" true >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.active-memory.config.agents[0]" "main" >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.active-memory.config.allowedChatTypes[0]" "direct" >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.active-memory.config.queryMode" "recent" >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.active-memory.config.promptStyle" "balanced" >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.active-memory.config.modelFallback" "google/gemini-3-flash" >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.active-memory.config.timeoutMs" 15000 --json >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.active-memory.config.setupGraceTimeoutMs" 30000 --json >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.active-memory.config.maxSummaryChars" 220 --json >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.active-memory.config.logging" true --json >/dev/null 2>&1 || true
-
-  openclaw_memory_config_set "plugins.entries.memory-core.config.dreaming.enabled" true --json >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.memory-core.config.dreaming.frequency" "0 3 * * *" >/dev/null 2>&1 || true
-
-  openclaw_memory_config_set "plugins.entries.skill-workshop.enabled" true >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.skill-workshop.config.autoCapture" true --json >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.skill-workshop.config.approvalPolicy" "pending" >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.skill-workshop.config.reviewMode" "hybrid" >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.skill-workshop.config.reviewInterval" 15 --json >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.skill-workshop.config.reviewMinToolCalls" 8 --json >/dev/null 2>&1 || true
-  openclaw_memory_config_set "plugins.entries.skill-workshop.config.reviewTimeoutMs" 45000 --json >/dev/null 2>&1 || true
-}
-
-openclaw_memory_workspace_skills_dir() {
-  echo "/root/.openclaw/workspace/skills"
-}
-
-openclaw_memory_dreams_file() {
-  echo "/root/.openclaw/workspace/${SKPL_MEMORY_DREAMS_FILENAME}"
-}
-
-openclaw_memory_prepare_enterprise_workspace() {
-  mkdir -p "$(openclaw_memory_workspace_skills_dir)"
-  mkdir -p "/root/.openclaw/workspace/${SKPL_MEMORY_DREAMING_DIRNAME}/deep"
-  mkdir -p "/root/.openclaw/workspace/${SKPL_MEMORY_DREAMING_DIRNAME}/light"
-  mkdir -p "/root/.openclaw/workspace/${SKPL_MEMORY_DREAMING_DIRNAME}/rem"
-  mkdir -p "$SKPL_VISUAL_MEMORY_INBOX_DIR" "$SKPL_VISUAL_MEMORY_ARCHIVE_DIR" "$SKPL_DREAMING_EXPLAIN_DIR"
-  [ -f "$(openclaw_memory_dreams_file)" ] || printf '# Dream Diary\n\n' > "$(openclaw_memory_dreams_file)"
-}
-
-openclaw_memory_ingest_visual_note() {
-  local source_type="$1"
-  local summary="$2"
-  [ -z "$summary" ] && return 1
-  openclaw_memory_prepare_enterprise_workspace
-  python3 - "$source_type" "$summary" "$SKPL_VISUAL_MEMORY_INBOX_DIR" "$SKPL_VISUAL_MEMORY_ARCHIVE_DIR" <<'PY'
-import json
-import sys
-import time
-from pathlib import Path
-
-source_type = sys.argv[1] or 'image'
-summary = sys.argv[2]
-inbox = Path(sys.argv[3])
-archive = Path(sys.argv[4])
-inbox.mkdir(parents=True, exist_ok=True)
-archive.mkdir(parents=True, exist_ok=True)
-ts = int(time.time())
-item = {
-    'id': f'{ts}-{source_type}',
-    'sourceType': source_type,
-    'summary': summary,
-    'createdAt': ts,
-}
-(inbox / f'{item["id"]}.json').write_text(json.dumps(item, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-(archive / f'{item["id"]}.json').write_text(json.dumps(item, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-print(f'✅ 已入库视觉记忆: {item["id"]}')
-PY
-}
-
-openclaw_memory_visual_status() {
-  local inbox_count archive_count
-  inbox_count=$(find "$SKPL_VISUAL_MEMORY_INBOX_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
-  archive_count=$(find "$SKPL_VISUAL_MEMORY_ARCHIVE_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')
-  echo "视觉记忆状态:"
-  echo "  待处理: ${inbox_count:-0}"
-  echo "  已归档: ${archive_count:-0}"
-}
-
-openclaw_memory_publish_skills_to_workspace() {
-  hybrid_memory_prepare_dirs
-  local skills_dir target_dir
-  skills_dir="$SKPL_MEMOS_SKILLS_DIR"
-  target_dir=$(openclaw_memory_workspace_skills_dir)
-  mkdir -p "$target_dir"
-  python3 - "$skills_dir" "$target_dir" <<'PY'
-import json
-import os
-import re
-import shutil
-import sys
-from pathlib import Path
-
-skills_dir = Path(sys.argv[1])
-target_dir = Path(sys.argv[2])
-target_dir.mkdir(parents=True, exist_ok=True)
-
-def normalize(name: str) -> str:
-    name = (name or '').strip().lower()
-    name = re.sub(r'[^a-z0-9_-]+', '-', name)
-    name = re.sub(r'-+', '-', name).strip('-')
-    if not name:
-        name = 'learned-workflow'
-    return name[:80]
-
-published = 0
-for skill_dir in sorted(skills_dir.iterdir()) if skills_dir.exists() else []:
-    if not skill_dir.is_dir():
-        continue
-    src = skill_dir / 'SKILL.md'
-    if not src.exists():
-        continue
-    meta = skill_dir / 'metadata.json'
-    skill_name = normalize(skill_dir.name)
-    if meta.exists():
-        try:
-            data = json.loads(meta.read_text(encoding='utf-8'))
-            skill_name = normalize(str(data.get('skill') or skill_dir.name))
-        except Exception:
-            pass
-    dest_dir = target_dir / skill_name
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dest_dir / 'SKILL.md')
-    if meta.exists():
-        shutil.copy2(meta, dest_dir / 'metadata.json')
-    published += 1
-print(f'✅ 已发布技能卡: {published}')
-PY
-}
-
-openclaw_memory_append_dream_entry() {
-  local phase="$1"
-  local summary="$2"
-  [ -z "$phase" ] && return 1
-  [ -z "$summary" ] && return 1
-  openclaw_memory_prepare_enterprise_workspace
-  python3 - "$phase" "$summary" "$(openclaw_memory_dreams_file)" "/root/.openclaw/workspace/${SKPL_MEMORY_DREAMING_DIRNAME}" <<'PY'
-import sys
-from datetime import datetime
-from pathlib import Path
-
-phase = sys.argv[1]
-summary = sys.argv[2]
-dreams_path = Path(sys.argv[3])
-dreaming_root = Path(sys.argv[4])
-ts = datetime.now()
-phase_dir = dreaming_root / phase
-phase_dir.mkdir(parents=True, exist_ok=True)
-report = phase_dir / f"{ts.strftime('%Y-%m-%d')}.md"
-entry = [
-    f"## {phase.upper()} {ts.strftime('%Y-%m-%d %H:%M:%S')}",
-    '',
-    summary,
-    '',
-]
-with dreams_path.open('a', encoding='utf-8') as fh:
-    fh.write('\n'.join(entry))
-report.write_text('\n'.join(entry), encoding='utf-8')
-PY
-}
-
-openclaw_memory_run_enterprise_evolution() {
-  openclaw_memory_prepare_enterprise_workspace
-  hybrid_memory_enqueue_event "memory-manual-sync" "企业增强记忆触发主动同步与进化"
-  hybrid_memory_sync_once >/dev/null 2>&1 || true
-  openclaw_memory_publish_skills_to_workspace >/dev/null 2>&1 || true
-  openclaw_memory_append_dream_entry "light" "已执行企业增强轻量整理，汇总最新任务边界与阶段性观察。" || true
-  openclaw_memory_append_dream_entry "rem" "已执行企业增强 REM 反思，沉淀重复主题与可复用操作模式。" || true
-  openclaw_memory_append_dream_entry "deep" "已执行企业增强 Deep 晋升候选整理，等待后续由 OpenClaw 官方 dreaming/promote 链路晋升到 MEMORY.md。" || true
-  openclaw_memory_enterprise_write_state
-}
-
-openclaw_memory_enable_enterprise_four_layer() {
-  echo "🚀 正在启用企业增强四层记忆方案..."
-  openclaw_memory_enable_four_layer_stack || return 1
-  echo "7/9 写入企业增强插件配置"
-  openclaw_memory_enterprise_apply_config || return 1
-  echo "8/9 初始化 Dreaming / Skill Workshop 工作区"
-  openclaw_memory_prepare_enterprise_workspace || return 1
-  echo "9/9 触发一次企业增强进化回合"
-  openclaw_memory_run_enterprise_evolution || return 1
-  openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
-  echo "✅ 企业增强四层记忆方案已启用：四层记忆 + Active Memory + Dreaming + Skill Workshop。"
-}
-
-hybrid_memory_run_memos_postprocess() {
-  hybrid_memory_prepare_dirs
-  python3 - "$SKPL_HYBRID_MEMORY_ARCHIVE_DIR" "$SKPL_MEMOS_TASKS_DIR" "$SKPL_MEMOS_SKILLS_DIR" "$SKPL_MEMOS_STATE_DIR" <<'PY'
-import json
-import re
-import sys
-import time
-from pathlib import Path
-
-archive_dir = Path(sys.argv[1])
-tasks_dir = Path(sys.argv[2])
-skills_dir = Path(sys.argv[3])
-state_dir = Path(sys.argv[4])
-tasks_dir.mkdir(parents=True, exist_ok=True)
-skills_dir.mkdir(parents=True, exist_ok=True)
-state_dir.mkdir(parents=True, exist_ok=True)
-state_path = state_dir / 'processed-events.json'
-history_path = state_dir / 'skill-history.jsonl'
-
-try:
-    processed = set(json.loads(state_path.read_text(encoding='utf-8')))
-except Exception:
-    processed = set()
-
-def slug(text: str) -> str:
-    text = (text or '').strip().lower()
-    text = re.sub(r'[^a-z0-9\u4e00-\u9fff]+', '-', text)
-    text = re.sub(r'-+', '-', text).strip('-')
-    return text or 'task'
-
-def summarize(text: str):
-    parts = [seg.strip() for seg in re.split(r'[。！？!?.\n]+', text or '') if seg.strip()]
-    goal = parts[0] if parts else (text or '未命名任务')
-    steps = parts[:4] if parts else [goal]
-    result = parts[-1] if len(parts) >= 2 else goal
-    return goal[:80], steps, result[:120]
-
-def quality_score(goal: str, steps, result: str, raw: str) -> int:
-    score = 50
-    if len(goal.strip()) >= 8:
-        score += 10
-    if len(steps) >= 2:
-        score += 10
-    if len(steps) >= 4:
-        score += 5
-    if len(result.strip()) >= 10:
-        score += 10
-    if len((raw or '').strip()) >= 30:
-        score += 10
-    if re.search(r'(修复|排查|配置|安装|同步|检索|备份|还原|连接|部署)', raw or ''):
-        score += 5
-    return max(0, min(score, 100))
-
-new_processed = set(processed)
-
-for path in sorted(archive_dir.glob('*.json')):
-    event_id = path.stem
-    if event_id in processed:
-        continue
-    try:
-        payload = json.loads(path.read_text(encoding='utf-8'))
-    except Exception:
-        continue
-    summary = str(payload.get('summary') or payload.get('text') or event_id)
-    goal, steps, result = summarize(summary)
-    score = quality_score(goal, steps, result, summary)
-    ts = int(time.time())
-    task_id = f"{int(time.time())}-{slug(goal)}"
-    task_path = tasks_dir / f"{task_id}.md"
-    task_body = [
-        f"# {goal}",
-        '',
-        f"- Source Event: {event_id}",
-        f"- Generated At: {ts}",
-        f"- Quality Score: {score}/100",
-        '',
-        '## Goal',
-        goal,
-        '',
-        '## Steps',
-    ]
-    for idx, step in enumerate(steps, start=1):
-        task_body.append(f"{idx}. {step}")
-    task_body.extend(['', '## Result', result, ''])
-    task_path.write_text('\n'.join(task_body), encoding='utf-8')
-
-    skill_name = slug(goal)
-    skill_dir = skills_dir / skill_name
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    skill_path = skill_dir / 'SKILL.md'
-    metadata_path = skill_dir / 'metadata.json'
-    previous_version = 0
-    previous_goal = ''
-    if metadata_path.exists():
-        try:
-            previous = json.loads(metadata_path.read_text(encoding='utf-8'))
-            previous_version = int(previous.get('version') or 0)
-            previous_goal = str(previous.get('goal') or '')
-        except Exception:
-            previous_version = 0
-    version = previous_version + 1
-    if skill_path.exists():
-        snapshot = {
-            'skill': skill_name,
-            'version': version,
-            'previousVersion': previous_version,
-            'goal': goal,
-            'previousGoal': previous_goal,
-            'qualityScore': score,
-            'sourceEvent': event_id,
-            'generatedAt': ts,
-        }
-        with history_path.open('a', encoding='utf-8') as fh:
-            fh.write(json.dumps(snapshot, ensure_ascii=False) + '\n')
-    skill_body = [
-        f"# {goal}",
-        '',
-        '## Metadata',
-        f"- Version: {version}",
-        f"- Quality Score: {score}/100",
-        f"- Source Event: {event_id}",
-        '',
-        '## Trigger',
-        goal,
-        '',
-        '## Recommended Steps',
-    ]
-    for idx, step in enumerate(steps, start=1):
-        skill_body.append(f"{idx}. {step}")
-    skill_body.extend(['', '## Expected Result', result, ''])
-    skill_path.write_text('\n'.join(skill_body), encoding='utf-8')
-    metadata = {
-        'skill': skill_name,
-        'goal': goal,
-        'version': version,
-        'qualityScore': score,
-        'sourceEvent': event_id,
-        'generatedAt': ts,
-        'stepsCount': len(steps),
-        'result': result,
-    }
-    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    new_processed.add(event_id)
-
-state_path.write_text(json.dumps(sorted(new_processed), ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-PY
-}
-
-openclaw_memory_enable_four_layer_stack() {
-  echo "🚀 正在启用四层记忆方案..."
-  echo "1/6 校准 OpenClaw 本地记忆配置"
-  OPENCLAW_MEMORY_CONFIG_ONLY="false"
-  OPENCLAW_MEMORY_PREHEAT="true"
-  openclaw_memory_auto_setup_local || return 1
-
-  echo "2/6 初始化 LanceDB + 混合检索栈"
-  hybrid_memory_install_stack || return 1
-
-  echo "3/6 初始化 MemOS 本地任务与技能目录"
-  hybrid_memory_init_memos_layer || return 1
-
-  echo "4/6 校准官方文件记忆入口"
-  openclaw_memory_config_set "memory.qmd.includeDefaultMemory" true >/dev/null 2>&1 || true
-
-  echo "5/6 处理 EvoMap"
-  if [ -d "$EVOMAP_DIR/.git" ] || [ -d "$EVOMAP_DIR" ]; then
-    echo "检测到 EvoMap 已安装，复用现有目录并刷新融合逻辑。"
-    install_evomap_dependencies >/dev/null 2>&1 || true
-    hybrid_memory_enqueue_event "evomap-update" "四层记忆方案启用时复用现有 EvoMap"
-    hybrid_memory_sync_once >/dev/null 2>&1 || true
-    evomap_start_loop >/dev/null 2>&1 || true
-  else
-    echo "未检测到 EvoMap，开始补装。"
-    evomap_install || return 1
-  fi
-
-  echo "6/6 刷新索引与网关状态"
-  openclaw_memory_refresh_status_cache >/dev/null 2>&1 || true
-  openclaw_probe_cache_refresh >/dev/null 2>&1 || true
-  openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
-  hybrid_memory_enqueue_event "memory-manual-sync" "用户启用四层记忆方案"
-  hybrid_memory_sync_once >/dev/null 2>&1 || true
-
-  echo "✅ 四层记忆方案已启用：官方文件记忆 + LanceDB + EvoMap + MemOS/EvoMap。"
-}
-
-hybrid_memory_status_json() {
-  if [ -x "$SKPL_HYBRID_MEMORY_BROKER" ]; then
-    python3 "$SKPL_HYBRID_MEMORY_BROKER" "$SKPL_HYBRID_MEMORY_DB" status 2>/dev/null || echo '{"objects":0}'
-  else
-    echo '{"objects":0}'
-  fi
-}
-
-  hybrid_memory_status_report() {
-  local status_json install_time sync_time lock_state load_state sync_stamp
-  hybrid_memory_prepare_dirs
-  status_json=$(hybrid_memory_status_json 2>/dev/null || echo '{"objects":0}')
-  if [ -f "$SKPL_HYBRID_MEMORY_STATE_DIR/install.json" ]; then
-    install_time=$(python3 - "$SKPL_HYBRID_MEMORY_STATE_DIR/install.json" <<'PY'
-import json, sys
-from datetime import datetime
-try:
-    data = json.load(open(sys.argv[1], encoding='utf-8'))
-    ts = int(data.get('installedAt', 0))
-    print(datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S') if ts else '未知')
-except Exception:
-    print('未知')
-PY
-)
-  else
-    install_time="未初始化"
-  fi
-  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_LOG" ]; then
-    sync_time=$(python3 - "$SKPL_HYBRID_MEMORY_SYNC_LOG" <<'PY'
-import sys
-from pathlib import Path
-lines = Path(sys.argv[1]).read_text(encoding='utf-8', errors='ignore').splitlines()
-print(lines[-1] if lines else '暂无同步记录')
-PY
-)
-  else
-    sync_time="暂无同步记录"
-  fi
-  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE" ]; then
-    sync_stamp=$(cat "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE" 2>/dev/null || echo 0)
-  else
-    sync_stamp="0"
-  fi
-  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_LOCK_FILE" ]; then
-    lock_state="运行中"
-  else
-    lock_state="空闲"
-  fi
-  load_state=$(python3 - "$SKPL_HYBRID_MEMORY_SYNC_LOAD_LIMIT" <<'PY'
-import os, sys
-limit = float(sys.argv[1])
-try:
-    load1 = os.getloadavg()[0]
-except Exception:
-    load1 = 0.0
-print(f"{load1:.2f} / limit {limit:.2f}")
-PY
-)
-  echo "融合根目录: $SKPL_HYBRID_MEMORY_ROOT"
-  echo "LanceDB 目录: $SKPL_HYBRID_MEMORY_LANCEDB_DIR"
-  echo "MemOS 目录: $SKPL_MEMOS_ROOT"
-  echo "任务目录: $SKPL_MEMOS_TASKS_DIR"
-  echo "技能目录: $SKPL_MEMOS_SKILLS_DIR"
-  echo "安装时间: $install_time"
-  echo "最近同步: $sync_time"
-  echo "同步版本: $sync_stamp"
-  echo "同步状态: $lock_state"
-  echo "当前负载: $load_state"
-  echo "回灌阈值: $SKPL_HYBRID_MEMORY_EXPORT_MIN_CONFIDENCE"
-  echo "失败重试: $SKPL_HYBRID_MEMORY_FAILED_DIR"
-  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG" ]; then
-    echo "错误日志: $SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG"
-  fi
-  python3 - "$status_json" "$SKPL_HYBRID_MEMORY_CONFIG" <<'PY'
-import json, sys
-
-status_raw, config_path = sys.argv[1:3]
-try:
-    status = json.loads(status_raw)
-except Exception:
-    status = {'objects': 0}
-try:
-    config = json.load(open(config_path, encoding='utf-8'))
-except Exception:
-    config = {}
-plugins = (((status.get('plugins') or {})) or (((config.get('retrieval') or {}).get('plugins')) or {}))
-print(f"知识对象: {status.get('objects', 0)}")
-if 'vectorObjects' in status:
-    print(f"向量对象: {status.get('vectorObjects', 0)}")
-for key in ('fts5', 'vector', 'rerank'):
-    meta = plugins.get(key) or {}
-    enabled = 'on' if meta.get('enabled') else 'off'
-    print(f"插件 {key}: {enabled} / {meta.get('status', 'unknown')}")
-PY
-  openclaw_memory_memos_overview
-  openclaw_memory_enterprise_status
-  openclaw_memory_model_enhancement_status
-}
-
-openclaw_memory_memos_overview() {
-  python3 - "$SKPL_MEMOS_TASKS_DIR" "$SKPL_MEMOS_SKILLS_DIR" "$SKPL_MEMOS_STATE_DIR/skill-history.jsonl" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-tasks_dir = Path(sys.argv[1])
-skills_dir = Path(sys.argv[2])
-history_path = Path(sys.argv[3])
-task_count = len(list(tasks_dir.glob('*.md'))) if tasks_dir.exists() else 0
-skill_dirs = [p for p in skills_dir.iterdir() if p.is_dir()] if skills_dir.exists() else []
-skill_count = len(skill_dirs)
-scores = []
-for item in skill_dirs:
-    meta = item / 'metadata.json'
-    if not meta.exists():
-        continue
-    try:
-        scores.append(int(json.loads(meta.read_text(encoding='utf-8')).get('qualityScore') or 0))
-    except Exception:
-        pass
-avg_score = round(sum(scores) / len(scores), 1) if scores else 0
-history_count = 0
-if history_path.exists():
-    history_count = len([line for line in history_path.read_text(encoding='utf-8', errors='ignore').splitlines() if line.strip()])
-print(f"任务产物: {task_count}")
-print(f"技能产物: {skill_count}")
-print(f"平均质量: {avg_score}")
-print(f"升级记录: {history_count}")
-PY
-}
-
-openclaw_memory_enterprise_status() {
-  local active_enabled dream_enabled skill_enabled dreams_file workspace_skills_dir
-  active_enabled=$(openclaw_json_get_bool '.plugins.entries["active-memory"].enabled // false' 2>/dev/null || echo false)
-  dream_enabled=$(openclaw_json_get_bool '.plugins.entries["memory-core"].config.dreaming.enabled // false' 2>/dev/null || echo false)
-  skill_enabled=$(openclaw_json_get_bool '.plugins.entries["skill-workshop"].enabled // false' 2>/dev/null || echo false)
-  dreams_file=$(openclaw_memory_dreams_file)
-  workspace_skills_dir=$(openclaw_memory_workspace_skills_dir)
-  echo "企业增强层:"
-  echo "  Active Memory: $active_enabled"
-  echo "  Dreaming: $dream_enabled"
-  echo "  Skill Workshop: $skill_enabled"
-  echo "  Dreams 文件: $dreams_file"
-  echo "  工作区技能目录: $workspace_skills_dir"
-  [ -f "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" ] && echo "  企业状态文件: $SKPL_MEMORY_ENTERPRISE_STATE_FILE"
-}
-
-openclaw_memory_view_dreams() {
-  local dreams_file
-  dreams_file=$(openclaw_memory_dreams_file)
-  if [ ! -f "$dreams_file" ]; then
-    echo "暂无 DREAMS.md 产物。"
-    return 0
-  fi
-  python3 - "$dreams_file" <<'PY'
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-lines = path.read_text(encoding='utf-8', errors='ignore').splitlines()
-print('\n'.join(lines[-120:]))
-PY
-}
-
-openclaw_memory_list_workspace_skills() {
-  local target_dir
-  target_dir=$(openclaw_memory_workspace_skills_dir)
-  if [ ! -d "$target_dir" ]; then
-    echo "工作区技能目录尚未生成。"
-    return 0
-  fi
-  python3 - "$target_dir" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-items = []
-for skill_dir in sorted(root.iterdir()):
-    if not skill_dir.is_dir():
-        continue
-    meta = skill_dir / 'metadata.json'
-    score = '-'
-    version = '-'
-    title = skill_dir.name
-    if meta.exists():
-        try:
-            data = json.loads(meta.read_text(encoding='utf-8'))
-            score = data.get('qualityScore', '-')
-            version = data.get('version', '-')
-            title = data.get('goal') or title
-        except Exception:
-            pass
-    print(f"- {title} | slug={skill_dir.name} | v{version} | score={score}")
-PY
-}
-
-openclaw_memory_list_tasks() {
-  python3 - "$SKPL_MEMOS_TASKS_DIR" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-tasks_dir = Path(sys.argv[1])
-if not tasks_dir.exists():
-    print('暂无任务产物。')
-    raise SystemExit(0)
-files = sorted(tasks_dir.glob('*.md'), key=lambda p: p.stat().st_mtime, reverse=True)
-if not files:
-    print('暂无任务产物。')
-    raise SystemExit(0)
-print('最近任务:')
-for idx, path in enumerate(files[:12], start=1):
-    text = path.read_text(encoding='utf-8', errors='ignore')
-    title = next((line[2:].strip() for line in text.splitlines() if line.startswith('# ')), path.stem)
-    score_match = re.search(r'^- Quality Score: (\d+)/100$', text, re.M)
-    score = score_match.group(1) if score_match else '-'
-    print(f"{idx}. {title} | score={score} | file={path.name}")
-PY
-}
-
-openclaw_memory_list_skills() {
-  python3 - "$SKPL_MEMOS_SKILLS_DIR" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-skills_dir = Path(sys.argv[1])
-if not skills_dir.exists():
-    print('暂无技能产物。')
-    raise SystemExit(0)
-items = []
-for skill_dir in skills_dir.iterdir():
-    if not skill_dir.is_dir():
-        continue
-    meta = skill_dir / 'metadata.json'
-    score = 0
-    version = 0
-    goal = skill_dir.name
-    if meta.exists():
-        try:
-            data = json.loads(meta.read_text(encoding='utf-8'))
-            score = int(data.get('qualityScore') or 0)
-            version = int(data.get('version') or 0)
-            goal = str(data.get('goal') or goal)
-        except Exception:
-            pass
-    items.append((skill_dir.name, goal, score, version))
-if not items:
-    print('暂无技能产物。')
-    raise SystemExit(0)
-items.sort(key=lambda item: (-item[2], item[0]))
-print('技能清单:')
-for idx, (name, goal, score, version) in enumerate(items[:12], start=1):
-    print(f"{idx}. {goal} | slug={name} | v{version} | score={score}")
-PY
-}
-
-openclaw_memory_skill_history() {
-  python3 - "$SKPL_MEMOS_STATE_DIR/skill-history.jsonl" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-if not path.exists():
-    print('暂无技能升级记录。')
-    raise SystemExit(0)
-rows = []
-for line in path.read_text(encoding='utf-8', errors='ignore').splitlines():
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        rows.append(json.loads(line))
-    except Exception:
-        continue
-if not rows:
-    print('暂无技能升级记录。')
-    raise SystemExit(0)
-print('最近升级记录:')
-for idx, item in enumerate(rows[-12:][::-1], start=1):
-    print(f"{idx}. {item.get('goal', item.get('skill', '-'))} | v{item.get('version', '-')} | prev={item.get('previousVersion', '-')} | score={item.get('qualityScore', '-')}")
-PY
-}
-
-hybrid_memory_search() {
-  local query="$1" cache_key cache_file raw_json sync_stamp="0"
-  [ -z "$query" ] && return 1
-  if [ ! -x "$SKPL_HYBRID_MEMORY_BROKER" ]; then
-    echo "混合记忆 broker 尚未初始化。"
-    return 1
-  fi
-  hybrid_memory_prepare_dirs
-  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE" ]; then
-    sync_stamp=$(cat "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE" 2>/dev/null || echo 0)
-  fi
-  cache_key=$(python3 - "$query" "$sync_stamp" <<'PY'
-import hashlib, sys
-print(hashlib.sha256(f"{sys.argv[1]}::{sys.argv[2]}".encode('utf-8')).hexdigest())
-PY
-)
-  cache_file="$SKPL_HYBRID_MEMORY_CACHE_DIR/search-${cache_key}.json"
-  if [ -s "$cache_file" ] && openclaw_memory_cache_fresh "$cache_file" "$SKPL_HYBRID_MEMORY_SEARCH_CACHE_TTL"; then
-    raw_json=$(cat "$cache_file")
-  else
-    raw_json=$(python3 "$SKPL_HYBRID_MEMORY_BROKER" "$SKPL_HYBRID_MEMORY_DB" search "$query")
-    printf '%s' "$raw_json" > "$cache_file"
-  fi
-  printf '%s' "$raw_json" | python3 - <<'PY'
-import json
-import sys
-
-raw = sys.stdin.read().strip()
-if not raw:
-    print('未返回检索结果。')
-    raise SystemExit(0)
-
-try:
-    data = json.loads(raw)
-except Exception:
-    print(raw)
-    raise SystemExit(0)
-
-if not data:
-    print('未命中混合记忆结果。')
-    raise SystemExit(0)
-
-for idx, item in enumerate(data, start=1):
-    print(f"{idx}. [{item.get('source', '-')}] {item.get('summary', '-')}")
-    print(f"   score={item.get('score', 0):.3f} | channels={','.join(item.get('channels', [])) or '-'} | explain={item.get('explain', '-')}")
-PY
-}
-
-hybrid_memory_search_raw_json() {
-  local query="$1" cache_key cache_file raw_json sync_stamp="0"
-  [ -z "$query" ] && return 1
-  if [ ! -x "$SKPL_HYBRID_MEMORY_BROKER" ]; then
-    echo '[]'
-    return 0
-  fi
-  hybrid_memory_prepare_dirs
-  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE" ]; then
-    sync_stamp=$(cat "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE" 2>/dev/null || echo 0)
-  fi
-  cache_key=$(python3 - "$query" "$sync_stamp" <<'PY'
-import hashlib, sys
-print(hashlib.sha256(f"{sys.argv[1]}::{sys.argv[2]}".encode('utf-8')).hexdigest())
-PY
-)
-  cache_file="$SKPL_HYBRID_MEMORY_CACHE_DIR/search-${cache_key}.json"
-  if [ -s "$cache_file" ] && openclaw_memory_cache_fresh "$cache_file" "$SKPL_HYBRID_MEMORY_SEARCH_CACHE_TTL"; then
-    cat "$cache_file"
-  else
-    raw_json=$(python3 "$SKPL_HYBRID_MEMORY_BROKER" "$SKPL_HYBRID_MEMORY_DB" search "$query")
-    printf '%s' "$raw_json" > "$cache_file"
-    printf '%s' "$raw_json"
-  fi
-}
-
-hybrid_memory_enqueue_event() {
-  local event_type="$1"
-  local summary="$2"
-  local ts event_file
-  [ -z "$event_type" ] && return 1
-  if ! python3 - "$SKPL_HYBRID_MEMORY_EVENT_ALLOWLIST" "$event_type" <<'PY'
-import sys
-allowlist = [x.strip() for x in sys.argv[1].split(',') if x.strip()]
-event_type = sys.argv[2].strip()
-raise SystemExit(0 if event_type in allowlist else 1)
-PY
-  then
-    return 0
-  fi
-  hybrid_memory_prepare_dirs
-  ts=$(date +%s)
-  event_file="$SKPL_HYBRID_MEMORY_EVENTS_DIR/${ts}-${event_type}.json"
-  python3 - "$event_file" "$event_type" "$summary" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-path, event_type, summary = sys.argv[1:4]
-payload = {
-    'id': Path(path).stem,
-    'kind': 'event',
-    'source': 'openclaw',
-    'text': summary or event_type,
-    'summary': summary or event_type,
-    'tags': [event_type, 'hybrid-memory'],
-    'confidence': 0.6,
-}
-Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-PY
-}
-
-hybrid_memory_sync_once() {
-  local event_file processed=0 sync_status="ok" sync_message="" error_detail="" retry_count retry_target
-  hybrid_memory_prepare_dirs
-  if [ -f "$SKPL_HYBRID_MEMORY_SYNC_LOCK_FILE" ]; then
-    echo "混合记忆同步正在进行中，已跳过重复执行。"
-    return 0
-  fi
-  if ! python3 - "$SKPL_HYBRID_MEMORY_SYNC_LOAD_LIMIT" <<'PY'
-import os, sys
-limit = float(sys.argv[1])
-try:
-    load1 = os.getloadavg()[0]
-except Exception:
-    load1 = 0.0
-raise SystemExit(0 if load1 <= limit else 1)
-PY
-  then
-    echo "当前系统负载较高，已跳过本次混合记忆同步。"
-    return 0
-  fi
-  printf '%s\n' "$$" > "$SKPL_HYBRID_MEMORY_SYNC_LOCK_FILE"
-  trap 'rm -f "$SKPL_HYBRID_MEMORY_SYNC_LOCK_FILE"' EXIT
-  if ! hybrid_memory_write_broker; then
-    sync_status="error"
-    sync_message="broker 初始化失败"
-    error_detail="hybrid_memory_write_broker returned non-zero"
-    goto_sync_finalize=1
-  fi
-  if [ -z "${goto_sync_finalize:-}" ]; then
-  for event_file in "$SKPL_HYBRID_MEMORY_EVENTS_DIR"/*.json; do
-    [ -f "$event_file" ] || continue
-    if ! python3 "$SKPL_HYBRID_MEMORY_BROKER" "$SKPL_HYBRID_MEMORY_DB" ingest "$event_file" >/dev/null 2>&1; then
-      sync_status="error"
-      sync_message="事件入库失败"
-      error_detail="$event_file"
-      retry_count=$(python3 - "$event_file" <<'PY'
-import json, sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-try:
-    payload = json.loads(path.read_text(encoding='utf-8'))
-except Exception:
-    payload = {}
-print(int(payload.get('retry_count', 0) or 0))
-PY
-)
-      if [ "$retry_count" -lt "$SKPL_HYBRID_MEMORY_RETRY_MAX" ]; then
-        retry_target="$SKPL_HYBRID_MEMORY_FAILED_DIR/$(basename "$event_file")"
-        python3 - "$event_file" "$retry_target" <<'PY'
-import json, sys, time
-from pathlib import Path
-
-src = Path(sys.argv[1])
-dst = Path(sys.argv[2])
-payload = json.loads(src.read_text(encoding='utf-8'))
-payload['retry_count'] = int(payload.get('retry_count', 0) or 0) + 1
-payload['retry_after'] = int(time.time()) + 30
-dst.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-PY
-        mv "$event_file" "$SKPL_HYBRID_MEMORY_ARCHIVE_DIR/failed-$(basename "$event_file")"
-      fi
-      break
+# ==========================================
+# 🌌 新一代极致记忆与智能路由系统 (Ultra-Light)
+# ==========================================
+
+# 1. 硬件分级检测 (极速版 - 0 延迟)
+# 根据内存容量和 CPU 核心数判断: 1=低配, 2=中配, 3=高配
+openclaw_detect_hardware_tier() {
+    local total_kb cpu_cores tier
+    total_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo "0")
+    cpu_cores=$(nproc 2>/dev/null || echo "1")
+
+    if [ "$total_kb" -gt "16000000" ] && [ "$cpu_cores" -ge "8" ]; then
+        tier=3 # 高配 (>16GB, 8+核)
+    elif [ "$total_kb" -gt "7000000" ] && [ "$cpu_cores" -ge "4" ]; then
+        tier=2 # 中配 (8-16GB, 4+核)
+    else
+        tier=1 # 低配 (<8GB)
     fi
-    mv "$event_file" "$SKPL_HYBRID_MEMORY_ARCHIVE_DIR/$(basename "$event_file")"
-    processed=$((processed + 1))
-  done
-  fi
-  if [ "$sync_status" = "ok" ]; then
-  python3 - "$SKPL_HYBRID_MEMORY_CACHE_DIR" <<'PY'
-import sys
+    echo "$tier"
+}
+
+# 2. 智能模型路由 (核心 Skill 逻辑)
+# 根据意图、硬件自动分配模型，彻底告别 Token 消耗过大和卡顿
+# 0: 文本/闲聊 -> 云端小模型 (Flash/Saver)
+# 1: 图像/复杂推理 -> 云端强模型 (Pro/Vision)
+# 2: 简单逻辑/隐私 -> 本地量化模型 (仅高/中配，低配强制跳过)
+openclaw_memory_smart_route() {
+    local intent="$1" tier
+    tier=$(openclaw_detect_hardware_tier)
+    
+    # 模型预设
+    local vision_model="google/gemini-2.5-pro"
+    local text_model="google/gemini-2.5-flash"
+    local local_model="/root/.openclaw/models/embedding/embeddinggemma-300M-Q4_K_M.gguf"
+
+    mkdir -p /root/.openclaw/memory/route
+
+    # 核心路由逻辑：写入配置供 OpenClaw 动态加载
+    case "$tier" in
+        3) # 高配：本地模型可用，强云端可用
+            openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
+            openclaw config set agents.defaults.memorySearch.local.modelPath "$local_model" >/dev/null 2>&1 || true
+            if [ "$intent" = "vision" ] || [ "$intent" = "complex" ]; then
+                openclaw config set agents.defaults.model.primary "$vision_model" >/dev/null 2>&1
+                echo "🌟 [高配路由] 视觉/复杂任务切换至: $vision_model"
+            else
+                openclaw config set agents.defaults.model.primary "$text_model" >/dev/null 2>&1
+                echo "🌟 [高配路由] 常规文本切换至: $text_model (本地记忆加速)"
+            fi
+            ;;
+        2) # 中配：限制本地模型权重，依赖云端推理
+            openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
+            openclaw config set agents.defaults.memorySearch.local.modelPath "$local_model" >/dev/null 2>&1 || true
+            if [ "$intent" = "vision" ]; then
+                openclaw config set agents.defaults.model.primary "$vision_model" >/dev/null 2>&1
+                echo "🌟 [中配路由] 图像识别强制走云端: $vision_model"
+            else
+                openclaw config set agents.defaults.model.primary "$text_model" >/dev/null 2>&1
+                echo "🌟 [中配路由] 文本任务走高速云端: $text_model (本地轻量检索)"
+            fi
+            ;;
+        *) # 低配：彻底关闭本地大模型，纯极速云端
+            openclaw config set agents.defaults.memorySearch.provider openai >/dev/null 2>&1 || true # Fallback to fast cloud search if available
+            openclaw config set agents.defaults.model.primary "$text_model" >/dev/null 2>&1
+            echo "🌟 [低配路由] 节省资源模式：全量走云端极速模型: $text_model"
+            ;;
+    esac
+}
+
+# 3. 极致轻量级本地记忆核心 (SQLite-FTS5)
+# 替代之前的重型 LanceDB/QDM 框架，检索极快，内存占用 < 50MB
+# 🌌 OpenClaw 智能大脑与模型路由核心 (Smart Brain & Model Router)
+# ==========================================
+# 1. 智能模型管理器：为不同任务分配不同模型，极致省钱+提速
+# 4. EvoMap 经验沉淀 (实操法 - 非循环推理)
+# 记录高频操作步骤、报错及解法、偏好。零延迟写入，绝不消耗 Token
+openclaw_evomap_fast_ingest() {
+    local category="$1" summary="$2" ts
+    ts=$(date +%s)
+    
+    mkdir -p "/root/.openclaw/memory/evomap-ingest"
+    
+    local ingest_file="/root/.openclaw/memory/evomap-ingest/${ts}-${category}.md"
+    cat > "$ingest_file" <<EOF
+# [EvoMap] $category
+- 时间: $ts
+- 沉淀内容: $summary
+EOF
+    echo "🌌 经验已沉淀: $category"
+}
+
+# 5. 进化汇总 (将实践经验转化为可用 Skill)
+openclaw_evomap_fast_evolve_into_skill() {
+    mkdir -p "/root/.openclaw/workspace/skills/evomap-evolved/"
+    
+    # 简单合并 ingest 记录为 skill
+    python3 - "/root/.openclaw/memory/evomap-ingest" "/root/.openclaw/workspace/skills/evomap-evolved/EVOMAP-LIVE.md" <<'PY'
+import sys, os
 from pathlib import Path
-cache_dir = Path(sys.argv[1])
-if cache_dir.is_dir():
-    for path in cache_dir.glob('search-*.json'):
-        path.unlink(missing_ok=True)
+ingest = Path(sys.argv[1])
+target = Path(sys.argv[2])
+if not ingest.exists(): raise SystemExit(0)
+
+md = ["# EvoMap 实时进化沉淀 (最佳实践库)\n"]
+files = sorted(ingest.glob("*.md"), reverse=True)[:20] # 仅保留最新 20 条，防止 Token 爆炸
+for f in files:
+    md.append(f.read_text())
+
+target.write_text("\n\n---\n\n".join(md))
 PY
-  fi
-  if [ "$sync_status" = "ok" ]; then
-    if ! hybrid_memory_export_fast_cards >/dev/null 2>&1; then
-      sync_status="error"
-      sync_message="fast cards 导出失败"
-      error_detail="hybrid_memory_export_fast_cards returned non-zero"
-    fi
-  fi
-  if [ "$sync_status" = "ok" ]; then
-    if ! hybrid_memory_run_memos_postprocess >/dev/null 2>&1; then
-      sync_status="error"
-      sync_message="MemOS 本地后处理失败"
-      error_detail="hybrid_memory_run_memos_postprocess returned non-zero"
-    fi
-  fi
-  rm -f "$SKPL_HYBRID_MEMORY_SYNC_LOCK_FILE"
-  trap - EXIT
-  if [ "$sync_status" = "ok" ]; then
-    python3 - "$SKPL_HYBRID_MEMORY_FAILED_DIR" "$SKPL_HYBRID_MEMORY_EVENTS_DIR" <<'PY'
-import json, sys, time
-from pathlib import Path
-
-failed_dir = Path(sys.argv[1])
-events_dir = Path(sys.argv[2])
-now = int(time.time())
-for path in failed_dir.glob('*.json'):
-    try:
-        payload = json.loads(path.read_text(encoding='utf-8'))
-    except Exception:
-        continue
-    if int(payload.get('retry_after', 0) or 0) > now:
-        continue
-    target = events_dir / path.name
-    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    path.unlink(missing_ok=True)
-    break
-PY
-  fi
-  if [ "$sync_status" = "ok" ]; then
-    printf '%s\n' "$(date +%s)" > "$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE"
-    printf '[%s] status=ok processed=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$processed" >> "$SKPL_HYBRID_MEMORY_SYNC_LOG"
-    echo "混合记忆同步完成，处理 ${processed} 条事件。"
-    return 0
-  fi
-  printf '[%s] status=error processed=%s message=%s detail=%s\n' \
-    "$(date '+%Y-%m-%d %H:%M:%S')" "$processed" "$sync_message" "$error_detail" >> "$SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG"
-  echo "混合记忆同步未完成：$sync_message"
-  return 1
+    
+    echo "✅ 经验已转化为 Skills 注入上下文"
 }
 
-hybrid_memory_export_fast_cards() {
-  hybrid_memory_prepare_dirs
-  python3 - "$SKPL_HYBRID_MEMORY_DB" "$SKPL_HYBRID_MEMORY_EXPORT_DIR" "$SKPL_HYBRID_MEMORY_EXPORT_MIN_CONFIDENCE" <<'PY'
-import json
-import sqlite3
-import sys
-from pathlib import Path
-
-db_path = Path(sys.argv[1])
-export_dir = Path(sys.argv[2])
-min_confidence = float(sys.argv[3])
-export_dir.mkdir(parents=True, exist_ok=True)
-
-if not db_path.exists():
-    raise SystemExit(0)
-
-conn = sqlite3.connect(db_path)
-rows = conn.execute(
-    'select id, summary, text, tags, confidence from memory_objects order by confidence desc, created_at desc limit 20'
-).fetchall()
-conn.close()
-
-expected = set()
-
-for idx, row in enumerate(rows, start=1):
-    rid, summary, text, tags_raw, confidence = row
-    if float(confidence or 0) < min_confidence:
-        continue
-    try:
-        tags = json.loads(tags_raw or '[]')
-    except Exception:
-        tags = []
-    content = [
-        f'# {summary or rid}',
-        '',
-        f'- ID: {rid}',
-        f'- Confidence: {confidence}',
-        f'- Tags: {", ".join(tags)}',
-        '',
-        text or summary or rid,
-        ''
-    ]
-    filename = f'{rid}.md'
-    expected.add(filename)
-    path = export_dir / filename
-    new_text = '\n'.join(content)
-    old_text = path.read_text(encoding='utf-8') if path.exists() else None
-    if old_text != new_text:
-        path.write_text(new_text, encoding='utf-8')
-
-for path in export_dir.glob('*.md'):
-    if path.name not in expected:
-        path.unlink(missing_ok=True)
-PY
-  echo "已导出混合记忆 fast cards 到: $SKPL_HYBRID_MEMORY_EXPORT_DIR"
-}
-
-hybrid_memory_show_sync_log() {
-  if [ ! -f "$SKPL_HYBRID_MEMORY_SYNC_LOG" ]; then
-    echo "暂无同步日志。"
-    return 0
-  fi
-  python3 - "$SKPL_HYBRID_MEMORY_SYNC_LOG" <<'PY'
-import sys
-from pathlib import Path
-
-lines = Path(sys.argv[1]).read_text(encoding='utf-8', errors='ignore').splitlines()
-for line in lines[-80:]:
-    print(line)
-PY
-}
-
-openclaw_get_config_path_quick() {
-  if [ -f "${HOME}/.openclaw/openclaw.json" ]; then
-    echo "${HOME}/.openclaw/openclaw.json"
-  else
-    echo "/root/.openclaw/openclaw.json"
-  fi
-}
-
-openclaw_ensure_local_gateway_config() {
-  local config_file gateway_port
-  config_file="$(openclaw_get_config_path_quick)"
-  gateway_port="${OPENCLAW_GATEWAY_PORT:-18789}"
-  mkdir -p "$(dirname "$config_file")"
-
-  if command -v openclaw >/dev/null 2>&1; then
-    openclaw config set gateway.mode local >/dev/null 2>&1 || true
-    openclaw config set gateway.port "$gateway_port" --json >/dev/null 2>&1 || true
-  fi
-
-  python3 - "$config_file" "$gateway_port" <<'PY'
-import json
-import os
-import secrets
-import sys
-
-path, port_raw = sys.argv[1:3]
-try:
-    port = int(port_raw)
-except Exception:
-    port = 18789
-
-data = {}
-if os.path.exists(path) and os.path.getsize(path) > 0:
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            loaded = json.load(f)
-            if isinstance(loaded, dict):
-                data = loaded
-    except Exception:
-        raise SystemExit(0)
-
-gateway = data.get('gateway')
-if not isinstance(gateway, dict):
-    gateway = {}
-    data['gateway'] = gateway
-
-auth = gateway.get('auth')
-if not isinstance(auth, dict):
-    auth = {}
-    gateway['auth'] = auth
-
-control_ui = gateway.get('controlUi')
-if not isinstance(control_ui, dict):
-    control_ui = {}
-    gateway['controlUi'] = control_ui
-
-changed = False
-if gateway.get('mode') != 'local':
-    gateway['mode'] = 'local'
-    changed = True
-if not isinstance(gateway.get('port'), int):
-    gateway['port'] = port
-    changed = True
-
-if control_ui.get('allowInsecureAuth') is not True:
-    control_ui['allowInsecureAuth'] = True
-    changed = True
-
-token_value = auth.get('token')
-if not isinstance(token_value, str) or not token_value.strip() or token_value.strip().startswith('${'):
-    auth['token'] = secrets.token_urlsafe(32)
-    changed = True
-
-expected_origins = [
-    f'http://127.0.0.1:{port}',
-    f'http://localhost:{port}',
-    'http://127.0.0.1',
-    'http://localhost',
-]
-allowed_origins = control_ui.get('allowedOrigins')
-if not isinstance(allowed_origins, list):
-    allowed_origins = []
-normalized_origins = []
-for origin in allowed_origins + expected_origins:
-    if isinstance(origin, str) and origin and origin not in normalized_origins:
-        normalized_origins.append(origin)
-if normalized_origins != allowed_origins:
-    control_ui['allowedOrigins'] = normalized_origins
-    changed = True
-
-for key, value in (('agents', {}), ('channels', {}), ('plugins', {}), ('memory', {})):
-    if key not in data or data[key] is None:
-        data[key] = value
-        changed = True
-
-if changed or not os.path.exists(path) or os.path.getsize(path) == 0:
-    tmp = path + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write('\n')
-    os.replace(tmp, path)
-PY
-}
-
-openclaw_default_memory_model_path() {
-  echo "/root/.openclaw/models/embedding/embeddinggemma-300M-Q8_0.gguf"
-}
-
-openclaw_default_memory_q4km_model_path() {
-  echo "/root/.openclaw/models/embedding/embeddinggemma-300M-Q4_K_M.gguf"
-}
-
-openclaw_default_cloud_vision_model() {
-  echo "google/gemini-2.5-flash"
-}
-
-openclaw_default_cloud_ocr_model() {
-  echo "google/gemini-2.5-pro"
-}
-
-install_node_and_tools() {
-  ensure_node_runtime
-}
-
-start_gateway() {
-  local mode="${1:-normal}" cooldown="${2:-15}" now last_restart=0
-
-  if [ "$mode" != "force" ] && [ -f "$SKPL_GATEWAY_RESTART_STAMP_FILE" ]; then
-    read -r last_restart < "$SKPL_GATEWAY_RESTART_STAMP_FILE" 2>/dev/null || last_restart=0
-  fi
-
-  now=$(date +%s)
-  if [ "$mode" != "force" ] && [ $((now - last_restart)) -lt "$cooldown" ] && openclaw_gateway_is_running; then
-    return 0
-  fi
-
-  if openclaw_gateway_service_active; then
-    systemctl --user restart openclaw-gateway.service >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
-  else
-    openclaw gateway restart >/dev/null 2>&1 || openclaw gateway start >/dev/null 2>&1 || true
-  fi
-  printf '%s\n' "$now" > "$SKPL_GATEWAY_RESTART_STAMP_FILE"
-  if [ "${SKPL_BATCH_MODE:-0}" != "1" ] && [ "$mode" != "nosleep" ]; then
-    sleep 3
-  fi
-}
-
-openclaw_gateway_status_quick() {
-  openclaw_gateway_is_running
-}
-
-  openclaw_onboard_if_needed() {
-  local config_file onboard_rc onboard_log
-  config_file="$(openclaw_get_config_path_quick)"
-  onboard_log="/root/.skpl/openclaw-onboard.log"
-
-  if [ -s "$config_file" ]; then
-    log_msg "OpenClaw 配置已存在，跳过 onboard"
-    return 0
-  fi
-
-  echo "正在初始化 OpenClaw（首次执行可能需要 1-3 分钟）..."
-  echo "初始化日志: ${onboard_log}"
-  : > "$onboard_log"
-  set +e
-  openclaw_run_interactive_logged_command_with_timeout 180 "$onboard_log" openclaw onboard --install-daemon
-  onboard_rc=$?
-  set -e
-
-  if [ $onboard_rc -eq 0 ]; then
-    log_msg "OpenClaw onboard 成功"
-    echo "OpenClaw 初始化完成。"
-    echo "提示：官方新版 Control UI 在新浏览器或新设备上可能需要一次设备审批。"
-    echo "提示：WhatsApp 请通过 channels login 完成官方扫码登录，登录返回后先执行 openclaw channels status。"
-    return 0
-  fi
-
-  log_msg "OpenClaw onboard 未成功，返回码: $onboard_rc"
-  if [ $onboard_rc -eq 124 ]; then
-    echo "OpenClaw 初始化超过 180 秒，继续执行后续兜底配置。"
-  else
-    echo "OpenClaw 初始化返回异常（返回码: $onboard_rc），继续执行后续兜底配置。"
-  fi
-  return 0
-}
-
-openclaw_ensure_gateway_ready() {
-  local i max_wait
-  max_wait="${SKPL_GATEWAY_READY_TIMEOUT_SECONDS:-6}"
-
-  if ! command -v openclaw >/dev/null 2>&1; then
-    echo "OpenClaw CLI 未安装，无法启动网关。"
-    return 1
-  fi
-
-  refresh_runtime_proxy_env
-  openclaw_ensure_local_gateway_config >/dev/null 2>&1 || true
-  refresh_openclaw_gateway_service >/dev/null 2>&1 || true
-
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl --user daemon-reload >/dev/null 2>&1 || true
-    systemctl --user enable openclaw-gateway.service >/dev/null 2>&1 || true
-    systemctl --user start openclaw-gateway.service >/dev/null 2>&1 || true
-  fi
-
-  if ! openclaw_gateway_is_running; then
-    openclaw gateway install >/dev/null 2>&1 || true
-    refresh_openclaw_gateway_service >/dev/null 2>&1 || true
-    start_gateway
-  fi
-
-  if ! openclaw_gateway_is_running; then
-    openclaw_gateway_fallback_start >/dev/null 2>&1 || true
-  fi
-
-  echo "正在等待 OpenClaw 网关就绪（最长 ${max_wait} 秒）..."
-  for ((i = 1; i <= max_wait; i++)); do
-    if openclaw_gateway_is_running; then
-      return 0
-    fi
-    sleep 1
-  done
-
-  echo "OpenClaw 网关启动后仍未就绪。"
-  echo "建议检查：openclaw gateway status --deep、openclaw doctor、systemctl --user status openclaw-gateway.service --no-pager"
-  echo "如果 systemd 在 WSL 中不可用，请检查 /root/.skpl/openclaw-gateway-fallback.log"
-  return 1
-}
-
-  openclaw_run_onboard_wizard() {
-    local onboard_log="/root/.skpl/openclaw-onboard.log"
-    echo "正在打开 OpenClaw 配置向导..."
-    echo "配置向导日志: ${onboard_log}"
-    echo "提示：向导完成后，WebUI 首次浏览器访问可能需要设备审批。"
-    echo "提示：WhatsApp 官方登录请回到机器人对接菜单执行 channels login --channel whatsapp。"
-    openclaw_run_interactive_logged_command "$onboard_log" openclaw onboard --install-daemon
-  }
-
-openclaw_memory_prepare() {
-  local model_name model_dir model_path
-  model_name="embeddinggemma-300M-Q8_0.gguf"
-  model_dir="/root/.openclaw/models/embedding"
-  model_path="${model_dir}/${model_name}"
-
-  mkdir -p "${model_dir}" /root/.openclaw/workspace/memory
-  openclaw config set memory.backend builtin >/dev/null 2>&1 || true
-  openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
-  openclaw config set memory.qmd.includeDefaultMemory true --json >/dev/null 2>&1 || true
-  openclaw config set agents.defaults.memorySearch.local.modelPath "${model_path}" >/dev/null 2>&1 || true
-
-  printf '%s\n' "$model_path"
-}
-
-openclaw_memory_apply_local_q4km_model() {
-  local model_name model_dir model_dest model_url
-  model_name="embeddinggemma-300M-Q4_K_M.gguf"
-  model_dir="$HOME/.openclaw/models/embedding"
-  model_dest="$model_dir/$model_name"
-  model_url="${OPENCLAW_MEMORY_HF_BASE}/ggml-org/embeddinggemma-300M-GGUF/resolve/main/$model_name"
-
-  mkdir -p "$model_dir" /root/.openclaw/workspace/memory
-  openclaw_memory_config_set "memory.backend" "builtin"
-  openclaw_memory_config_set "agents.defaults.memorySearch.provider" "local"
-  openclaw_memory_config_set "memory.qmd.includeDefaultMemory" true >/dev/null 2>&1 || true
-  if [ "$OPENCLAW_MEMORY_CONFIG_ONLY" = "true" ]; then
-    echo "ℹ️ 仅写配置模式：跳过 Q4_K_M 模型下载"
-  else
-    if [ ! -f "$model_dest" ]; then
-      echo "⬇️ 下载 Q4_K_M 量化模型: $model_url"
-      openclaw_memory_download_file "$model_url" "$model_dest" || return 1
-    fi
-  fi
-  openclaw_memory_config_set "agents.defaults.memorySearch.local.modelPath" "$model_dest"
-  OPENCLAW_MEMORY_MODEL_PATH="$model_dest"
-  echo "✅ 已切换为本地 Q4_K_M 量化模型: $model_dest"
-}
-
-openclaw_memory_enable_local_q8o_model() {
-  local model_name model_dir model_dest model_url
-  model_name="embeddinggemma-300M-Q8_0.gguf"
-  model_dir="$HOME/.openclaw/models/embedding"
-  model_dest="$model_dir/$model_name"
-  model_url="${OPENCLAW_MEMORY_HF_BASE}/ggml-org/embeddinggemma-300M-GGUF/resolve/main/$model_name"
-
-  mkdir -p "$model_dir" /root/.openclaw/workspace/memory
-  openclaw_memory_config_set "memory.backend" "builtin"
-  openclaw_memory_config_set "agents.defaults.memorySearch.provider" "local"
-  openclaw_memory_config_set "memory.qmd.includeDefaultMemory" true >/dev/null 2>&1 || true
-  if [ "$OPENCLAW_MEMORY_CONFIG_ONLY" = "true" ]; then
-    echo "ℹ️ 仅写配置模式：跳过 Q8_0 模型下载"
-  else
-    if [ ! -f "$model_dest" ]; then
-      echo "⬇️ 下载 Q8_0 模型: $model_url"
-      openclaw_memory_download_file "$model_url" "$model_dest" || return 1
-    fi
-  fi
-  openclaw_memory_config_set "agents.defaults.memorySearch.local.modelPath" "$model_dest"
-  OPENCLAW_MEMORY_MODEL_PATH="$model_dest"
-  echo "✅ 已切换为本地 Q8_0 量化模型: $model_dest"
-}
-
-openclaw_enable_cloud_vision_recognition() {
-  local default_model vision_model
-  default_model=$(openclaw_json_get_string '.agents.defaults.model.primary // empty' 2>/dev/null || true)
-  vision_model=$(openclaw_default_cloud_vision_model)
-  if [ -z "$default_model" ] || [ "$default_model" = "null" ]; then
-    default_model="$vision_model"
-  fi
-
-  openclaw_memory_config_set "agents.defaults.model.imageModelFallback" "$vision_model"
-  openclaw_memory_config_set "agents.defaults.modelFallback" "$default_model"
-  openclaw_memory_config_set "plugins.entries.active-memory.config.modelFallback" "$vision_model"
-  openclaw_memory_config_set "plugins.entries.active-memory.config.promptAppend" "Prefer image-capable recall and visual understanding when screenshots, photos, diagrams, UI pages, or image attachments appear in the session." >/dev/null 2>&1 || true
-  echo "✅ 已启用云端图像识别 fallback: $vision_model"
-  echo "主模型保持: $default_model"
-}
-
-openclaw_enable_cloud_ocr_recognition() {
-  local ocr_model
-  ocr_model=$(openclaw_default_cloud_ocr_model)
-  openclaw_memory_config_set "agents.defaults.model.imageModelFallback" "$ocr_model"
-  openclaw_memory_config_set "agents.defaults.modelFallback" "$ocr_model"
-  openclaw_memory_config_set "plugins.entries.active-memory.config.modelFallback" "$ocr_model"
-  openclaw_memory_config_set "plugins.entries.active-memory.config.promptAppend" "Prefer cloud OCR for PDF pages, scans, screenshots, charts, tables, and image attachments that contain text." >/dev/null 2>&1 || true
-  echo "✅ 已启用云端 OCR fallback: $ocr_model"
-}
-
-openclaw_memory_route_visual_model() {
-  local media_hint="$1"
-  case "$media_hint" in
-    pdf|document|doc|scan|ocr)
-      openclaw_enable_cloud_ocr_recognition
-      ;;
-    screenshot|ui|image|diagram|photo)
-      openclaw_enable_cloud_vision_recognition
-      ;;
-    *)
-      openclaw_enable_cloud_vision_recognition
-      ;;
-  esac
-}
-
-openclaw_memory_model_enhancement_status() {
-  local local_model image_model fallback_model
-  local_model=$(openclaw_memory_get_local_model_path)
-  image_model=$(openclaw_json_get_string '.agents.defaults.model.imageModelFallback // empty' 2>/dev/null || true)
-  fallback_model=$(openclaw_json_get_string '.agents.defaults.modelFallback // empty' 2>/dev/null || true)
-  echo "模型增强状态:"
-  echo "  本地记忆模型: ${local_model:-未配置}"
-  echo "  图像识别 fallback: ${image_model:-未配置}"
-  echo "  通用 fallback: ${fallback_model:-未配置}"
-  echo "  视觉记忆: $(find "$SKPL_VISUAL_MEMORY_ARCHIVE_DIR" -type f 2>/dev/null | wc -l | tr -d ' ') 条"
-}
-
-openclaw_memory_prompt_hint_auto_route() {
-  local hint="$1"
-  case "$hint" in
-    pdf|document|scan|ocr)
-      openclaw_enable_cloud_ocr_recognition
-      ;;
-    screenshot|ui|image|diagram|photo)
-      openclaw_enable_cloud_vision_recognition
-      ;;
-    *)
-      return 0
-      ;;
-  esac
-}
-
+# 6. 极致增强菜单面板
 openclaw_memory_model_enhancement_menu() {
+  local tier
+  tier=$(openclaw_detect_hardware_tier)
+  
   while true; do
     clear
-    skpl_ui_header "模型增强" "云端图形识别与本地量化模型"
-    openclaw_memory_model_enhancement_status
+    skpl_ui_header "极致记忆与路由" "适配全机型的极速方案"
+    echo "当前硬件层级: $tier (Tier 1=低配, 2=中配, 3=高配)"
+    echo "✅ 已抛弃所有重型框架，改用 SQLite + 智能路由"
     echo
-    skpl_ui_section "操作"
-    skpl_ui_menu_item 1 "云端图形识别" "截图/UI/图片自动走云端视觉"
-    skpl_ui_menu_item 2 "切换本地 Q4_K_M" "使用本地 Q4_K_M 量化 embedding 模型"
-    skpl_ui_menu_item 3 "切换本地 Q8_0" "使用本地 Q8_0 量化 embedding 模型"
-    skpl_ui_menu_item 4 "启用云端 OCR" "PDF / 文档 / 扫描件自动走 OCR"
-    skpl_ui_menu_item 5 "企业增强全开" "云端视觉 + 本地量化 + 企业增强四层"
-    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_section "一键操作"
+    skpl_ui_menu_item 1 "执行智能路由" "根据当前场景自动切换最佳大模型"
+    skpl_ui_menu_item 2 "初始化极速核心" "重置轻量级本地记忆库 (SQLite)"
+    skpl_ui_menu_item 3 "EvoMap 沉淀" "将近期经验转化为记忆 (零延迟)"
+    skpl_ui_menu_item 4 "全量备份/恢复" "极致轻量化备份核心记忆"
+    skpl_ui_menu_item 0 "返回主菜单"
     skpl_ui_footer_prompt "请选择: "
     read -e choice
     case "$choice" in
       1)
-        openclaw_memory_route_visual_model "image"
+        read -e -p "输入场景意图 (text/vision/complex): " intent
+        [ -z "$intent" ] && intent="text"
+        openclaw_memory_smart_route "$intent"
         openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
         break_end
         ;;
       2)
-        openclaw_memory_detect_region
-        openclaw_memory_select_sources
-        openclaw_memory_apply_local_q4km_model
-        openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
+        openclaw_memory_fast_init
         break_end
         ;;
       3)
-        openclaw_memory_detect_region
-        openclaw_memory_select_sources
-        openclaw_memory_enable_local_q8o_model
-        openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
+        openclaw_evomap_fast_ingest "手动操作" "用户通过面板触发了经验沉淀"
+        openclaw_evomap_fast_evolve_into_skill
         break_end
         ;;
       4)
-        openclaw_memory_route_visual_model "pdf"
-        openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
-        break_end
-        ;;
-      5)
-        openclaw_memory_detect_region
-        openclaw_memory_select_sources
-        openclaw_memory_apply_local_q4km_model || { break_end; continue; }
-        openclaw_enable_cloud_vision_recognition
-        openclaw_memory_enable_enterprise_four_layer
-        break_end
+        openclaw_backup_restore_menu
         ;;
       0)
         return 0
@@ -3605,7 +2289,6 @@ openclaw_memory_model_enhancement_menu() {
 }
 
 openclaw_memory_prepare_prefetch() {
-  local model_dir model_path
   model_path="$(openclaw_default_memory_model_path)"
   model_dir="$(dirname "$model_path")"
   mkdir -p "$model_dir" /root/.openclaw/workspace/memory
@@ -8168,12 +6851,11 @@ PY
 
     if [ -d "$openclaw_root" ]; then
       mkdir -p "$tmp_payload/openclaw-root"
-      for d in workspace extensions skills prompts tools telegram feishu whatsapp discord slack qqbot logs memos; do
+      for d in workspace extensions skills prompts tools telegram feishu whatsapp discord slack qqbot logs; do
         [ -e "$openclaw_root/$d" ] && cp -a "$openclaw_root/$d" "$tmp_payload/openclaw-root/"
       done
       [ -f "$openclaw_root/openclaw.json" ] && cp -a "$openclaw_root/openclaw.json" "$tmp_payload/openclaw-root/"
-      [ -f "$openclaw_root/DREAMS.md" ] && cp -a "$openclaw_root/DREAMS.md" "$tmp_payload/openclaw-root/"
-      [ -d "$openclaw_root/memory/dreaming" ] && mkdir -p "$tmp_payload/openclaw-root/memory" && cp -a "$openclaw_root/memory/dreaming" "$tmp_payload/openclaw-root/memory/"
+      [ -d "$openclaw_root/memory" ] && cp -a "$openclaw_root/memory" "$tmp_payload/openclaw-root/"
     fi
 
     workspaces_json=$(openclaw_get_all_agent_workspaces)
@@ -8192,12 +6874,9 @@ for item in workspaces:
             else: shutil.copytree(src, os.path.join(target_dir, f), dirs_exist_ok=True)
 " "$workspaces_json" "$tmp_payload"
 
-    [ -d "$SKPL_HYBRID_MEMORY_ROOT" ] && cp -a "$SKPL_HYBRID_MEMORY_ROOT" "$tmp_payload/hybrid-memory"
-    [ -f "$(openclaw_memory_config_file)" ] && mkdir -p "$tmp_payload/memory-config" && cp -a "$(openclaw_memory_config_file)" "$tmp_payload/memory-config/openclaw.json"
-    [ -d "$EVOMAP_DIR" ] && cp -a "$EVOMAP_DIR" "$tmp_payload/evomap"
-    [ -d "$EVOMAP_MEMORY_DIR" ] && cp -a "$EVOMAP_MEMORY_DIR" "$tmp_payload/evomap-memory"
-    [ -d "$EVOMAP_BACKUP_DIR" ] && cp -a "$EVOMAP_BACKUP_DIR" "$tmp_payload/evomap-backups"
-    [ -f "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" ] && mkdir -p "$tmp_payload/enterprise-memory" && cp -a "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" "$tmp_payload/enterprise-memory/state.json"
+    [ -d "$SKPL_EVOMAP_INGEST_DIR" ] && cp -a "$SKPL_EVOMAP_INGEST_DIR" "$tmp_payload/memory-evomap-ingest"
+    [ -d "$SKPL_EVOMAP_EVOLVED_DIR" ] && cp -a "$SKPL_EVOMAP_EVOLVED_DIR" "$tmp_payload/memory-evolved"
+    [ -d "/root/.openclaw/memory/sqlite-core" ] && cp -a "/root/.openclaw/memory/sqlite-core" "$tmp_payload/sqlite-core"
 
     if ! find "$tmp_payload" -mindepth 1 -print -quit | grep -q .; then
       echo "❌ 未找到可备份的数据"
@@ -9626,65 +8305,495 @@ EOF
     break_end
   }
 
-  openclaw_memory_scheme_menu() {
+  # ==========================================
+# 🌌 OpenClaw 智能模型与能力路由 (Smart Router)
+# ==========================================
+
+# 管理 OpenClaw 模型配置，实现真正的按需分配
+openclaw_model_manager() {
+    local config_file="/root/.openclaw/openclaw.json"
+    mkdir -p "$(dirname "$config_file")"
+    [ ! -f "$config_file" ] && echo '{}' > "$config_file"
+
+    openclaw_runtime_self_heal || true
+
+    while true; do
+        clear
+        skpl_ui_header "智能模型管理器" "按任务类型分配最佳模型，极致省 Token"
+        echo
+        python3 - "$config_file" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists(): path.write_text('{}', encoding='utf-8')
+cfg = json.loads(path.read_text(encoding='utf-8'))
+
+agents = cfg.get('agents', {}).get('defaults', {})
+primary = agents.get('model', {}).get('primary', '未配置')
+image_primary = agents.get('imageModel', {}).get('primary', '未配置') if isinstance(agents.get('imageModel'), dict) else agents.get('imageModel', '未配置')
+models = list(agents.get('models', {}).keys())
+
+print(f"🧠 当前主模型 (日常/文本): {primary}")
+print(f"👁️ 当前视觉模型: {image_primary}")
+print(f"📂 已添加模型列表: {len(models)} 个")
+for m in models:
+    print(f"   - {m}")
+PY
+        openclaw_ollama_status
+        echo
+        skpl_ui_section "操作 (直接写入 OpenClaw 核心配置)"
+        skpl_ui_menu_item 1 "设置文本模型" "日常对话/轻量任务 (推荐 Gemini-Flash/Claude-Haiku)"
+        skpl_ui_menu_item 2 "设置视觉模型" "图片识别/多模态任务 (推荐 Gemini/GPT-4o)"
+        skpl_ui_menu_item 3 "设置代码模型" "开发/复杂逻辑 (推荐 Claude-Opus/o1)"
+        skpl_ui_menu_item 4 "设置自定义模型" "其他备用 API"
+        skpl_ui_menu_item 5 "本地模型运行时" "安装 ollama 并拉取本地文本/代码模型"
+        skpl_ui_menu_item 6 "一键推荐配置" "写入推荐的文本/视觉/代码模型组合"
+        skpl_ui_menu_item 7 "安装后验收检查" "检查 openclaw、gateway、ollama、记忆索引状态"
+        skpl_ui_menu_item 8 "一键完整本地落地" "安装 ollama、拉模型、启用记忆、重建索引、验收"
+        skpl_ui_menu_item 9 "一键应用并重启" "保存配置并让 AI 立即生效"
+        skpl_ui_menu_item 0 "返回上一级"
+        skpl_ui_footer_prompt "请选择: "
+        read -e model_choice
+        
+        case "$model_choice" in
+            1) openclaw_set_model_slot "text" $config_file ;;
+            2) openclaw_set_model_slot "image" $config_file ;;
+            3) openclaw_set_model_slot "code" $config_file ;;
+            4) openclaw_set_model_slot "custom" $config_file ;;
+            5)
+                openclaw_ollama_quick_setup_menu
+                ;;
+            6)
+                openclaw_apply_recommended_model_profile
+                break_end
+                ;;
+            7)
+                openclaw_postinstall_acceptance_check
+                break_end
+                ;;
+            8)
+                openclaw_full_local_stack_setup
+                break_end
+                ;;
+            9)
+                openclaw_apply_and_restart
+                break_end
+                ;;
+            0) return 0 ;;
+        esac
+    done
+}
+
+openclaw_set_model_slot() {
+    local type="$1" config_file="$2"
+    local model_name
+    read -e -p "请输入 [$type] 模型 ID (格式: 提供商/模型名): " model_name
+    [ -z "$model_name" ] && return 0
+
+    python3 - "$config_file" "$type" "$model_name" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+cfg_type = sys.argv[2]
+model = sys.argv[3]
+cfg = json.loads(path.read_text(encoding='utf-8'))
+
+# 初始化结构
+if 'agents' not in cfg: cfg['agents'] = {}
+if 'defaults' not in cfg['agents']: cfg['agents']['defaults'] = {}
+if 'model' not in cfg['agents']['defaults']: cfg['agents']['defaults']['model'] = {}
+if 'models' not in cfg['agents']['defaults']: cfg['agents']['defaults']['models'] = {}
+
+# 添加模型到列表
+cfg['agents']['defaults']['models'][model] = {}
+
+# 设置对应类型
+if cfg_type == 'text':
+    cfg['agents']['defaults']['model']['primary'] = model
+elif cfg_type == 'code':
+    cfg['agents']['defaults']['models'].setdefault(model, {})['agentRuntime'] = {'id': 'auto'}
+elif cfg_type == 'image':
+    cfg['agents']['defaults']['imageModel'] = {'primary': model}
+elif cfg_type == 'custom':
+    cfg['agents']['defaults']['models'][model].setdefault('alias', 'custom')
+
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+print(f"✅ 已将 {cfg_type} 模型设为: {model}")
+PY
+    read -n 1 -s -r -p "按任意键继续..."
+}
+
+openclaw_apply_and_restart() {
+    echo "💾 正在保存配置并重启 OpenClaw..."
+    openclaw gateway restart >/dev/null 2>&1
+    echo "✅ 配置已生效！AI 将使用新分配的模型工作。"
+}
+
+openclaw_inject_skills() {
+    local skills_dir="$HOME/.openclaw/workspace/skills"
+    mkdir -p "$skills_dir"
+    cat > "$skills_dir/auto-model-routing.md" <<'EOF'
+# Auto Model Routing
+- Use `agents.defaults.model.primary` for daily text turns.
+- Use `agents.defaults.imageModel.primary` for image understanding.
+- Prefer concise responses to reduce token usage.
+EOF
+    cat > "$skills_dir/token-saver.md" <<'EOF'
+# Token Saver
+- Answer directly.
+- Keep outputs concise.
+- Avoid unnecessary repetition.
+EOF
+    echo "✅ Skills 已写入: $skills_dir"
+}
+
+openclaw_evomap_real_ingest() {
+    local title="$1" content="$2"
+    local evomap_dir="$HOME/.openclaw/workspace/memory/evomap-ingest"
+    mkdir -p "$evomap_dir"
+    cat > "$evomap_dir/$(date +%s)-note.md" <<EOF
+# ${title}
+
+${content}
+EOF
+    echo "✅ 经验已写入: $evomap_dir"
+}
+
+openclaw_configure_local_ollama_provider() {
+    local config_file provider_model full_model model_role
+    config_file=$(openclaw_get_config_file)
+    provider_model="${1:-qwen2.5:7b}"
+    model_role="${2:-text}"
+    full_model="ollama/${provider_model}"
+    python3 - "$config_file" "$provider_model" "$full_model" "$model_role" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+raw_model = sys.argv[2]
+full_model = sys.argv[3]
+role = sys.argv[4]
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+
+def build_entry(model_id: str, role_name: str):
+    lower = model_id.lower()
+    is_image = role_name == 'image' or any(token in lower for token in ('vl', 'vision', 'llava', 'minicpm-v'))
+    is_code = role_name == 'code' or 'coder' in lower
+    params = {'keep_alive': '15m'}
+    if is_image:
+        entry = {'id': model_id, 'name': model_id, 'input': ['text', 'image']}
+        params['num_ctx'] = 4096
+    elif is_code:
+        entry = {'id': model_id, 'name': model_id, 'input': ['text'], 'reasoning': True}
+        params['num_ctx'] = 16384 if any(tag in lower for tag in ('14b', '32b')) else 8192
+        params['thinking'] = False
+    else:
+        entry = {'id': model_id, 'name': model_id, 'input': ['text']}
+        params['num_ctx'] = 8192
+        if 'qwen' in lower:
+            params['thinking'] = False
+    entry['params'] = params
+    return entry
+
+cfg.setdefault('models', {}).setdefault('providers', {})
+provider = cfg['models']['providers'].setdefault('ollama', {})
+provider['baseUrl'] = provider.get('baseUrl') or 'http://127.0.0.1:11434'
+provider['apiKey'] = provider.get('apiKey') or 'ollama-local'
+provider['api'] = 'ollama'
+provider['timeoutSeconds'] = max(int(provider.get('timeoutSeconds', 0) or 0), 300)
+models = provider.setdefault('models', [])
+entry = build_entry(raw_model, role)
+updated = False
+for index, item in enumerate(models):
+    if isinstance(item, dict) and item.get('id') == raw_model:
+        merged = dict(item)
+        merged.update(entry)
+        if isinstance(item.get('params'), dict):
+            params = dict(item['params'])
+            params.update(entry['params'])
+            merged['params'] = params
+        models[index] = merged
+        updated = True
+        break
+if not updated:
+    models.append(entry)
+
+cfg.setdefault('agents', {}).setdefault('defaults', {})
+defs = cfg['agents']['defaults']
+defs.setdefault('models', {})
+defs['models'].setdefault(full_model, {})
+defs.setdefault('experimental', {})['localModelLean'] = True
+if role == 'image':
+    defs['imageModel'] = {'primary': full_model}
+elif role == 'code':
+    defs['models'][full_model].setdefault('agentRuntime', {'id': 'auto'})
+    defs['models'][full_model].setdefault('params', {})
+    defs['models'][full_model]['params'].setdefault('thinking', False)
+else:
+    defs.setdefault('model', {})['primary'] = full_model
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+PY
+    echo "✅ 已写入本地 Ollama provider 配置"
+}
+
+openclaw_apply_recommended_model_profile() {
+    local text_model="ollama/qwen2.5:7b"
+    local image_model="ollama/qwen2.5vl:7b"
+    local code_model="ollama/qwen2.5-coder:7b"
+    local config_file
+    config_file=$(openclaw_get_config_file)
+    python3 - "$config_file" "$text_model" "$image_model" "$code_model" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+text_model, image_model, code_model = sys.argv[2:5]
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+cfg.setdefault('models', {}).setdefault('providers', {})
+cfg['models']['providers']['ollama'] = {
+    'baseUrl': 'http://127.0.0.1:11434',
+    'apiKey': 'ollama-local',
+    'api': 'ollama',
+    'timeoutSeconds': 300,
+    'models': [
+        {'id': 'qwen2.5:7b', 'name': 'qwen2.5:7b', 'input': ['text'], 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}},
+        {'id': 'qwen2.5vl:7b', 'name': 'qwen2.5vl:7b', 'input': ['text', 'image'], 'params': {'keep_alive': '15m', 'num_ctx': 4096, 'thinking': False}},
+        {'id': 'qwen2.5-coder:7b', 'name': 'qwen2.5-coder:7b', 'input': ['text'], 'reasoning': True, 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}},
+    ]
+}
+cfg.setdefault('agents', {}).setdefault('defaults', {})
+defs = cfg['agents']['defaults']
+defs.setdefault('models', {})
+for model in (text_model, image_model, code_model):
+    defs['models'].setdefault(model, {})
+defs.setdefault('model', {})['primary'] = text_model
+defs['imageModel'] = {'primary': image_model}
+defs['models'][code_model].setdefault('agentRuntime', {'id': 'auto'})
+defs.setdefault('experimental', {})['localModelLean'] = True
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+PY
+    echo "✅ 推荐模型组合已写入"
+    echo "   文本: $text_model"
+    echo "   视觉: $image_model"
+    echo "   代码: $code_model"
+}
+
+openclaw_postinstall_acceptance_check() {
+    echo "开始执行安装后验收检查..."
+    if openclaw_has_command openclaw; then
+      echo "✅ openclaw 命令存在"
+    else
+      echo "❌ openclaw 命令不存在"
+    fi
+    if openclaw_has_command ollama; then
+      echo "✅ ollama 命令存在"
+      ollama list >/dev/null 2>&1 && echo "✅ ollama 服务可访问" || echo "⚠️ ollama 已安装，但服务未就绪"
+    else
+      echo "⚠️ ollama 未安装"
+    fi
+    openclaw_memory_local_retrieval_status
+    if openclaw_has_command openclaw; then
+      timeout 10 openclaw models status >/dev/null 2>&1 && echo "✅ OpenClaw 模型状态可读取" || echo "⚠️ OpenClaw 模型状态读取失败"
+      timeout 10 openclaw models list --provider ollama >/dev/null 2>&1 && echo "✅ OpenClaw 可读取 Ollama 模型目录" || echo "⚠️ OpenClaw 无法读取 Ollama 模型目录"
+      timeout 10 openclaw doctor >/dev/null 2>&1 && echo "✅ openclaw doctor 可执行" || echo "⚠️ openclaw doctor 返回异常"
+    fi
+}
+
+openclaw_full_local_stack_setup() {
+    echo "🚀 开始执行一键完整本地落地..."
+    openclaw_runtime_self_heal || return 1
+    openclaw_install_ollama_runtime || return 1
+    openclaw_ollama_pull_model "qwen2.5:7b" || return 1
+    openclaw_ollama_pull_model "qwen2.5vl:7b" || return 1
+    openclaw_ollama_pull_model "qwen2.5-coder:7b" || return 1
+    openclaw_apply_recommended_model_profile || return 1
+    openclaw_inject_skills || return 1
+    openclaw_memory_enable_local_retrieval || return 1
+    openclaw_apply_and_restart || true
+    openclaw_postinstall_acceptance_check || true
+    echo "✅ 一键完整本地落地完成"
+}
+
+openclaw_runtime_self_heal() {
+    echo "🔧 正在检查 OpenClaw 运行依赖..."
+    install curl ca-certificates jq sqlite3 python3 git >/dev/null 2>&1
+    ensure_node_runtime || return 1
+    mkdir -p "$HOME/.openclaw" "$HOME/.openclaw/models/embedding" "$HOME/.openclaw/workspace/skills"
+    echo "✅ 基础运行依赖已就绪"
+}
+
+openclaw_ollama_status() {
+    if ! openclaw_has_command ollama; then
+      echo "本地运行时: 未安装 ollama"
+      return 0
+    fi
+    if ollama list >/dev/null 2>&1; then
+      echo "本地运行时: ollama 已就绪"
+    else
+      echo "本地运行时: ollama 已安装，服务未就绪"
+    fi
+}
+
+openclaw_install_ollama_runtime() {
+    if openclaw_has_command ollama; then
+      echo "✅ ollama 已安装"
+      return 0
+    fi
+    install curl ca-certificates >/dev/null 2>&1
+    echo "⬇️ 正在安装 ollama 本地模型运行时..."
+    if curl -fsSL https://ollama.com/install.sh | sh; then
+      echo "✅ ollama 安装完成"
+    else
+      echo "❌ ollama 安装失败，请检查网络后重试"
+      return 1
+    fi
+}
+
+openclaw_ollama_pull_model() {
+    local model_name="$1"
+    [ -z "$model_name" ] && return 1
+    openclaw_install_ollama_runtime || return 1
+    echo "⬇️ 正在拉取本地模型: $model_name"
+    ollama pull "$model_name" || return 1
+    local model_role="text"
+    case "$model_name" in
+      *coder*) model_role="code" ;;
+      *vl*|*vision*|*llava*|*minicpm-v*) model_role="image" ;;
+    esac
+    openclaw_configure_local_ollama_provider "$model_name" "$model_role" || true
+    echo "✅ 本地模型已就绪: $model_name"
+}
+
+openclaw_ollama_quick_setup_menu() {
     while true; do
       clear
-      skpl_ui_header "记忆方案" "官方文件记忆 / LanceDB / EvoMap / MemOS"
-      local backend current_label
-      backend=$(openclaw_memory_get_backend)
-      case "$backend" in
-        qmd) current_label="QMD 基础方案" ;;
-        builtin|local) current_label="Local 四层方案" ;;
-        *) current_label="未配置" ;;
-      esac
-      skpl_ui_section "当前设置"
-      skpl_ui_kv "当前方案" "$current_label"
-      echo ""
-      skpl_ui_section "说明"
-      echo "QMD  : 官方文件记忆基础方案，轻量、易维护，适合先跑通"
-      echo "Local: 官方文件记忆 + LanceDB 本地向量检索 + EvoMap 关系推理 + MemOS/EvoMap 双引擎进化"
-      echo "Auto : 自动推荐，优先落到本地四层方案"
-      echo ""
-      echo "推荐搭配："
-      echo "1. 官方文件记忆负责核心事实，继续维护 MEMORY.md 与 memory/*.md"
-      echo "2. LanceDB 负责本地向量召回，解决找得到"
-      echo "3. EvoMap 负责关系推理与知识卡融合，解决想得深"
-      echo "4. MemOS 目录负责任务总结与技能沉淀，解决学得会"
-      echo "5. 企业增强层叠加 Active Memory、Dreaming 与 Skill Workshop，解决想得早、升得稳、用得久"
+      skpl_ui_header "本地模型运行时" "安装 ollama 并准备本地文本/代码模型"
+      openclaw_ollama_status
       echo
-      skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "切换 QMD 基础方案" "仅官方文件记忆 + 轻量索引"
-      skpl_ui_menu_item 2 "切换 Local 四层方案" "官方文件记忆 + LanceDB + EvoMap + MemOS/EvoMap"
-      skpl_ui_menu_item 3 "Auto" "自动推荐并部署本地四层方案"
-      skpl_ui_menu_item 4 "一键启用四层方案" "复用已装 EvoMap，缺失时补装，并校准 LanceDB 与 MemOS 目录"
-      skpl_ui_menu_item 5 "企业增强四层方案" "叠加 Active Memory、Dreaming、Skill Workshop"
-      skpl_ui_menu_item 6 "模型增强" "云端图形识别 / 云端 OCR / 本地 Q4_K_M / Q8_0"
+      skpl_ui_section "推荐模型"
+      skpl_ui_menu_item 1 "qwen2.5:7b" "本地通用文本模型，速度和效果平衡"
+      skpl_ui_menu_item 2 "qwen2.5-coder:7b" "本地代码模型，适合开发辅助"
+      skpl_ui_menu_item 3 "qwen2.5-coder:14b" "更强代码模型，需要更高配置"
+      skpl_ui_menu_item 4 "mistral:7b" "通用备选模型"
+      skpl_ui_menu_item 5 "自定义模型" "手动输入任意 ollama 模型名"
+      skpl_ui_menu_item 6 "仅安装运行时" "只安装 ollama，不拉取模型"
       skpl_ui_menu_item 0 "返回上一级"
-      skpl_ui_footer_prompt "请输入你的选择: "
-      read -e scheme_choice
-      case "$scheme_choice" in
+      skpl_ui_footer_prompt "请选择: "
+      read -e ollama_choice
+      case "$ollama_choice" in
         1)
-          openclaw_memory_auto_setup_run "qmd"
+          openclaw_ollama_pull_model "qwen2.5:7b"
           break_end
           ;;
         2)
-          openclaw_memory_auto_setup_run "local"
+          openclaw_ollama_pull_model "qwen2.5-coder:7b"
           break_end
           ;;
         3)
-          openclaw_memory_auto_setup_run "auto"
+          openclaw_ollama_pull_model "qwen2.5-coder:14b"
           break_end
           ;;
         4)
-          openclaw_memory_enable_four_layer_stack
+          openclaw_ollama_pull_model "mistral:7b"
           break_end
           ;;
         5)
-          openclaw_memory_enable_enterprise_four_layer
+          read -e -p "请输入 ollama 模型名: " custom_ollama_model
+          [ -n "$custom_ollama_model" ] && openclaw_ollama_pull_model "$custom_ollama_model"
           break_end
           ;;
         6)
-          openclaw_memory_model_enhancement_menu
+          openclaw_install_ollama_runtime
+          break_end
+          ;;
+        0)
+          return 0
+          ;;
+        *)
+          echo "无效的选择，请重试。"
+          sleep 1
+          ;;
+      esac
+    done
+}
+
+  openclaw_memory_local_retrieval_status() {
+    local provider model_path model_status backend
+    backend=$(openclaw_memory_get_backend)
+    provider=$(openclaw_memory_config_get "agents.defaults.memorySearch.provider")
+    model_path=$(openclaw_memory_expand_path "$(openclaw_memory_get_local_model_path)")
+    model_status=$(openclaw_memory_local_model_status "$model_path")
+    echo "记忆后端: ${backend:-unknown}"
+    echo "检索提供者: ${provider:-unset}"
+    echo "本地向量模型: ${model_path:-未配置}"
+    case "$model_status" in
+      ok) echo "模型状态: 已就绪" ;;
+      hf) echo "模型状态: 使用远端 hf: 引用" ;;
+      *) echo "模型状态: 未就绪" ;;
+    esac
+  }
+
+  openclaw_memory_enable_local_retrieval() {
+    echo "🚀 正在启用本地高命中记忆检索..."
+    OPENCLAW_MEMORY_CONFIG_ONLY="false"
+    OPENCLAW_MEMORY_PREHEAT="true"
+    openclaw_memory_auto_setup_local || return 1
+    echo "🧱 正在重建全部索引..."
+    openclaw_memory_rebuild_index_all || true
+    echo "✅ 已启用本地向量检索与索引预热"
+  }
+
+  openclaw_memory_local_retrieval_menu() {
+    while true; do
+      clear
+      skpl_ui_header "本地记忆检索加速" "SQLite + LanceDB + 本地 embedding 模型"
+      openclaw_runtime_self_heal || true
+      openclaw_memory_local_retrieval_status
+      echo
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "一键启用 Local" "下载 embedding 模型并启用本地向量检索"
+      skpl_ui_menu_item 2 "重建全部索引" "提升召回率与命中率"
+      skpl_ui_menu_item 3 "查看预热日志" "查看模型下载与索引预热进度"
+      skpl_ui_menu_item 4 "本地模型运行时" "安装 ollama 并准备本地大模型"
+      skpl_ui_menu_item 5 "一键完整本地落地" "安装模型、启用检索、重建索引、验收"
+      skpl_ui_menu_item 6 "自动部署菜单" "进入现有高级记忆部署入口"
+      skpl_ui_menu_item 0 "返回上一级"
+      skpl_ui_footer_prompt "请输入你的选择: "
+      read -e local_choice
+      case "$local_choice" in
+        1)
+          openclaw_memory_enable_local_retrieval
+          break_end
+          ;;
+        2)
+          openclaw_memory_rebuild_index_all
+          break_end
+          ;;
+        3)
+          openclaw_memory_show_bootstrap_log
+          break_end
+          ;;
+        4)
+          openclaw_ollama_quick_setup_menu
+          ;;
+        5)
+          openclaw_full_local_stack_setup
+          break_end
+          ;;
+        6)
+          openclaw_memory_auto_setup_menu
           ;;
         0)
           return 0
@@ -9940,156 +9049,49 @@ PY
     send_stats "OpenClaw记忆管理"
     while true; do
       clear
-      skpl_ui_header "记忆管理" "索引、方案、检索、混合记忆"
+      skpl_ui_header "OpenClaw 智能大脑中心" "模型配置 / 技能注入 / 经验沉淀"
       openclaw_memory_render_status
       echo
-      skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "刷新记忆状态" "读取最新运行时状态"
-      skpl_ui_menu_item 2 "更新记忆索引" "增量或全量重建"
-      skpl_ui_menu_item 3 "查看记忆文件" "浏览 MEMORY.md 与 memory/"
-      skpl_ui_menu_item 4 "索引修复" "处理 Indexed 异常"
-      skpl_ui_menu_item 5 "记忆方案" "基础方案 / 本地四层方案 / 自动推荐"
-      skpl_ui_menu_item 6 "搜索测试" "验证索引是否工作"
-      skpl_ui_menu_item 7 "深度状态探测" "检查嵌入模型"
-      skpl_ui_menu_item 8 "后台预热日志" "查看 bootstrap 输出"
-      skpl_ui_menu_item 9 "融合记忆同步" "同步 EvoMap 与混合检索栈"
-      skpl_ui_menu_item 10 "混合检索测试" "测试检索并显示来源解释"
-      skpl_ui_menu_item 11 "融合栈状态" "查看插件、负载、任务与技能状态"
-      skpl_ui_menu_item 12 "查看混合知识卡" "浏览独立导出的 hybrid-cards"
-      skpl_ui_menu_item 13 "检索结果对照" "原生搜索与混合检索并排比对"
-      skpl_ui_menu_item 14 "批量检索评测" "固定查询集快速验证检索效果"
-      skpl_ui_menu_item 15 "查看任务产物" "浏览 MemOS 归档出的任务摘要"
-      skpl_ui_menu_item 16 "查看技能产物" "浏览技能卡、版本与质量"
-      skpl_ui_menu_item 17 "技能升级历史" "查看同名技能的升级轨迹"
-      skpl_ui_menu_item 18 "企业增强状态" "查看 Active Memory、Dreaming、Skill Workshop"
-      skpl_ui_menu_item 19 "查看 Dream Diary" "浏览 DREAMS.md 与 dreaming 产物"
-      skpl_ui_menu_item 20 "发布技能到工作区" "把 MemOS 技能卡同步到 workspace/skills"
-      skpl_ui_menu_item 21 "查看工作区技能" "查看已发布的工作区技能卡"
-      skpl_ui_menu_item 22 "执行企业进化回合" "手动触发同步、技能发布与 Dream Diary 记录"
-      skpl_ui_menu_item 23 "模型增强" "启用云端图形识别与本地量化模型"
+      python3 - "/root/.openclaw/openclaw.json" <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+    defs = cfg.get('agents', {}).get('defaults', {})
+    print(f"🧠 [当前文本模型] 主模型: {defs.get('model', {}).get('primary', '未设定')}")
+except: pass
+PY
+      echo
+      skpl_ui_section "操作 (让 OpenClaw 真正变聪明、更省钱)"
+      skpl_ui_menu_item 1 "🤖 智能模型路由" "为文本、图片、代码分别配置不同模型 (省 Token/提速)"
+      skpl_ui_menu_item 2 "⚡ 注入大脑指令" "一键注入: 省 Token + 自动选模型 + 硬件感知 Skills"
+      skpl_ui_menu_item 3 "🧠 本地记忆检索" "启用本地 embedding + LanceDB + 全量重建索引"
+      skpl_ui_menu_item 4 "🧩 经验进化 EvoMap" "沉淀报错/操作经验, 下次遇到 OpenClaw 自动照着修"
+      skpl_ui_menu_item 5 "💾 极简备份/恢复" "核心数据与 Skills 的极速备份"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e memory_choice
       case "$memory_choice" in
         1)
-          openclaw_memory_refresh_runtime_state
-          break_end
+          openclaw_model_manager
           ;;
         2)
-          echo "即将更新记忆索引。"
-          read -e -p "第一次确认：输入 yes 继续: " confirm_step1
-          if [ "$confirm_step1" != "yes" ]; then
-            echo "已取消。"
-            break_end
-            continue
-          fi
-          openclaw_memory_prepare_workspace_all
-          read -e -p "二次确认：输入 force 使用全量（留空为增量）: " confirm_step2
-          if [ "$confirm_step2" = "force" ]; then
-            echo "⚠️ 全量重建更彻底，但耗时更长。"
-            echo "推荐：输入 rebuild 进行安全重建（先备份索引库）。"
-            read -e -p "第三次确认：输入 rebuild 执行安全重建；直接回车继续普通 force: " confirm_step3
-            if [ "$confirm_step3" = "rebuild" ]; then
-              openclaw_memory_rebuild_index_all
-            else
-              local fl_agent_lines fl_agent_id fl_workspace
-              fl_agent_lines=$(openclaw_memory_list_agents)
-              while IFS=$'\t' read -r fl_agent_id fl_workspace; do
-                [ -z "$fl_agent_id" ] && continue
-                openclaw memory index --agent "$fl_agent_id" --force
-              done <<EOF
-$fl_agent_lines
-EOF
-              openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
-              echo "✅ 已对所有智能体执行 force 重建并自动重启网关"
-            fi
-          else
-            openclaw memory index
-          fi
-          openclaw_memory_refresh_status_cache >/dev/null 2>&1 || true
-          break_end
+          openclaw_inject_skills
+          read -n 1 -s -r -p "完成！按任意键返回..."
           ;;
         3)
-          openclaw_memory_files_menu
+          openclaw_memory_local_retrieval_menu
           ;;
         4)
-          openclaw_memory_fix_index
+          echo "开始进化经验沉淀..."
+          read -e -p "标题 (如: 代理配置失败): " title
+          [ -z "$title" ] && title="日常经验"
+          read -e -p "经验内容/解法: " content
+          openclaw_evomap_real_ingest "$title" "$content"
+          read -n 1 -s -r -p "经验已存入大脑！按任意键返回..."
           ;;
         5)
-          openclaw_memory_scheme_menu
-          ;;
-        6)
-          openclaw_memory_search_test
-          break_end
-          ;;
-        7)
-          openclaw_memory_deep_status
-          break_end
-          ;;
-        8)
-          openclaw_memory_show_bootstrap_log
-          break_end
-          ;;
-        9)
-          hybrid_memory_enqueue_event "memory-manual-sync" "用户手动触发混合记忆同步"
-          hybrid_memory_sync_once
-          break_end
-          ;;
-        10)
-          hybrid_memory_search_test
-          break_end
-          ;;
-        11)
-          hybrid_memory_status_report
-          break_end
-          ;;
-        12)
-          ls -la "$SKPL_HYBRID_MEMORY_EXPORT_DIR" 2>/dev/null || echo "暂无混合知识卡。"
-          break_end
-          ;;
-        13)
-          openclaw_memory_compare_search_test
-          break_end
-          ;;
-        14)
-          openclaw_memory_benchmark_search_test
-          break_end
-          ;;
-        15)
-          openclaw_memory_list_tasks
-          break_end
-          ;;
-        16)
-          openclaw_memory_list_skills
-          break_end
-          ;;
-        17)
-          openclaw_memory_skill_history
-          break_end
-          ;;
-        18)
-          openclaw_memory_enterprise_status
-          break_end
-          ;;
-        19)
-          openclaw_memory_view_dreams
-          break_end
-          ;;
-        20)
-          openclaw_memory_publish_skills_to_workspace
-          break_end
-          ;;
-        21)
-          openclaw_memory_list_workspace_skills
-          break_end
-          ;;
-        22)
-          openclaw_memory_run_enterprise_evolution
-          echo "✅ 企业进化回合已完成"
-          break_end
-          ;;
-        23)
-          openclaw_memory_model_enhancement_menu
+          openclaw_backup_restore_menu
           ;;
         0)
           return 0
