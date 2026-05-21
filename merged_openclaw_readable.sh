@@ -772,6 +772,51 @@ openclaw_maybe_start_gateway() {
   start_gateway "$mode" "$cooldown"
 }
 
+openclaw_ensure_gateway_ready() {
+  local config_file gateway_port
+  config_file=$(openclaw_get_config_file)
+  gateway_port="${OPENCLAW_GATEWAY_PORT:-18789}"
+
+  mkdir -p /root/.config/systemd/user
+  mkdir -p /root/.openclaw /root/.openclaw/workspace /root/.openclaw/logs /root/.openclaw/credentials
+  chmod 700 /root/.openclaw 2>/dev/null || true
+
+  openclaw_ensure_local_gateway_config || return 1
+  if [ ! -s "$config_file" ]; then
+    echo "❌ OpenClaw 配置文件生成失败: $config_file"
+    return 1
+  fi
+
+  refresh_openclaw_gateway_service >/dev/null 2>&1 || true
+  loginctl enable-linger root >/dev/null 2>&1 || true
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user enable openclaw-gateway.service >/dev/null 2>&1 || true
+    systemctl --user start openclaw-gateway.service >/dev/null 2>&1 || true
+    sleep 2
+  fi
+
+  if ! openclaw_gateway_is_running; then
+    openclaw gateway start >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
+    sleep 2
+  fi
+
+  if ! openclaw_gateway_is_running; then
+    openclaw_gateway_fallback_start >/dev/null 2>&1 || true
+    sleep 2
+  fi
+
+  if openclaw_gateway_is_running; then
+    return 0
+  fi
+
+  echo "❌ OpenClaw 网关仍未启动"
+  echo "   配置文件: $config_file"
+  echo "   预期端口: 127.0.0.1:${gateway_port}"
+  return 1
+}
+
 openclaw_replace_path_from_backup() {
   local src="$1"
   local dest="$2"
@@ -3031,10 +3076,13 @@ openclaw_panel_menu() {
       return 0
     fi
 
+    openclaw_ensure_local_gateway_config >/dev/null 2>&1 || true
+    refresh_openclaw_gateway_service >/dev/null 2>&1 || true
+
     if openclaw_gateway_service_active; then
       systemctl --user restart openclaw-gateway.service >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
     else
-      openclaw gateway restart >/dev/null 2>&1 || openclaw gateway start >/dev/null 2>&1 || true
+      systemctl --user start openclaw-gateway.service >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || openclaw gateway start >/dev/null 2>&1 || openclaw_gateway_fallback_start >/dev/null 2>&1 || true
     fi
     printf '%s\n' "$now" > "$SKPL_GATEWAY_RESTART_STAMP_FILE"
     if [ "${SKPL_BATCH_MODE:-0}" != "1" ] && [ "$mode" != "nosleep" ]; then
@@ -3408,22 +3456,16 @@ PY
 
 
   install_openclaw_panel() {
+    local config_file
     echo "开始安装 OpenClaw..."
     send_stats "开始安装 OpenClaw..."
-    install git jq
-
-    install_node_and_tools
-
-    echo "正在安装 OpenClaw CLI..."
-    install_openclaw_global
-    if ! command -v openclaw >/dev/null 2>&1; then
-      echo "OpenClaw CLI 安装失败：未检测到 openclaw 命令。"
-      return 1
+    run_openclaw_install_step || return 1
+    config_file=$(openclaw_get_config_file)
+    if [ -s "$config_file" ]; then
+      echo "✅ 配置文件已就绪: $config_file"
+    else
+      echo "⚠️ 配置文件仍未落盘: $config_file"
     fi
-
-    openclaw_onboard_if_needed
-    start_gateway
-    openclaw_webui_reset_local_cache
     echo "提示：WebUI 在 127.0.0.1 / localhost 以外的浏览器入口通常需要一次设备审批。"
     echo "提示：WhatsApp 仍走官方扫码登录；登录命令返回后请优先执行 openclaw channels status。"
     refresh_panel_overview_cache >/dev/null 2>&1 || true
