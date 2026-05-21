@@ -773,9 +773,10 @@ openclaw_maybe_start_gateway() {
 }
 
 openclaw_ensure_gateway_ready() {
-  local config_file gateway_port
+  local config_file gateway_port attempt max_attempts
   config_file=$(openclaw_get_config_file)
   gateway_port="${OPENCLAW_GATEWAY_PORT:-18789}"
+  max_attempts=8
 
   mkdir -p /root/.config/systemd/user
   mkdir -p /root/.openclaw /root/.openclaw/workspace /root/.openclaw/logs /root/.openclaw/credentials
@@ -794,18 +795,26 @@ openclaw_ensure_gateway_ready() {
     systemctl --user daemon-reload >/dev/null 2>&1 || true
     systemctl --user enable openclaw-gateway.service >/dev/null 2>&1 || true
     systemctl --user start openclaw-gateway.service >/dev/null 2>&1 || true
-    sleep 2
   fi
 
-  if ! openclaw_gateway_is_running; then
-    openclaw gateway start >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
-    sleep 2
-  fi
+  attempt=1
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if openclaw_gateway_is_running; then
+      openclaw_webui_refresh_token_cache >/dev/null 2>&1 || true
+      return 0
+    fi
 
-  if ! openclaw_gateway_is_running; then
-    openclaw_gateway_fallback_start >/dev/null 2>&1 || true
+    if [ "$attempt" -eq 2 ] || [ "$attempt" -eq 4 ]; then
+      openclaw gateway start >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
+    fi
+
+    if [ "$attempt" -eq 6 ]; then
+      openclaw_gateway_fallback_start >/dev/null 2>&1 || true
+    fi
+
     sleep 2
-  fi
+    attempt=$((attempt + 1))
+  done
 
   if openclaw_gateway_is_running; then
     openclaw_webui_refresh_token_cache >/dev/null 2>&1 || true
