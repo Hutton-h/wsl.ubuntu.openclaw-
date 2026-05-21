@@ -539,52 +539,94 @@ if path.exists() and path.stat().st_size > 0:
     except Exception:
         data = {}
 
-data.setdefault('gateway', {})
-if not isinstance(data['gateway'], dict):
-    data['gateway'] = {}
-data['gateway'].setdefault('mode', 'local')
-data['gateway'].setdefault('bind', '127.0.0.1')
-data['gateway'].setdefault('port', port)
-data['gateway'].setdefault('auth', {})
-if not isinstance(data['gateway']['auth'], dict):
-    data['gateway']['auth'] = {}
-token = data['gateway']['auth'].get('token')
+gateway = data.get('gateway')
+if not isinstance(gateway, dict):
+    gateway = {}
+    data['gateway'] = gateway
+
+gateway['mode'] = 'local'
+gateway['bind'] = '127.0.0.1'
+gateway['port'] = port
+gateway['host'] = '127.0.0.1'
+
+auth = gateway.get('auth')
+if not isinstance(auth, dict):
+    auth = {}
+    gateway['auth'] = auth
+
+token = auth.get('token')
 if not isinstance(token, str) or not token.strip() or token.startswith('${'):
     token = secrets.token_urlsafe(32)
 token = token.strip()
-data['gateway']['auth']['token'] = token
-data['gateway'].setdefault('controlUi', {})
-if not isinstance(data['gateway']['controlUi'], dict):
-    data['gateway']['controlUi'] = {}
-data['gateway']['controlUi']['token'] = token
-origins = data['gateway']['controlUi'].get('allowedOrigins')
+auth['token'] = token
+
+control_ui = gateway.get('controlUi')
+if not isinstance(control_ui, dict):
+    control_ui = {}
+    gateway['controlUi'] = control_ui
+control_ui['token'] = token
+origins = control_ui.get('allowedOrigins')
 if not isinstance(origins, list):
     origins = []
 for origin in ['http://127.0.0.1:18789', 'http://localhost:18789', 'http://127.0.0.1', 'http://localhost']:
     if origin not in origins:
         origins.append(origin)
-data['gateway']['controlUi']['allowedOrigins'] = origins
+control_ui['allowedOrigins'] = origins
 
-data.setdefault('models', {})
-if not isinstance(data['models'], dict):
-    data['models'] = {}
-data['models'].setdefault('mode', 'merge')
-data['models'].setdefault('providers', {})
+models = data.get('models')
+if not isinstance(models, dict):
+    models = {}
+    data['models'] = models
+models['mode'] = 'merge'
+providers = models.get('providers')
+if not isinstance(providers, dict):
+    models['providers'] = {}
 
-data.setdefault('agents', {})
-if not isinstance(data['agents'], dict):
-    data['agents'] = {}
-data['agents'].setdefault('defaults', {})
-defs = data['agents']['defaults']
+agents = data.get('agents')
+if not isinstance(agents, dict):
+    agents = {}
+    data['agents'] = agents
+
+defs = agents.get('defaults')
 if not isinstance(defs, dict):
     defs = {}
-    data['agents']['defaults'] = defs
-defs.setdefault('workspace', '~/.openclaw/workspace')
-defs.setdefault('model', {'primary': 'ollama/qwen2.5:7b'})
-defs.setdefault('models', {'ollama/qwen2.5:7b': {}})
-defs.setdefault('imageModel', {'primary': 'ollama/qwen2.5vl:7b'})
-defs.setdefault('experimental', {'localModelLean': True})
-defs.setdefault('memorySearch', {'provider': 'local'})
+    agents['defaults'] = defs
+
+defs['workspace'] = str(defs.get('workspace') or '~/.openclaw/workspace')
+
+model_cfg = defs.get('model')
+if not isinstance(model_cfg, dict):
+    model_cfg = {}
+    defs['model'] = model_cfg
+model_cfg['primary'] = str(model_cfg.get('primary') or 'ollama/qwen2.5:7b')
+
+models_map = defs.get('models')
+if not isinstance(models_map, dict):
+    models_map = {}
+    defs['models'] = models_map
+models_map.setdefault(model_cfg['primary'], {})
+
+image_model_cfg = defs.get('imageModel')
+if not isinstance(image_model_cfg, dict):
+    image_model_cfg = {}
+    defs['imageModel'] = image_model_cfg
+image_model_cfg['primary'] = str(image_model_cfg.get('primary') or 'ollama/qwen2.5vl:7b')
+
+experimental = defs.get('experimental')
+if not isinstance(experimental, dict):
+    experimental = {}
+    defs['experimental'] = experimental
+experimental['localModelLean'] = True
+
+memory_search = defs.get('memorySearch')
+if not isinstance(memory_search, dict):
+    memory_search = {}
+    defs['memorySearch'] = memory_search
+memory_search['provider'] = str(memory_search.get('provider') or 'local')
+
+for key in ('channels', 'plugins', 'memory'):
+    if key not in data or not isinstance(data.get(key), dict):
+        data[key] = {}
 
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
@@ -605,6 +647,23 @@ else:
     raise SystemExit(1)
 PY
   echo "✅ 已生成最小可启动配置: $config_file"
+}
+
+openclaw_report_gateway_boot_failure() {
+  local config_file fallback_log
+  config_file=$(openclaw_get_config_file)
+  fallback_log="${SKPL_HOME}/openclaw-gateway-fallback.log"
+
+  echo "❌ OpenClaw 网关仍未启动"
+  echo "   配置文件: $config_file"
+  echo "   服务状态: systemctl --user status openclaw-gateway.service --no-pager"
+  echo "   网关探测: openclaw gateway probe"
+  if command -v openclaw >/dev/null 2>&1; then
+    echo "   配置校验: openclaw config validate"
+  fi
+  if [ -s "$fallback_log" ]; then
+    echo "   回退日志: $fallback_log"
+  fi
 }
 
 openclaw_onboard_if_needed() {
@@ -832,6 +891,10 @@ openclaw_ensure_gateway_ready() {
     return 1
   fi
 
+  if command -v openclaw >/dev/null 2>&1; then
+    openclaw config validate >/dev/null 2>&1 || openclaw_ensure_local_gateway_config >/dev/null 2>&1 || true
+  fi
+
   refresh_openclaw_gateway_service >/dev/null 2>&1 || true
   loginctl enable-linger root >/dev/null 2>&1 || true
 
@@ -867,9 +930,8 @@ openclaw_ensure_gateway_ready() {
     return 0
   fi
 
-  echo "❌ OpenClaw 网关仍未启动"
-  echo "   配置文件: $config_file"
   echo "   预期端口: 127.0.0.1:${gateway_port}"
+  openclaw_report_gateway_boot_failure
   return 1
 }
 
@@ -11018,6 +11080,10 @@ run_openclaw_install_step() {
 
   if declare -F openclaw_onboard_if_needed >/dev/null 2>&1; then
     openclaw_onboard_if_needed || true
+  fi
+
+  if command -v openclaw >/dev/null 2>&1; then
+    openclaw config validate >/dev/null 2>&1 || openclaw_ensure_local_gateway_config >/dev/null 2>&1 || true
   fi
 
   refresh_runtime_proxy_env
