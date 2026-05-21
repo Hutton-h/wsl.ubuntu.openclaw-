@@ -808,6 +808,7 @@ openclaw_ensure_gateway_ready() {
   fi
 
   if openclaw_gateway_is_running; then
+    openclaw_webui_refresh_token_cache >/dev/null 2>&1 || true
     return 0
   fi
 
@@ -10521,26 +10522,65 @@ PY
 import json
 import os
 import sys
+from pathlib import Path
 
 path = sys.argv[1]
-token = os.environ.get('OPENCLAW_GATEWAY_TOKEN', '').strip()
-if token:
-    print(token)
-    raise SystemExit(0)
+home = Path.home()
 
-try:
-    if path and os.path.exists(path):
-        with open(path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        auth = data.get('gateway', {}).get('auth', {}) if isinstance(data, dict) else {}
-        value = auth.get('token') if isinstance(auth, dict) else None
-        if isinstance(value, str):
-            value = value.strip()
-            if value and not value.startswith('${'):
-                print(value)
-                raise SystemExit(0)
-except Exception:
-    pass
+def emit(value):
+    if isinstance(value, str):
+        value = value.strip()
+        if value and not value.startswith('${'):
+            print(value)
+            raise SystemExit(0)
+
+for env_name in ('OPENCLAW_GATEWAY_TOKEN', 'OPENCLAW_WEBUI_TOKEN', 'GATEWAY_AUTH_TOKEN'):
+    emit(os.environ.get(env_name, ''))
+
+config_candidates = []
+if path:
+    config_candidates.append(Path(path))
+config_candidates.extend([
+    home / '.openclaw' / 'openclaw.json',
+    Path('/root/.openclaw/openclaw.json'),
+])
+
+seen = set()
+for candidate in config_candidates:
+    candidate = candidate.expanduser()
+    if str(candidate) in seen or not candidate.exists():
+        continue
+    seen.add(str(candidate))
+    try:
+        data = json.loads(candidate.read_text(encoding='utf-8'))
+    except Exception:
+        continue
+    if not isinstance(data, dict):
+        continue
+    gateway = data.get('gateway', {})
+    auth = gateway.get('auth', {}) if isinstance(gateway, dict) else {}
+    control_ui = gateway.get('controlUi', {}) if isinstance(gateway, dict) else {}
+    for value in (
+        auth.get('token') if isinstance(auth, dict) else None,
+        auth.get('accessToken') if isinstance(auth, dict) else None,
+        control_ui.get('token') if isinstance(control_ui, dict) else None,
+        control_ui.get('accessToken') if isinstance(control_ui, dict) else None,
+        gateway.get('token') if isinstance(gateway, dict) else None,
+    ):
+        emit(value)
+
+for candidate in (
+    home / '.openclaw' / 'gateway.token',
+    home / '.openclaw' / 'gateway-auth-token',
+    home / '.openclaw' / 'workspace' / '.gateway-token',
+    Path('/root/.openclaw/gateway.token'),
+    Path('/root/.openclaw/gateway-auth-token'),
+):
+    if candidate.exists():
+        try:
+            emit(candidate.read_text(encoding='utf-8'))
+        except Exception:
+            continue
 
 raise SystemExit(1)
 PY
