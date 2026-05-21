@@ -509,14 +509,27 @@ EOF_SKPL_GATEWAY_SERVICE
 }
 
 openclaw_ensure_local_gateway_config() {
-  local config_file
+  local config_file gateway_port
   config_file=$(openclaw_get_config_file)
+  gateway_port="${OPENCLAW_GATEWAY_PORT:-18789}"
   mkdir -p "$(dirname "$config_file")"
-  python3 - "$config_file" <<'PY'
-import json, sys
+
+  if command -v openclaw >/dev/null 2>&1; then
+    openclaw config set gateway.mode local >/dev/null 2>&1 || true
+    openclaw config set gateway.bind 127.0.0.1 >/dev/null 2>&1 || true
+    openclaw config set gateway.port "$gateway_port" --json >/dev/null 2>&1 || true
+  fi
+
+  python3 - "$config_file" "$gateway_port" <<'PY'
+import json, secrets, sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
+try:
+    port = int(sys.argv[2])
+except Exception:
+    port = 18789
+
 data = {}
 if path.exists() and path.stat().st_size > 0:
     try:
@@ -530,9 +543,20 @@ data.setdefault('gateway', {})
 if not isinstance(data['gateway'], dict):
     data['gateway'] = {}
 data['gateway'].setdefault('mode', 'local')
+data['gateway'].setdefault('bind', '127.0.0.1')
+data['gateway'].setdefault('port', port)
+data['gateway'].setdefault('auth', {})
+if not isinstance(data['gateway']['auth'], dict):
+    data['gateway']['auth'] = {}
+token = data['gateway']['auth'].get('token')
+if not isinstance(token, str) or not token.strip() or token.startswith('${'):
+    token = secrets.token_urlsafe(32)
+token = token.strip()
+data['gateway']['auth']['token'] = token
 data['gateway'].setdefault('controlUi', {})
 if not isinstance(data['gateway']['controlUi'], dict):
     data['gateway']['controlUi'] = {}
+data['gateway']['controlUi']['token'] = token
 origins = data['gateway']['controlUi'].get('allowedOrigins')
 if not isinstance(origins, list):
     origins = []
@@ -566,6 +590,20 @@ path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
   mkdir -p "$HOME/.openclaw/workspace" "$HOME/.openclaw/workspace/skills" "$HOME/.openclaw/workspace/memory"
+  python3 - "$config_file" "$HOME/.openclaw/gateway.token" <<'PY'
+import json, sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+token_path = Path(sys.argv[2])
+data = json.loads(config_path.read_text(encoding='utf-8'))
+token = (((data or {}).get('gateway') or {}).get('auth') or {}).get('token')
+if isinstance(token, str) and token.strip():
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token_path.write_text(token.strip() + '\n', encoding='utf-8')
+else:
+    raise SystemExit(1)
+PY
   echo "✅ 已生成最小可启动配置: $config_file"
 }
 
@@ -778,6 +816,12 @@ openclaw_ensure_gateway_ready() {
   gateway_port="${OPENCLAW_GATEWAY_PORT:-18789}"
   max_attempts=8
 
+  if ! command -v openclaw >/dev/null 2>&1; then
+    echo "OpenClaw CLI 未安装，无法启动网关。"
+    return 1
+  fi
+
+  refresh_runtime_proxy_env
   mkdir -p /root/.config/systemd/user
   mkdir -p /root/.openclaw /root/.openclaw/workspace /root/.openclaw/logs /root/.openclaw/credentials
   chmod 700 /root/.openclaw 2>/dev/null || true
@@ -805,6 +849,8 @@ openclaw_ensure_gateway_ready() {
     fi
 
     if [ "$attempt" -eq 2 ] || [ "$attempt" -eq 4 ]; then
+      openclaw gateway install >/dev/null 2>&1 || true
+      refresh_openclaw_gateway_service >/dev/null 2>&1 || true
       openclaw gateway start >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
     fi
 
@@ -10595,11 +10641,21 @@ raise SystemExit(1)
 PY
   }
 
-  openclaw_webui_refresh_token_cache() {
-    local token
+openclaw_webui_refresh_token_cache() {
+    local dashboard_output token
 
     openclaw_webui_ensure_local_origins >/dev/null 2>&1 || true
     refresh_openclaw_gateway_service >/dev/null 2>&1 || true
+
+    dashboard_output=$(timeout 12 openclaw dashboard 2>/dev/null || true)
+    if [ -n "$dashboard_output" ]; then
+      token=$(printf '%s\n' "$dashboard_output" | openclaw_webui_extract_token 2>/dev/null || true)
+      if [ -n "$token" ]; then
+        printf '%s' "$token" > "$SKPL_WEBUI_TOKEN_CACHE_FILE"
+        echo "$token"
+        return 0
+      fi
+    fi
 
     token=$(openclaw_webui_token_from_config 2>/dev/null || true)
     if [ -n "$token" ]; then
