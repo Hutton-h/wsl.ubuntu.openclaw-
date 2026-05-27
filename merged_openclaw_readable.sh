@@ -463,12 +463,14 @@ EOF_OPENCLAW_WRAPPER
 }
 
 refresh_openclaw_gateway_service() {
-  local service_file openclaw_js node_bin gateway_port proxy_port active_state=1
+  local service_file openclaw_bin gateway_port proxy_port active_state=1
   service_file=$(skpl_openclaw_gateway_service_path)
-  openclaw_js=$(resolve_openclaw_js_entry 2>/dev/null || true)
-  [ -n "$openclaw_js" ] || return 0
-  node_bin=$(resolve_node_runtime 2>/dev/null || true)
-  [ -n "$node_bin" ] || return 0
+  openclaw_bin=$(command -v openclaw 2>/dev/null || true)
+  if [ -z "$openclaw_bin" ]; then
+    ensure_openclaw_cli_on_path >/dev/null 2>&1 || true
+    openclaw_bin=$(command -v openclaw 2>/dev/null || true)
+  fi
+  [ -n "$openclaw_bin" ] || return 0
   gateway_port="${OPENCLAW_GATEWAY_PORT:-18789}"
   proxy_port="$(skpl_effective_proxy_port)"
 
@@ -483,7 +485,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=${SKPL_OPENCLAW_LAUNCHER} ${node_bin} ${openclaw_js} ${proxy_port} gateway --port ${gateway_port}
+ExecStart=${SKPL_OPENCLAW_LAUNCHER} ${openclaw_bin} ${proxy_port} gateway --port ${gateway_port}
 Restart=always
 RestartSec=5
 TimeoutStartSec=30
@@ -659,9 +661,14 @@ openclaw_report_gateway_boot_failure() {
   echo "❌ OpenClaw 网关仍未启动"
   echo "   配置文件: $config_file"
   echo "   服务状态: systemctl --user status openclaw-gateway.service --no-pager"
+  echo "   服务日志: journalctl --user -u openclaw-gateway.service --no-pager -n 100"
+  echo "   官方状态: openclaw gateway status --deep"
+  echo "   全局状态: openclaw status --deep"
+  echo "   跟随日志: openclaw logs --follow"
   echo "   网关探测: openclaw gateway probe"
   if command -v openclaw >/dev/null 2>&1; then
     echo "   配置校验: openclaw config validate"
+    echo "   自检修复: openclaw doctor"
   fi
   if [ -s "$fallback_log" ]; then
     echo "   回退日志: $fallback_log"
@@ -677,19 +684,21 @@ openclaw_webui_reset_local_cache() {
 }
 
 openclaw_gateway_fallback_start() {
-  local openclaw_entry node_bin proxy_port gateway_port fallback_log
-  openclaw_entry=$(resolve_openclaw_js_entry 2>/dev/null || true)
-  node_bin=$(resolve_node_runtime 2>/dev/null || true)
+  local openclaw_bin proxy_port gateway_port fallback_log
+  openclaw_bin=$(command -v openclaw 2>/dev/null || true)
+  if [ -z "$openclaw_bin" ]; then
+    ensure_openclaw_cli_on_path >/dev/null 2>&1 || true
+    openclaw_bin=$(command -v openclaw 2>/dev/null || true)
+  fi
   proxy_port="$(skpl_effective_proxy_port)"
   gateway_port="${OPENCLAW_GATEWAY_PORT:-18789}"
   fallback_log="${SKPL_HOME}/openclaw-gateway-fallback.log"
 
-  [ -n "$openclaw_entry" ] || return 1
-  [ -n "$node_bin" ] || return 1
+  [ -n "$openclaw_bin" ] || return 1
   write_skpl_proxy_env_script >/dev/null 2>&1 || true
   write_openclaw_gateway_launcher >/dev/null 2>&1 || true
 
-  nohup "$SKPL_OPENCLAW_LAUNCHER" "$node_bin" "$openclaw_entry" "$proxy_port" gateway --port "$gateway_port" >"$fallback_log" 2>&1 &
+  nohup "$SKPL_OPENCLAW_LAUNCHER" "$openclaw_bin" "$proxy_port" gateway --port "$gateway_port" >"$fallback_log" 2>&1 &
   disown 2>/dev/null || true
   sleep 2
   openclaw_gateway_is_running
@@ -930,10 +939,10 @@ openclaw_ensure_gateway_ready() {
       return 0
     fi
 
-    if [ "$attempt" -eq 2 ] || [ "$attempt" -eq 4 ]; then
+  if [ "$attempt" -eq 2 ] || [ "$attempt" -eq 4 ]; then
       openclaw gateway install >/dev/null 2>&1 || true
       refresh_openclaw_gateway_service >/dev/null 2>&1 || true
-      openclaw gateway start >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
+      openclaw gateway --port "$gateway_port" >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
     fi
 
     if [ "$attempt" -eq 6 ]; then
@@ -1265,10 +1274,9 @@ write_openclaw_gateway_launcher() {
   cat > "$SKPL_OPENCLAW_LAUNCHER" <<'EOF_OPENCLAW_LAUNCHER'
 #!/bin/bash
 set -e
-NODE_BIN="$1"
-OPENCLAW_ENTRY="$2"
-PROXY_PORT="$3"
-shift 3
+OPENCLAW_BIN="$1"
+PROXY_PORT="$2"
+shift 2
 
 extract_gateway_port() {
   local fallback="${OPENCLAW_GATEWAY_PORT:-18789}"
@@ -1364,24 +1372,11 @@ if [ -n "$DYNAMIC_NO_PROXY" ]; then
   export npm_config_noproxy
 fi
 
-if [ ! -x "$NODE_BIN" ]; then
-  NODE_BIN="$(command -v node 2>/dev/null || true)"
+if [ ! -x "$OPENCLAW_BIN" ]; then
+  OPENCLAW_BIN="$(command -v openclaw 2>/dev/null || true)"
 fi
 
-case "$OPENCLAW_ENTRY" in
-  *.js|*.mjs)
-    if [ -x "$NODE_BIN" ]; then
-      exec "$NODE_BIN" "$OPENCLAW_ENTRY" "$@"
-    fi
-    ;;
-  *)
-    if [ -x "$OPENCLAW_ENTRY" ]; then
-      exec "$OPENCLAW_ENTRY" "$@"
-    fi
-    ;;
-esac
-
-exec "$NODE_BIN" "$OPENCLAW_ENTRY" "$@"
+exec "$OPENCLAW_BIN" "$@"
 EOF_OPENCLAW_LAUNCHER
   chmod +x "$SKPL_OPENCLAW_LAUNCHER"
 }
