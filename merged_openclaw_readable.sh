@@ -490,6 +490,7 @@ TimeoutStartSec=30
 TimeoutStopSec=30
 SuccessExitStatus=0 143
 KillMode=control-group
+WorkingDirectory=/root/.openclaw
 Environment=HOME=/root
 Environment=TMPDIR=/tmp
 Environment=PATH=/usr/local/bin:/usr/bin:/bin:/root/.local/bin
@@ -918,6 +919,7 @@ openclaw_ensure_gateway_ready() {
   if command -v systemctl >/dev/null 2>&1; then
     systemctl --user daemon-reload >/dev/null 2>&1 || true
     systemctl --user enable openclaw-gateway.service >/dev/null 2>&1 || true
+    systemctl --user reset-failed openclaw-gateway.service >/dev/null 2>&1 || true
     systemctl --user start openclaw-gateway.service >/dev/null 2>&1 || true
   fi
 
@@ -1366,11 +1368,6 @@ if [ ! -x "$NODE_BIN" ]; then
   NODE_BIN="$(command -v node 2>/dev/null || true)"
 fi
 
-if [ "${1:-}" = "gateway" ] && command -v openclaw >/dev/null 2>&1; then
-  GATEWAY_PORT="$(extract_gateway_port "$@")"
-  exec openclaw gateway start --port "$GATEWAY_PORT"
-fi
-
 case "$OPENCLAW_ENTRY" in
   *.js|*.mjs)
     if [ -x "$NODE_BIN" ]; then
@@ -1517,6 +1514,17 @@ install() {
     done
     [ "${#missing_packages[@]}" -eq 0 ] || yum install -y "${missing_packages[@]}" >/dev/null 2>&1 || true
   fi
+}
+
+openclaw_ensure_ollama_install_tools() {
+  install curl ca-certificates tar zstd >/dev/null 2>&1
+
+  if command -v zstd >/dev/null 2>&1 || command -v unzstd >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "ollama 安装缺少 zstd 解压工具，请先检查软件源后重试。"
+  return 1
 }
 
 ensure_interactive_terminal() {
@@ -3342,11 +3350,13 @@ openclaw_panel_menu() {
     openclaw_ensure_local_gateway_config >/dev/null 2>&1 || true
     refresh_openclaw_gateway_service >/dev/null 2>&1 || true
 
-    if openclaw_gateway_service_active; then
+  if openclaw_gateway_service_active; then
+      systemctl --user reset-failed openclaw-gateway.service >/dev/null 2>&1 || true
       systemctl --user restart openclaw-gateway.service >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
-    else
+  else
+      systemctl --user reset-failed openclaw-gateway.service >/dev/null 2>&1 || true
       systemctl --user start openclaw-gateway.service >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || openclaw gateway start >/dev/null 2>&1 || openclaw_gateway_fallback_start >/dev/null 2>&1 || true
-    fi
+  fi
     printf '%s\n' "$now" > "$SKPL_GATEWAY_RESTART_STAMP_FILE"
     if [ "${SKPL_BATCH_MODE:-0}" != "1" ] && [ "$mode" != "nosleep" ]; then
       sleep 3
@@ -8815,8 +8825,55 @@ PY
 
 openclaw_apply_and_restart() {
     echo "💾 正在保存配置并重启 OpenClaw..."
-    openclaw gateway restart >/dev/null 2>&1
+    start_gateway force 0 >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1
     echo "✅ 配置已生效！AI 将使用新分配的模型工作。"
+}
+
+openclaw_optimize_memory_and_skills() {
+    local config_file
+    config_file=$(openclaw_get_config_file)
+    mkdir -p "$HOME/.openclaw/workspace" "$HOME/.openclaw/workspace/skills" "$HOME/.openclaw/workspace/memory"
+    python3 - "$config_file" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+cfg = {}
+if path.exists() and path.stat().st_size > 0:
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(cfg, dict):
+            cfg = {}
+    except Exception:
+        cfg = {}
+
+gateway = cfg.setdefault('gateway', {})
+gateway.setdefault('mode', 'local')
+gateway.setdefault('bind', '127.0.0.1')
+gateway.setdefault('port', 18789)
+
+memory = cfg.setdefault('memory', {})
+qmd = memory.setdefault('qmd', {})
+qmd['includeDefaultMemory'] = True
+
+agents = cfg.setdefault('agents', {})
+defaults = agents.setdefault('defaults', {})
+defaults.setdefault('workspace', '~/.openclaw/workspace')
+defaults.setdefault('memorySearch', {})['provider'] = 'local'
+defaults.setdefault('experimental', {})['localModelLean'] = True
+defaults.setdefault('modelFallback', defaults.get('modelFallback') or 'ollama/qwen2.5-coder:7b')
+defaults.setdefault('imageModelFallback', defaults.get('imageModelFallback') or 'ollama/qwen2.5vl:7b')
+defaults.setdefault('skills', {})['autoLoadWorkspaceSkills'] = True
+
+plugins = cfg.setdefault('plugins', {})
+plugins.setdefault('allow', [])
+for plugin_id in ('memory-core', 'memory-lancedb'):
+    if plugin_id not in plugins['allow']:
+        plugins['allow'].append(plugin_id)
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+PY
 }
 
 openclaw_inject_skills() {
@@ -8826,6 +8883,7 @@ openclaw_inject_skills() {
 # Auto Model Routing
 - Use `agents.defaults.model.primary` for daily text turns.
 - Use `agents.defaults.imageModel.primary` for image understanding.
+- Use `ollama/qwen2.5-coder:7b` for code-heavy tasks.
 - Prefer concise responses to reduce token usage.
 EOF
     cat > "$skills_dir/token-saver.md" <<'EOF'
@@ -8834,6 +8892,19 @@ EOF
 - Keep outputs concise.
 - Avoid unnecessary repetition.
 EOF
+    cat > "$skills_dir/memory-first.md" <<'EOF'
+# Memory First
+- Search workspace memory before asking repeated environment questions.
+- Persist reusable troubleshooting notes into memory files.
+- Prefer local memory search when both local and remote options exist.
+EOF
+    cat > "$skills_dir/gateway-recovery.md" <<'EOF'
+# Gateway Recovery
+- Check `systemctl --user status openclaw-gateway.service` when the gateway is unavailable.
+- Check whether port `18789` is listening before retrying dependent actions.
+- Prefer `start_gateway force 0` after config changes that affect gateway startup.
+EOF
+    openclaw_optimize_memory_and_skills
     echo "✅ Skills 已写入: $skills_dir"
 }
 
@@ -9023,6 +9094,7 @@ openclaw_full_local_stack_setup() {
     openclaw_ollama_pull_model "qwen2.5-coder:7b" || return 1
     openclaw_apply_recommended_model_profile || return 1
     openclaw_inject_skills || return 1
+    openclaw_optimize_memory_and_skills || return 1
     openclaw_memory_enable_local_retrieval || return 1
     openclaw_apply_and_restart || true
     openclaw_postinstall_acceptance_check || true
@@ -9031,7 +9103,7 @@ openclaw_full_local_stack_setup() {
 
 openclaw_runtime_self_heal() {
     echo "🔧 正在检查 OpenClaw 运行依赖..."
-    install curl ca-certificates jq sqlite3 python3 git >/dev/null 2>&1
+    install curl ca-certificates jq sqlite3 python3 git tar zstd >/dev/null 2>&1
     ensure_node_runtime || return 1
     mkdir -p "$HOME/.openclaw" "$HOME/.openclaw/models/embedding" "$HOME/.openclaw/workspace/skills"
     echo "✅ 基础运行依赖已就绪"
@@ -9121,7 +9193,7 @@ openclaw_install_ollama_runtime() {
       openclaw_ensure_ollama_running || true
       return 0
     fi
-    install curl ca-certificates >/dev/null 2>&1
+    openclaw_ensure_ollama_install_tools || return 1
     echo "⬇️ 正在安装 ollama 本地模型运行时..."
     if curl -fsSL https://ollama.com/install.sh | sh; then
       echo "✅ ollama 安装完成"
