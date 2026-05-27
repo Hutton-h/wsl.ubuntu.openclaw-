@@ -519,7 +519,7 @@ openclaw_ensure_local_gateway_config() {
 
   if command -v openclaw >/dev/null 2>&1; then
     openclaw config set gateway.mode local >/dev/null 2>&1 || true
-    openclaw config set gateway.bind 127.0.0.1 >/dev/null 2>&1 || true
+    openclaw config set gateway.bind loopback >/dev/null 2>&1 || true
     openclaw config set gateway.port "$gateway_port" --json >/dev/null 2>&1 || true
   fi
 
@@ -548,10 +548,12 @@ if not isinstance(gateway, dict):
     data['gateway'] = gateway
 
 gateway['mode'] = 'local'
-gateway['bind'] = '127.0.0.1'
+gateway['bind'] = 'loopback'
 gateway['port'] = port
-gateway['host'] = '127.0.0.1'
-gateway['hostname'] = '127.0.0.1'
+
+for legacy_key in ('host', 'hostname', 'url', 'baseUrl'):
+    if legacy_key in gateway:
+        gateway.pop(legacy_key, None)
 
 auth = gateway.get('auth')
 if not isinstance(auth, dict):
@@ -562,12 +564,14 @@ token = auth.get('token')
 if not isinstance(token, str) or not token.strip() or token.startswith('${'):
     token = secrets.token_urlsafe(32)
 token = token.strip()
+auth['mode'] = 'token'
 auth['token'] = token
 
 control_ui = gateway.get('controlUi')
 if not isinstance(control_ui, dict):
     control_ui = {}
     gateway['controlUi'] = control_ui
+control_ui['enabled'] = True
 control_ui['token'] = token
 origins = control_ui.get('allowedOrigins')
 if not isinstance(origins, list):
@@ -8844,8 +8848,12 @@ if path.exists() and path.stat().st_size > 0:
 
 gateway = cfg.setdefault('gateway', {})
 gateway.setdefault('mode', 'local')
-gateway.setdefault('bind', '127.0.0.1')
+gateway['bind'] = 'loopback'
 gateway.setdefault('port', 18789)
+for legacy_key in ('host', 'hostname', 'url', 'baseUrl'):
+    gateway.pop(legacy_key, None)
+gateway.setdefault('auth', {})['mode'] = 'token'
+gateway.setdefault('controlUi', {})['enabled'] = True
 
 memory = cfg.setdefault('memory', {})
 qmd = memory.setdefault('qmd', {})
