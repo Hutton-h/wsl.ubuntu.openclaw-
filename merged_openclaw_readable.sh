@@ -369,6 +369,7 @@ PY
 
 init_skpl_runtime() {
   mkdir -p "$SKPL_HOME"
+  mkdir -p "/workspace/.monkeycode"
   touch "$SKPL_LOG_FILE"
   touch "$SKPL_STATE_FILE"
   write_skpl_proxy_env_script >/dev/null 2>&1 || true
@@ -7000,12 +7001,37 @@ EOF
     echo "检测到当前发行版不是 Ubuntu，跳过阿里 Ubuntu 源改写。"
   fi
 
-  echo "正在刷新 apt 软件源缓存，这一步可能需要几十秒..."
-  if ! DEBIAN_FRONTEND=noninteractive apt update -y >/dev/null 2>&1; then
-    echo "检测到 apt update 失败，尝试回退原始 sources.list"
-    if [ "$distro_id" = "ubuntu" ] && [ -f /etc/apt/sources.list.bak.original ]; then
-      sudo cp /etc/apt/sources.list.bak.original /etc/apt/sources.list
+  local apt_source_hash=""
+  local last_apt_source_hash=""
+  local last_apt_refresh_ts="0"
+  local now_ts="0"
+  local apt_refresh_ttl="1800"
+  local need_apt_refresh="true"
+  if [ -f /etc/apt/sources.list ] && command -v sha256sum >/dev/null 2>&1; then
+    apt_source_hash=$(sha256sum /etc/apt/sources.list 2>/dev/null | awk '{print $1}')
+  fi
+  last_apt_source_hash=$(state_get APT_SOURCE_HASH)
+  last_apt_refresh_ts=$(state_get APT_REFRESH_TS)
+  now_ts=$(date +%s 2>/dev/null || echo 0)
+  if [ -n "$apt_source_hash" ] && [ "$apt_source_hash" = "$last_apt_source_hash" ] && [[ "$last_apt_refresh_ts" =~ ^[0-9]+$ ]]; then
+    if [ $((now_ts - last_apt_refresh_ts)) -lt "$apt_refresh_ttl" ]; then
+      need_apt_refresh="false"
     fi
+  fi
+
+  if [ "$need_apt_refresh" = "true" ]; then
+    echo "正在刷新 apt 软件源缓存，这一步可能需要几十秒..."
+    if DEBIAN_FRONTEND=noninteractive apt -o Acquire::Retries=2 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update -y >/dev/null 2>&1; then
+      [ -n "$apt_source_hash" ] && state_set APT_SOURCE_HASH "$apt_source_hash"
+      state_set APT_REFRESH_TS "$now_ts"
+    else
+      echo "检测到 apt update 失败，尝试回退原始 sources.list"
+      if [ "$distro_id" = "ubuntu" ] && [ -f /etc/apt/sources.list.bak.original ]; then
+        sudo cp /etc/apt/sources.list.bak.original /etc/apt/sources.list
+      fi
+    fi
+  else
+    echo "已跳过 apt 软件源缓存刷新：最近 30 分钟内已完成同源刷新。"
   fi
 
   echo "软件源准备完成，开始进入代理端口配置。"
