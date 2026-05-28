@@ -567,74 +567,7 @@ token = token.strip()
 auth['mode'] = 'token'
 auth['token'] = token
 
-control_ui = gateway.get('controlUi')
-if not isinstance(control_ui, dict):
-    control_ui = {}
-    gateway['controlUi'] = control_ui
-control_ui['enabled'] = True
-control_ui['token'] = token
-origins = control_ui.get('allowedOrigins')
-if not isinstance(origins, list):
-    origins = []
-for origin in ['http://127.0.0.1:18789', 'http://localhost:18789', 'http://127.0.0.1', 'http://localhost']:
-    if origin not in origins:
-        origins.append(origin)
-control_ui['allowedOrigins'] = origins
-
-models = data.get('models')
-if not isinstance(models, dict):
-    models = {}
-    data['models'] = models
-models['mode'] = 'merge'
-providers = models.get('providers')
-if not isinstance(providers, dict):
-    models['providers'] = {}
-
-agents = data.get('agents')
-if not isinstance(agents, dict):
-    agents = {}
-    data['agents'] = agents
-
-defs = agents.get('defaults')
-if not isinstance(defs, dict):
-    defs = {}
-    agents['defaults'] = defs
-
-defs['workspace'] = str(defs.get('workspace') or '~/.openclaw/workspace')
-
-model_cfg = defs.get('model')
-if not isinstance(model_cfg, dict):
-    model_cfg = {}
-    defs['model'] = model_cfg
-model_cfg['primary'] = str(model_cfg.get('primary') or 'ollama/qwen2.5:7b')
-
-models_map = defs.get('models')
-if not isinstance(models_map, dict):
-    models_map = {}
-    defs['models'] = models_map
-models_map.setdefault(model_cfg['primary'], {})
-
-image_model_cfg = defs.get('imageModel')
-if not isinstance(image_model_cfg, dict):
-    image_model_cfg = {}
-    defs['imageModel'] = image_model_cfg
-image_model_cfg['primary'] = str(image_model_cfg.get('primary') or 'ollama/qwen2.5vl:7b')
-
-experimental = defs.get('experimental')
-if not isinstance(experimental, dict):
-    experimental = {}
-    defs['experimental'] = experimental
-experimental['localModelLean'] = True
-
-memory_search = defs.get('memorySearch')
-if not isinstance(memory_search, dict):
-    memory_search = {}
-    defs['memorySearch'] = memory_search
-memory_search['provider'] = str(memory_search.get('provider') or 'local')
-
-for key in ('channels', 'plugins', 'memory'):
-    if key not in data or not isinstance(data.get(key), dict):
-        data[key] = {}
+gateway.pop('controlUi', None)
 
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
@@ -2756,48 +2689,15 @@ add_app_id() {
 }
 
 add_yuming() {
-  read -r -p "请输入域名（example.com）: " yuming
+  read -r -p "请输入已存在的域名（example.com）: " yuming
 }
 
 ldnmp_Proxy() {
   local domain="$1"
   local target_host="$2"
   local target_port="$3"
-  local conf_file="/home/web/conf.d/${domain}.conf"
-
-  if [ ! -d /home/web/conf.d ] || ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
-    echo "未检测到可用的 Nginx 反向代理环境，无法自动为 ${domain} 配置域名访问。"
-    echo "请手动将 ${domain} 反向代理到 ${target_host}:${target_port}。"
-    return 1
-  fi
-
-  cat > "$conf_file" <<EOF
-server {
-  listen 80;
-  listen [::]:80;
-  server_name ${domain};
-
-  location / {
-    proxy_pass http://${target_host}:${target_port};
-    proxy_http_version 1.1;
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_set_header Upgrade \$http_upgrade;
-    proxy_set_header Connection "upgrade";
-  }
-}
-EOF
-
-  docker exec nginx nginx -s reload >/dev/null 2>&1 || {
-    echo "Nginx 重载失败，请检查生成的配置：$conf_file"
-    return 1
-  }
-
-  SKPL_LAST_PROXY_SCHEME="http"
-  echo "已生成域名反向代理配置：${conf_file}"
-  echo "访问地址：http://${domain}"
+  echo "当前面板不再自动配置宿主机反向代理。"
+  echo "请在你的网关或 Nginx 环境中手动将 ${domain} 反向代理到 ${target_host}:${target_port}。"
   return 0
 }
 
@@ -2810,23 +2710,8 @@ web_del() {
 
   [ -z "$remove_domain" ] && return 0
 
-  if [ ! -d /home/web/conf.d ] || ! command -v docker >/dev/null 2>&1 || ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'nginx'; then
-    echo "未检测到可用的 Nginx 反向代理环境，请按你的环境手动删除域名配置：$remove_domain"
-    return 1
-  fi
-
-  if [ -f "/home/web/conf.d/${remove_domain}.conf" ]; then
-    rm -f "/home/web/conf.d/${remove_domain}.conf"
-  fi
-  if [ -f "/home/web/certs/${remove_domain}_key.pem" ]; then
-    rm -f "/home/web/certs/${remove_domain}_key.pem"
-  fi
-  if [ -f "/home/web/certs/${remove_domain}_cert.pem" ]; then
-    rm -f "/home/web/certs/${remove_domain}_cert.pem"
-  fi
-
-  docker exec nginx nginx -s reload >/dev/null 2>&1 || true
-  echo "域名配置已删除：$remove_domain"
+  echo "当前面板只维护 WebUI 域名入口缓存。"
+  echo "请在你的反向代理环境中手动删除域名配置：$remove_domain"
 }
 
 ensure_root() {
@@ -3354,7 +3239,7 @@ openclaw_panel_menu() {
       systemctl --user restart openclaw-gateway.service >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
   else
       systemctl --user reset-failed openclaw-gateway.service >/dev/null 2>&1 || true
-      systemctl --user start openclaw-gateway.service >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || openclaw gateway start >/dev/null 2>&1 || openclaw_gateway_fallback_start >/dev/null 2>&1 || true
+      systemctl --user start openclaw-gateway.service >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || openclaw gateway --port "$(openclaw_gateway_port)" >/dev/null 2>&1 || openclaw_gateway_fallback_start >/dev/null 2>&1 || true
   fi
     printf '%s\n' "$now" > "$SKPL_GATEWAY_RESTART_STAMP_FILE"
     if [ "${SKPL_BATCH_MODE:-0}" != "1" ] && [ "$mode" != "nosleep" ]; then
@@ -4100,7 +3985,8 @@ EOF
 
 
 openclaw_api_manage_list() {
-  local config_file="${HOME}/.openclaw/openclaw.json"
+  local config_file
+  config_file=$(openclaw_get_config_file)
   send_stats "OpenClaw API列表"
 
   while IFS=$'\t' read -r rec_type idx name base_url model_count api_type latency_txt latency_level; do
@@ -4217,7 +4103,8 @@ PY
 )
 }
 sync-openclaw-provider-interactive() {
-  local config_file="${HOME}/.openclaw/openclaw.json"
+  local config_file
+  config_file=$(openclaw_get_config_file)
   send_stats "OpenClaw API按Provider同步"
 
   if [ ! -f "$config_file" ]; then
@@ -4496,7 +4383,8 @@ openclaw_detect_api_protocol_by_provider() {
 }
 
 fix-openclaw-provider-protocol-interactive() {
-  local config_file="${HOME}/.openclaw/openclaw.json"
+  local config_file
+  config_file=$(openclaw_get_config_file)
   send_stats "OpenClaw API协议切换"
 
   if [ ! -f "$config_file" ]; then
@@ -6392,9 +6280,9 @@ exit 1
       while IFS= read -r d; do
         [ -z "$d" ] && continue
         if [ -n "$token" ]; then
-          skpl_ui_kv "域名地址" "https://${d}/#token=${token}"
+          skpl_ui_kv "域名地址" "${d}/#token=${token}"
         else
-          skpl_ui_kv "域名地址" "https://${d}/"
+          skpl_ui_kv "域名地址" "${d}/"
         fi
       done <<EOF
 $domains
@@ -7014,7 +6902,7 @@ PY
         ;;
       bundle)
         case "$rel" in
-          openclaw-root/openclaw.json|openclaw-root/workspace/*|openclaw-root/extensions/*|openclaw-root/skills/*|openclaw-root/prompts/*|openclaw-root/tools/*|openclaw-root/telegram/*|openclaw-root/feishu/*|openclaw-root/whatsapp/*|openclaw-root/discord/*|openclaw-root/slack/*|openclaw-root/qqbot/*|openclaw-root/logs/*|openclaw-root/memos/*|openclaw-root/DREAMS.md|openclaw-root/memory/dreaming/*|agents/*/MEMORY.md|agents/*/memory/*|hybrid-memory/*|evomap/*|evomap-memory/*|evomap-backups/*|memos/*|memory-config/openclaw.json) return 0 ;;
+          openclaw-root/openclaw.json|openclaw-root/workspace/*|openclaw-root/extensions/*|openclaw-root/skills/*|openclaw-root/prompts/*|openclaw-root/tools/*|openclaw-root/telegram/*|openclaw-root/feishu/*|openclaw-root/whatsapp/*|openclaw-root/discord/*|openclaw-root/slack/*|openclaw-root/qqbot/*|openclaw-root/logs/*|openclaw-root/memos/*|openclaw-root/DREAMS.md|openclaw-root/memory/dreaming/*|agents/*/MEMORY.md|agents/*/memory/*|hybrid-memory/*|evomap/*|evomap-memory/*|evomap-backups/*|memos/*|memory-config/openclaw.json|enterprise-memory/state.json) return 0 ;;
           *) return 1 ;;
         esac
         ;;
@@ -7248,11 +7136,12 @@ PY
 
     if [ -d "$openclaw_root" ]; then
       mkdir -p "$tmp_payload/openclaw-root"
-      for d in workspace extensions skills prompts tools telegram feishu whatsapp discord slack qqbot logs; do
+      for d in workspace extensions skills prompts tools telegram feishu whatsapp discord slack qqbot logs memos; do
         [ -e "$openclaw_root/$d" ] && cp -a "$openclaw_root/$d" "$tmp_payload/openclaw-root/"
       done
       [ -f "$openclaw_root/openclaw.json" ] && cp -a "$openclaw_root/openclaw.json" "$tmp_payload/openclaw-root/"
       [ -d "$openclaw_root/memory" ] && cp -a "$openclaw_root/memory" "$tmp_payload/openclaw-root/"
+      [ -f "$openclaw_root/$SKPL_MEMORY_DREAMS_FILENAME" ] && cp -a "$openclaw_root/$SKPL_MEMORY_DREAMS_FILENAME" "$tmp_payload/openclaw-root/"
     fi
 
     workspaces_json=$(openclaw_get_all_agent_workspaces)
@@ -7271,9 +7160,19 @@ for item in workspaces:
             else: shutil.copytree(src, os.path.join(target_dir, f), dirs_exist_ok=True)
 " "$workspaces_json" "$tmp_payload"
 
-    [ -d "$SKPL_EVOMAP_INGEST_DIR" ] && cp -a "$SKPL_EVOMAP_INGEST_DIR" "$tmp_payload/memory-evomap-ingest"
-    [ -d "$SKPL_EVOMAP_EVOLVED_DIR" ] && cp -a "$SKPL_EVOMAP_EVOLVED_DIR" "$tmp_payload/memory-evolved"
-    [ -d "/root/.openclaw/memory/sqlite-core" ] && cp -a "/root/.openclaw/memory/sqlite-core" "$tmp_payload/sqlite-core"
+    [ -d "$SKPL_HYBRID_MEMORY_ROOT" ] && cp -a "$SKPL_HYBRID_MEMORY_ROOT" "$tmp_payload/hybrid-memory"
+    [ -d "$SKPL_MEMOS_ROOT" ] && cp -a "$SKPL_MEMOS_ROOT" "$tmp_payload/memos"
+    [ -d "$EVOMAP_DIR" ] && cp -a "$EVOMAP_DIR" "$tmp_payload/evomap"
+    [ -d "$EVOMAP_MEMORY_DIR" ] && cp -a "$EVOMAP_MEMORY_DIR" "$tmp_payload/evomap-memory"
+    [ -d "$EVOMAP_BACKUP_DIR" ] && cp -a "$EVOMAP_BACKUP_DIR" "$tmp_payload/evomap-backups"
+    if [ -f "$config_file" ]; then
+      mkdir -p "$tmp_payload/memory-config"
+      cp -a "$config_file" "$tmp_payload/memory-config/openclaw.json"
+    fi
+    if [ -f "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" ]; then
+      mkdir -p "$tmp_payload/enterprise-memory"
+      cp -a "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" "$tmp_payload/enterprise-memory/state.json"
+    fi
 
     if ! find "$tmp_payload" -mindepth 1 -print -quit | grep -q .; then
       echo "❌ 未找到可备份的数据"
@@ -7360,17 +7259,22 @@ evomap_memory_dir = sys.argv[6]
 evomap_backup_dir = sys.argv[7]
 enterprise_state_file = sys.argv[8]
 
-    def copy_replace(src, dest):
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        if os.path.exists(dest):
-            backup = dest + '.pre-restore'
-            if os.path.exists(backup):
-                shutil.rmtree(backup, ignore_errors=True) if os.path.isdir(backup) else os.remove(backup)
-            shutil.move(dest, backup)
-        if os.path.isdir(src):
-            shutil.copytree(src, dest, dirs_exist_ok=False)
-        else:
-            shutil.copy2(src, dest)
+def copy_replace(src, dest):
+    parent = os.path.dirname(dest)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    if os.path.exists(dest):
+        backup = dest + '.pre-restore'
+        if os.path.exists(backup):
+            if os.path.isdir(backup):
+                shutil.rmtree(backup, ignore_errors=True)
+            else:
+                os.remove(backup)
+        shutil.move(dest, backup)
+    if os.path.isdir(src):
+        shutil.copytree(src, dest, dirs_exist_ok=False)
+    else:
+        shutil.copy2(src, dest)
 
 openclaw_src = os.path.join(payload, 'openclaw-root')
 if os.path.isdir(openclaw_src):
@@ -7449,19 +7353,23 @@ PY
 
     if [ "$export_mode" = "2" ]; then
       mode_label="full"
-      for d in workspace extensions skills prompts tools; do
+      for d in workspace extensions skills prompts tools memos; do
         [ -e "$openclaw_root/$d" ] && cp -a "$openclaw_root/$d" "$tmp_payload/"
       done
       [ -f "$openclaw_root/openclaw.json" ] && cp -a "$openclaw_root/openclaw.json" "$tmp_payload/"
+      [ -f "$openclaw_root/$SKPL_MEMORY_DREAMS_FILENAME" ] && cp -a "$openclaw_root/$SKPL_MEMORY_DREAMS_FILENAME" "$tmp_payload/"
+      [ -d "$openclaw_root/$SKPL_MEMORY_DREAMING_DIRNAME" ] && mkdir -p "$tmp_payload/$(dirname "$SKPL_MEMORY_DREAMING_DIRNAME")" && cp -a "$openclaw_root/$SKPL_MEMORY_DREAMING_DIRNAME" "$tmp_payload/$SKPL_MEMORY_DREAMING_DIRNAME"
       for d in telegram feishu whatsapp discord slack qqbot logs; do
         [ -e "$openclaw_root/$d" ] && cp -a "$openclaw_root/$d" "$tmp_payload/"
       done
     else
       [ -d "$openclaw_root/workspace" ] && cp -a "$openclaw_root/workspace" "$tmp_payload/"
       [ -f "$openclaw_root/openclaw.json" ] && cp -a "$openclaw_root/openclaw.json" "$tmp_payload/"
-      for d in extensions skills prompts tools; do
+      for d in extensions skills prompts tools memos; do
         [ -e "$openclaw_root/$d" ] && cp -a "$openclaw_root/$d" "$tmp_payload/"
       done
+      [ -f "$openclaw_root/$SKPL_MEMORY_DREAMS_FILENAME" ] && cp -a "$openclaw_root/$SKPL_MEMORY_DREAMS_FILENAME" "$tmp_payload/"
+      [ -d "$openclaw_root/$SKPL_MEMORY_DREAMING_DIRNAME" ] && mkdir -p "$tmp_payload/$(dirname "$SKPL_MEMORY_DREAMING_DIRNAME")" && cp -a "$openclaw_root/$SKPL_MEMORY_DREAMING_DIRNAME" "$tmp_payload/$SKPL_MEMORY_DREAMING_DIRNAME"
     fi
 
     if ! find "$tmp_payload" -mindepth 1 -print -quit | grep -q .; then
@@ -8029,6 +7937,10 @@ openclaw_memory_render_basic_status() {
 
 openclaw_memory_render_status() {
   local json_output cache_note=""
+  if ! openclaw_has_command openclaw; then
+    openclaw_memory_render_basic_status
+    return 0
+  fi
   if ! openclaw_memory_cache_fresh "$SKPL_MEMORY_STATUS_CACHE_FILE" 60; then
     openclaw_memory_refresh_status_cache >/dev/null 2>&1 || true
   fi
@@ -8708,7 +8620,8 @@ EOF
 
 # 管理 OpenClaw 模型配置，实现真正的按需分配
 openclaw_model_manager() {
-    local config_file="/root/.openclaw/openclaw.json"
+    local config_file
+    config_file=$(openclaw_get_config_file)
     mkdir -p "$(dirname "$config_file")"
     [ ! -f "$config_file" ] && echo '{}' > "$config_file"
 
@@ -8784,24 +8697,64 @@ PY
 
 openclaw_set_model_slot() {
     local type="$1" config_file="$2"
-    local model_name
+    local model_name normalized_model provider_model
     read -e -p "请输入 [$type] 模型 ID (格式: 提供商/模型名): " model_name
     [ -z "$model_name" ] && return 0
 
-    python3 - "$config_file" "$type" "$model_name" <<'PY'
+    normalized_model=$(python3 - "$model_name" <<'PY'
+import sys
+
+value = sys.argv[1].strip()
+if ' (' in value and value.endswith(')'):
+    value = value.split(' (', 1)[0].strip()
+if '/' not in value and ':' in value and ' ' not in value:
+    value = f'ollama/{value}'
+print(value)
+PY
+)
+
+    if [ -z "$normalized_model" ]; then
+      echo "❌ 模型 ID 不能为空。"
+      read -n 1 -s -r -p "按任意键继续..."
+      return 1
+    fi
+
+    if [[ "$normalized_model" == ollama/* ]]; then
+      provider_model="${normalized_model#ollama/}"
+      openclaw_configure_local_ollama_provider "$provider_model" "$type" >/dev/null 2>&1 || {
+        echo "❌ 本地 Ollama 模型配置写入失败: $normalized_model"
+        read -n 1 -s -r -p "按任意键继续..."
+        return 1
+      }
+    fi
+
+    python3 - "$config_file" "$type" "$normalized_model" <<'PY'
 import json, sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
 cfg_type = sys.argv[2]
 model = sys.argv[3]
-cfg = json.loads(path.read_text(encoding='utf-8'))
+cfg = {}
+if path.exists() and path.stat().st_size > 0:
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(cfg, dict):
+            cfg = {}
+    except Exception:
+        cfg = {}
 
 # 初始化结构
 if 'agents' not in cfg: cfg['agents'] = {}
 if 'defaults' not in cfg['agents']: cfg['agents']['defaults'] = {}
 if 'model' not in cfg['agents']['defaults']: cfg['agents']['defaults']['model'] = {}
-if 'models' not in cfg['agents']['defaults']: cfg['agents']['defaults']['models'] = {}
+models_obj = cfg['agents']['defaults'].get('models')
+if not isinstance(models_obj, dict):
+    if isinstance(models_obj, list):
+        models_obj = {str(item): {} for item in models_obj if isinstance(item, str) and item.strip()}
+    else:
+        models_obj = {}
+    cfg['agents']['defaults']['models'] = models_obj
 
 # 添加模型到列表
 cfg['agents']['defaults']['models'][model] = {}
@@ -8824,6 +8777,7 @@ PY
 
 openclaw_apply_and_restart() {
     echo "💾 正在保存配置并重启 OpenClaw..."
+    openclaw_optimize_memory_and_skills >/dev/null 2>&1 || true
     start_gateway force 0 >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1
     echo "✅ 配置已生效！AI 将使用新分配的模型工作。"
 }
@@ -8853,26 +8807,20 @@ gateway.setdefault('port', 18789)
 for legacy_key in ('host', 'hostname', 'url', 'baseUrl'):
     gateway.pop(legacy_key, None)
 gateway.setdefault('auth', {})['mode'] = 'token'
-gateway.setdefault('controlUi', {})['enabled'] = True
+gateway.pop('controlUi', None)
 
 memory = cfg.setdefault('memory', {})
 qmd = memory.setdefault('qmd', {})
-qmd['includeDefaultMemory'] = True
+qmd.setdefault('includeDefaultMemory', True)
 
 agents = cfg.setdefault('agents', {})
 defaults = agents.setdefault('defaults', {})
 defaults.setdefault('workspace', '~/.openclaw/workspace')
-defaults.setdefault('memorySearch', {})['provider'] = 'local'
-defaults.setdefault('experimental', {})['localModelLean'] = True
-defaults.setdefault('modelFallback', defaults.get('modelFallback') or 'ollama/qwen2.5-coder:7b')
-defaults.setdefault('imageModelFallback', defaults.get('imageModelFallback') or 'ollama/qwen2.5vl:7b')
+defaults.setdefault('memorySearch', {})
+defaults.setdefault('experimental', {}).setdefault('localModelLean', True)
+defaults.setdefault('modelFallback', 'ollama/qwen2.5-coder:7b')
+defaults.setdefault('imageModelFallback', 'ollama/qwen2.5vl:7b')
 defaults.setdefault('skills', {})['autoLoadWorkspaceSkills'] = True
-
-plugins = cfg.setdefault('plugins', {})
-plugins.setdefault('allow', [])
-for plugin_id in ('memory-core', 'memory-lancedb'):
-    if plugin_id not in plugins['allow']:
-        plugins['allow'].append(plugin_id)
 
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
@@ -8968,15 +8916,17 @@ cfg.setdefault('models', {}).setdefault('providers', {})
 provider = cfg['models']['providers'].setdefault('ollama', {})
 provider['baseUrl'] = provider.get('baseUrl') or 'http://127.0.0.1:11434'
 provider['apiKey'] = provider.get('apiKey') or 'ollama-local'
-provider['api'] = 'ollama'
+provider['api'] = provider.get('api') or 'ollama'
 provider['timeoutSeconds'] = max(int(provider.get('timeoutSeconds', 0) or 0), 300)
-provider['localService'] = {
-    'command': ollama_bin,
-    'args': ['serve'],
-    'healthUrl': 'http://127.0.0.1:11434/api/tags',
-    'readyTimeoutMs': 180000,
-    'idleStopMs': 0,
-}
+local_service = provider.get('localService')
+if not isinstance(local_service, dict):
+    local_service = {}
+provider['localService'] = local_service
+local_service.setdefault('command', ollama_bin)
+local_service.setdefault('args', ['serve'])
+local_service.setdefault('healthUrl', 'http://127.0.0.1:11434/api/tags')
+local_service.setdefault('readyTimeoutMs', 180000)
+local_service.setdefault('idleStopMs', 0)
 models = provider.setdefault('models', [])
 entry = build_entry(raw_model, role)
 updated = False
@@ -8998,15 +8948,23 @@ cfg.setdefault('agents', {}).setdefault('defaults', {})
 defs = cfg['agents']['defaults']
 defs.setdefault('models', {})
 defs['models'].setdefault(full_model, {})
-defs.setdefault('experimental', {})['localModelLean'] = True
+defs.setdefault('experimental', {}).setdefault('localModelLean', True)
 if role == 'image':
-    defs['imageModel'] = {'primary': full_model}
+    image_model_cfg = defs.get('imageModel')
+    if not isinstance(image_model_cfg, dict):
+        image_model_cfg = {}
+        defs['imageModel'] = image_model_cfg
+    image_model_cfg['primary'] = full_model
 elif role == 'code':
     defs['models'][full_model].setdefault('agentRuntime', {'id': 'auto'})
     defs['models'][full_model].setdefault('params', {})
     defs['models'][full_model]['params'].setdefault('thinking', False)
 else:
-    defs.setdefault('model', {})['primary'] = full_model
+    model_cfg = defs.get('model')
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+        defs['model'] = model_cfg
+    model_cfg['primary'] = full_model
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
@@ -9019,11 +8977,12 @@ openclaw_apply_recommended_model_profile() {
     local code_model="ollama/qwen2.5-coder:7b"
     local config_file
     config_file=$(openclaw_get_config_file)
-    python3 - "$config_file" "$text_model" "$image_model" "$code_model" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" <<'PY'
+    python3 - "$config_file" "$text_model" "$image_model" "$code_model" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" "${OPENCLAW_FORCE_LOCAL_PROFILE:-0}" <<'PY'
 import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])
-text_model, image_model, code_model, ollama_bin = sys.argv[2:6]
+text_model, image_model, code_model, ollama_bin, force_flag = sys.argv[2:7]
+force_local_profile = force_flag == '1'
 cfg = {}
 if path.exists():
     try:
@@ -9031,33 +8990,53 @@ if path.exists():
     except Exception:
         cfg = {}
 cfg.setdefault('models', {}).setdefault('providers', {})
-cfg['models']['providers']['ollama'] = {
-    'baseUrl': 'http://127.0.0.1:11434',
-    'apiKey': 'ollama-local',
-    'api': 'ollama',
-    'timeoutSeconds': 300,
-    'localService': {
-        'command': ollama_bin,
-        'args': ['serve'],
-        'healthUrl': 'http://127.0.0.1:11434/api/tags',
-        'readyTimeoutMs': 180000,
-        'idleStopMs': 0
-    },
-    'models': [
-        {'id': 'qwen2.5:7b', 'name': 'qwen2.5:7b', 'input': ['text'], 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}},
-        {'id': 'qwen2.5vl:7b', 'name': 'qwen2.5vl:7b', 'input': ['text', 'image'], 'params': {'keep_alive': '15m', 'num_ctx': 4096, 'thinking': False}},
-        {'id': 'qwen2.5-coder:7b', 'name': 'qwen2.5-coder:7b', 'input': ['text'], 'reasoning': True, 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}},
-    ]
-}
+
+def ensure_model_entry(provider_models, entry):
+    for index, item in enumerate(provider_models):
+        if isinstance(item, dict) and item.get('id') == entry['id']:
+            merged = dict(item)
+            merged.update(entry)
+            if isinstance(item.get('params'), dict) and isinstance(entry.get('params'), dict):
+                params = dict(item['params'])
+                params.update(entry['params'])
+                merged['params'] = params
+            provider_models[index] = merged
+            return
+    provider_models.append(entry)
+
+provider = cfg['models']['providers'].setdefault('ollama', {})
+provider['baseUrl'] = provider.get('baseUrl') or 'http://127.0.0.1:11434'
+provider['apiKey'] = provider.get('apiKey') or 'ollama-local'
+provider['api'] = provider.get('api') or 'ollama'
+provider['timeoutSeconds'] = max(int(provider.get('timeoutSeconds', 0) or 0), 300)
+local_service = provider.get('localService')
+if not isinstance(local_service, dict):
+    local_service = {}
+    provider['localService'] = local_service
+local_service.setdefault('command', ollama_bin)
+local_service.setdefault('args', ['serve'])
+local_service.setdefault('healthUrl', 'http://127.0.0.1:11434/api/tags')
+local_service.setdefault('readyTimeoutMs', 180000)
+local_service.setdefault('idleStopMs', 0)
+provider_models = provider.setdefault('models', [])
+if not isinstance(provider_models, list):
+    provider_models = []
+    provider['models'] = provider_models
+ensure_model_entry(provider_models, {'id': 'qwen2.5:7b', 'name': 'qwen2.5:7b', 'input': ['text'], 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}})
+ensure_model_entry(provider_models, {'id': 'qwen2.5vl:7b', 'name': 'qwen2.5vl:7b', 'input': ['text', 'image'], 'params': {'keep_alive': '15m', 'num_ctx': 4096, 'thinking': False}})
+ensure_model_entry(provider_models, {'id': 'qwen2.5-coder:7b', 'name': 'qwen2.5-coder:7b', 'input': ['text'], 'reasoning': True, 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}})
+
 cfg.setdefault('agents', {}).setdefault('defaults', {})
 defs = cfg['agents']['defaults']
 defs.setdefault('models', {})
 for model in (text_model, image_model, code_model):
     defs['models'].setdefault(model, {})
-defs.setdefault('model', {})['primary'] = text_model
-defs['imageModel'] = {'primary': image_model}
+if force_local_profile or not isinstance(defs.get('model'), dict) or not defs['model'].get('primary'):
+    defs.setdefault('model', {})['primary'] = text_model
+if force_local_profile or not isinstance(defs.get('imageModel'), dict) or not defs['imageModel'].get('primary'):
+    defs['imageModel'] = {'primary': image_model}
 defs['models'][code_model].setdefault('agentRuntime', {'id': 'auto'})
-defs.setdefault('experimental', {})['localModelLean'] = True
+defs.setdefault('experimental', {}).setdefault('localModelLean', True)
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
@@ -9095,6 +9074,7 @@ openclaw_full_local_stack_setup() {
     openclaw_ollama_pull_model "qwen2.5:7b" || return 1
     openclaw_ollama_pull_model "qwen2.5vl:7b" || return 1
     openclaw_ollama_pull_model "qwen2.5-coder:7b" || return 1
+    OPENCLAW_FORCE_LOCAL_PROFILE=1
     openclaw_apply_recommended_model_profile || return 1
     openclaw_inject_skills || return 1
     openclaw_optimize_memory_and_skills || return 1
@@ -9590,6 +9570,8 @@ PY
   }
 
   openclaw_memory_menu() {
+    local config_file
+    config_file=$(openclaw_get_config_file)
     if [ "$(openclaw_memory_config_get "memory.qmd.includeDefaultMemory")" = "false" ]; then
       openclaw_memory_config_set "memory.qmd.includeDefaultMemory" true >/dev/null 2>&1 || true
     fi
@@ -9599,7 +9581,7 @@ PY
       skpl_ui_header "OpenClaw 智能大脑中心" "模型配置 / 技能注入 / 经验沉淀"
       openclaw_memory_render_status
       echo
-      python3 - "/root/.openclaw/openclaw.json" <<'PY'
+      python3 - "$config_file" <<'PY'
 import json, sys
 from pathlib import Path
 try:
@@ -9714,7 +9696,7 @@ PY
     else
       openclaw gateway restart >/dev/null 2>&1 || {
         openclaw gateway stop >/dev/null 2>&1
-        openclaw gateway start >/dev/null 2>&1
+        openclaw gateway --port "$(openclaw_gateway_port)" >/dev/null 2>&1
       }
     fi
   }
@@ -10787,39 +10769,15 @@ update_openclaw_panel() {
 
 
   openclaw_find_webui_domain() {
-    local domain_list cache_ttl="30"
+    local cache_ttl="30"
 
     if [ -s "$SKPL_WEBUI_DOMAIN_CACHE_FILE" ] && openclaw_memory_cache_fresh "$SKPL_WEBUI_DOMAIN_CACHE_FILE" "$cache_ttl"; then
       cat "$SKPL_WEBUI_DOMAIN_CACHE_FILE"
       return 0
     fi
 
-    domain_list=$(
-      python3 - <<'PY'
-from pathlib import Path
-
-conf_dir = Path('/home/web/conf.d')
-results = []
-if conf_dir.is_dir():
-    for path in sorted(conf_dir.glob('*.conf')):
-        try:
-            text = path.read_text(encoding='utf-8', errors='ignore')
-        except Exception:
-            continue
-        if '18789' in text:
-            results.append(path.stem)
-print('\n'.join(results))
-PY
-    )
-
-    if [ -n "$domain_list" ]; then
-      printf '%s\n' "$domain_list" > "$SKPL_WEBUI_DOMAIN_CACHE_FILE"
-    elif [ -f "$SKPL_WEBUI_DOMAIN_CACHE_FILE" ]; then
-      : > "$SKPL_WEBUI_DOMAIN_CACHE_FILE"
-    fi
-
-    if [ -n "$domain_list" ]; then
-      echo "$domain_list"
+    if [ -s "$SKPL_WEBUI_DOMAIN_CACHE_FILE" ]; then
+      cat "$SKPL_WEBUI_DOMAIN_CACHE_FILE"
     fi
   }
 
@@ -10910,12 +10868,9 @@ for candidate in config_candidates:
         continue
     gateway = data.get('gateway', {})
     auth = gateway.get('auth', {}) if isinstance(gateway, dict) else {}
-    control_ui = gateway.get('controlUi', {}) if isinstance(gateway, dict) else {}
     for value in (
         auth.get('token') if isinstance(auth, dict) else None,
         auth.get('accessToken') if isinstance(auth, dict) else None,
-        control_ui.get('token') if isinstance(control_ui, dict) else None,
-        control_ui.get('accessToken') if isinstance(control_ui, dict) else None,
         gateway.get('token') if isinstance(gateway, dict) else None,
     ):
         emit(value)
@@ -10940,10 +10895,14 @@ PY
 openclaw_webui_refresh_token_cache() {
     local dashboard_output token
 
-    openclaw_webui_ensure_local_origins >/dev/null 2>&1 || true
-    refresh_openclaw_gateway_service >/dev/null 2>&1 || true
+    token=$(openclaw_webui_token_from_config 2>/dev/null || true)
+    if [ -n "$token" ]; then
+      printf '%s' "$token" > "$SKPL_WEBUI_TOKEN_CACHE_FILE"
+      echo "$token"
+      return 0
+    fi
 
-    dashboard_output=$(timeout 12 openclaw dashboard 2>/dev/null || true)
+    dashboard_output=$(timeout 12 openclaw dashboard --no-open 2>/dev/null || true)
     if [ -n "$dashboard_output" ]; then
       token=$(printf '%s\n' "$dashboard_output" | openclaw_webui_extract_token 2>/dev/null || true)
       if [ -n "$token" ]; then
@@ -10953,45 +10912,15 @@ openclaw_webui_refresh_token_cache() {
       fi
     fi
 
-    token=$(openclaw_webui_token_from_config 2>/dev/null || true)
-    if [ -n "$token" ]; then
-      printf '%s' "$token" > "$SKPL_WEBUI_TOKEN_CACHE_FILE"
-      echo "$token"
-      return 0
-    fi
     return 1
   }
 
-  openclaw_webui_ensure_origins() {
-    local config_file tmp_json origins_json
-    config_file=$(openclaw_get_config_file)
-    [ -f "$config_file" ] || return 0
-    command -v jq >/dev/null 2>&1 || return 0
-    origins_json=$(python3 - "$@" <<'PY'
-import json
-import sys
-
-print(json.dumps([origin for origin in sys.argv[1:] if origin]))
-PY
-)
-
-    tmp_json=$(mktemp)
-    if jq '
-      .gateway = (.gateway // {})
-      | .gateway.controlUi = (.gateway.controlUi // {})
-      | .gateway.controlUi.allowedOrigins = (((.gateway.controlUi.allowedOrigins // []) + $origins) | unique)
-    ' --argjson origins "$origins_json" "$config_file" > "$tmp_json" && mv "$tmp_json" "$config_file"; then
-      return 0
-    fi
-    rm -f "$tmp_json"
-    return 1
+openclaw_webui_ensure_origins() {
+    return 0
   }
 
   openclaw_webui_ensure_local_origins() {
-    local scheme port
-    scheme=$(openclaw_webui_scheme)
-    port=$(openclaw_gateway_port)
-    openclaw_webui_ensure_origins "${scheme}://127.0.0.1:${port}" "${scheme}://localhost:${port}" "${scheme}://127.0.0.1" "${scheme}://localhost"
+    return 0
   }
 
   openclaw_webui_get_cached_token() {
@@ -11013,7 +10942,6 @@ PY
     local local_ip token domains scheme port
 
     skpl_ui_header "WebUI 访问设置" "本机访问优先，域名入口按需接入"
-    openclaw_webui_ensure_local_origins >/dev/null 2>&1 || true
     local_ip="127.0.0.1"
     scheme=$(openclaw_webui_scheme)
     port=$(openclaw_gateway_port)
@@ -11034,9 +10962,9 @@ PY
       while IFS= read -r d; do
         [ -z "$d" ] && continue
         if [ -n "$token" ]; then
-          echo "https://${d}/#token=${token}"
+          echo "${d}/#token=${token}"
         else
-          echo "https://${d}/"
+          echo "${d}/"
         fi
       done <<EOF
 $domains
@@ -11050,50 +10978,63 @@ EOF
 
 
 
-  # 添加域名（调用你给的函数）
+  openclaw_webui_normalize_domain_entry() {
+    local raw="$1"
+    raw="${raw#http://}"
+    raw="${raw#https://}"
+    raw="${raw%%/*}"
+    raw="${raw%%#*}"
+    raw="${raw%%\?*}"
+    printf '%s' "$raw"
+  }
+
+  # 添加域名入口记录
   openclaw_domain_webui() {
-    local proxy_scheme token config_file new_origin scheme port
+    local raw_domain domain_entry scheme token
 
-    add_yuming
-    if ! ldnmp_Proxy "${yuming}" 127.0.0.1 18789; then
-      echo "域名代理未自动配置，已停止后续设备配对流程。"
-      return 1
-    fi
-    proxy_scheme="${SKPL_LAST_PROXY_SCHEME:-http}"
     scheme=$(openclaw_webui_scheme)
-    port=$(openclaw_gateway_port)
+    read -e -p "请输入已存在的 WebUI 域名或 URL: " raw_domain
+    [ -z "$raw_domain" ] && { echo "❌ 未输入域名或 URL"; return 1; }
 
-    token=$(openclaw_webui_token_from_config 2>/dev/null || openclaw_webui_get_cached_token 2>/dev/null || true)
+    domain_entry=$(openclaw_webui_normalize_domain_entry "$raw_domain")
+    [ -z "$domain_entry" ] && { echo "❌ 域名格式无效"; return 1; }
 
-    clear
-    echo "访问地址:"
-    echo "${proxy_scheme}://${yuming}/#token=$token"
-    echo "先访问 URL 触发待处理请求，然后回车查看当前 devices list。"
-    read
-    echo -e "${gl_kjlan}正在加载设备列表……${gl_bai}"
-    # 自动添加域名到 allowedOrigins
-    config_file=$(openclaw_get_config_file)
-    if [ -f "$config_file" ]; then
-      new_origin="${proxy_scheme}://${yuming}"
-      # 使用 jq 安全修改 JSON，确保结构存在且不重复添加域名
-      if command -v jq >/dev/null 2>&1; then
-        if openclaw_webui_ensure_origins "${scheme}://127.0.0.1:${port}" "${scheme}://localhost:${port}" "${scheme}://127.0.0.1" "${scheme}://localhost" "$new_origin"; then
-          echo -e "${gl_kjlan}已将域名 ${yuming} 加入 allowedOrigins 配置${gl_bai}"
-          : > "$SKPL_WEBUI_DOMAIN_CACHE_FILE"
-          openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
-        else
-          echo "❌ 写入 allowedOrigins 失败，请检查 OpenClaw 配置文件是否为合法 JSON。"
-          return 1
-        fi
-      fi
-    fi
+    mkdir -p "$(dirname "$SKPL_WEBUI_DOMAIN_CACHE_FILE")"
+    printf '%s\n' "${scheme}://${domain_entry}" >> "$SKPL_WEBUI_DOMAIN_CACHE_FILE"
+    python3 - "$SKPL_WEBUI_DOMAIN_CACHE_FILE" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+if not path.exists():
+    path.write_text('', encoding='utf-8')
+items = []
+seen = set()
+for raw in path.read_text(encoding='utf-8', errors='ignore').splitlines():
+    item = raw.strip()
+    if not item or item in seen:
+        continue
+    seen.add(item)
+    items.append(item)
+path.write_text('\n'.join(items) + ('\n' if items else ''), encoding='utf-8')
+PY
+    echo -e "${gl_kjlan}已记录域名 ${domain_entry} 的 WebUI 入口${gl_bai}"
 
     : > "$SKPL_DEVICES_LIST_CACHE_FILE" 2>/dev/null || true
     if ! openclaw_devices_list_safe; then
       echo "❌ 设备列表加载超时或失败，请确认网关已就绪后重试。"
       return 1
     fi
+
+    token=$(openclaw_webui_token_from_config 2>/dev/null || openclaw_webui_get_cached_token 2>/dev/null || true)
     echo
+    echo "访问地址:"
+    if [ -n "$token" ]; then
+      echo "${scheme}://${domain_entry}/#token=${token}"
+    else
+      echo "${scheme}://${domain_entry}/"
+    fi
     echo "请在 root 终端手动执行官方命令进行审批。"
     echo "建议步骤："
     echo "1. 复制上面 devices list 中当前有效的 requestId"
@@ -11104,8 +11045,51 @@ EOF
 
   # 删除域名
   openclaw_remove_domain() {
-    echo "域名格式 example.com 不带https://"
-    web_del
+    local domains target domain_entry found=0
+
+    domains=$(openclaw_find_webui_domain)
+    if [ -z "$domains" ]; then
+      echo "当前没有已记录的域名入口。"
+      return 0
+    fi
+
+    echo "已记录的域名入口:"
+    printf '%s\n' "$domains"
+    read -e -p "请输入要移除的域名或完整 URL: " target
+    [ -z "$target" ] && { echo "❌ 未输入域名或 URL"; return 1; }
+
+    domain_entry=$(openclaw_webui_normalize_domain_entry "$target")
+    python3 - "$SKPL_WEBUI_DOMAIN_CACHE_FILE" "$domain_entry" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+target = sys.argv[2].strip()
+if not path.exists():
+    raise SystemExit(1)
+
+items = []
+removed = False
+for raw in path.read_text(encoding='utf-8', errors='ignore').splitlines():
+    item = raw.strip()
+    if not item:
+        continue
+    normalized = item.removeprefix('http://').removeprefix('https://').split('/', 1)[0]
+    if normalized == target:
+        removed = True
+        continue
+    items.append(item)
+
+path.write_text('\n'.join(items) + ('\n' if items else ''), encoding='utf-8')
+raise SystemExit(0 if removed else 1)
+PY
+    found=$?
+    if [ "$found" -eq 0 ]; then
+      echo "✅ 已移除域名入口: $domain_entry"
+    else
+      echo "❌ 未找到对应的已记录域名入口: $domain_entry"
+      return 1
+    fi
   }
 
   # 主菜单
@@ -11118,8 +11102,8 @@ EOF
       echo
       skpl_ui_section "操作"
       skpl_ui_menu_item 1 "重载访问 Token" "读取本地持久 token"
-      skpl_ui_menu_item 2 "添加域名访问" "自动写入 allowedOrigins"
-      skpl_ui_menu_item_tone 3 "删除域名访问" "移除反向代理域名" "danger"
+      skpl_ui_menu_item 2 "记录域名入口" "保存已存在的 WebUI 域名地址"
+      skpl_ui_menu_item_tone 3 "移除域名入口" "删除已记录的域名地址" "danger"
       skpl_ui_menu_item 4 "查看待处理请求" "显示 devices list 原始输出"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请选择: "
