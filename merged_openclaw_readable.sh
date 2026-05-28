@@ -2220,7 +2220,7 @@ PY
 }
 
 openclaw_ai_stack_acceptance_report() {
-  local syntax_status route_summary resource_summary accel_summary tool_summary plugin_summary cloud_summary evolve_summary autotune_summary context_summary lifecycle_summary
+  local syntax_status route_summary resource_summary accel_summary tool_summary plugin_summary cloud_summary evolve_summary autotune_summary context_summary lifecycle_summary memory_summary
   syntax_status='失败'
   if bash -n "$0" >/dev/null 2>&1; then
     syntax_status='通过'
@@ -2235,26 +2235,102 @@ openclaw_ai_stack_acceptance_report() {
   autotune_summary=$(openclaw_ai_stack_autotune_status_summary 2>/dev/null || printf '%s' '未记录')
   context_summary=$(openclaw_ai_stack_context_status_summary 2>/dev/null || printf '%s' '未记录')
   lifecycle_summary=$(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || printf '%s' '未记录')
-  python3 - "$syntax_status" "$route_summary" "$resource_summary" "$accel_summary" "$tool_summary" "$plugin_summary" "$cloud_summary" "$evolve_summary" "$autotune_summary" "$context_summary" "$lifecycle_summary" <<'PY'
+  memory_summary=$(openclaw_memory_acceptance_summary 2>/dev/null || printf '%s' '未记录')
+  python3 - "$syntax_status" "$route_summary" "$resource_summary" "$accel_summary" "$tool_summary" "$plugin_summary" "$cloud_summary" "$evolve_summary" "$autotune_summary" "$context_summary" "$lifecycle_summary" "$memory_summary" <<'PY'
 import sys
 
-syntax_status, route_summary, resource_summary, accel_summary, tool_summary, plugin_summary, cloud_summary, evolve_summary, autotune_summary, context_summary, lifecycle_summary = sys.argv[1:12]
+syntax_status, route_summary, resource_summary, accel_summary, tool_summary, plugin_summary, cloud_summary, evolve_summary, autotune_summary, context_summary, lifecycle_summary, memory_summary = sys.argv[1:13]
 lines = [
     'OpenClaw 落地验收报告',
-    f'- 脚本语法: {syntax_status}',
-    f'- AI 路由: {route_summary}',
-    f'- 资源预算: {resource_summary}',
-    f'- 推理加速: {accel_summary}',
-    f'- 工具治理: {tool_summary}',
-    f'- 插件治理: {plugin_summary}',
-    f'- 多云状态: {cloud_summary}',
-    f'- 自进化: {evolve_summary}',
-    f'- 自动调参: {autotune_summary}',
-    f'- 上下文迁移: {context_summary}',
-    f'- 生命周期: {lifecycle_summary}',
-    '- 结论: 代码层落地闭环已完成',
+    f'- 前置层: 语法={syntax_status} | 资源={resource_summary}',
+    f'- 第0层缓存: 上下文={context_summary}',
+    f'- 第1层路由: {route_summary}',
+    f'- 第2层专家: 生命周期={lifecycle_summary} | 加速={accel_summary}',
+    f'- 第3层检索记忆: {memory_summary}',
+    f'- 第4层工具: {tool_summary} | 插件={plugin_summary}',
+    f'- 第5层多云: {cloud_summary}',
+    f'- 第6层自进化: {evolve_summary} | 自动调参={autotune_summary}',
 ]
 print('\n'.join(lines))
+PY
+}
+
+openclaw_memory_feature_enabled() {
+  local feature_name="${1:-all}"
+  memory_extension_prepare >/dev/null 2>&1 || return 1
+  python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" "$feature_name" <<'PY'
+import json
+import sys
+
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+feature = sys.argv[2]
+
+def enabled(path, default=True):
+    cur = cfg
+    for key in path:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(key)
+    if cur is None:
+        return default
+    return bool(cur)
+
+global_enabled = enabled(['enabled'], True)
+mapping = {
+    'all': global_enabled,
+    'shortTerm': global_enabled and enabled(['shortTerm', 'enabled'], True),
+    'midTerm': global_enabled and enabled(['midTerm', 'enabled'], True),
+    'longTerm': global_enabled and enabled(['longTerm', 'enabled'], True),
+    'knowledgeBase': global_enabled and enabled(['knowledgeBase', 'enabled'], True),
+}
+print('true' if mapping.get(feature, global_enabled) else 'false')
+PY
+}
+
+openclaw_memory_acceptance_summary() {
+  memory_extension_prepare >/dev/null 2>&1 || {
+    printf '%s' '失败: 记忆配置未初始化'
+    return 0
+  }
+  python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_AI_STACK_CONTEXT_STATE_FILE" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+cfg_path = Path(sys.argv[1])
+db_path = Path(sys.argv[2])
+context_path = Path(sys.argv[3])
+cfg = json.loads(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
+
+checks = []
+checks.append(bool(cfg.get('enabled', True)))
+checks.append('shortTerm' in cfg)
+checks.append('midTerm' in cfg)
+checks.append(bool((cfg.get('longTerm') or {}).get('enabled', True)))
+checks.append('knowledgeBase' in cfg)
+checks.append('localOnly' in (cfg.get('privacy') or {}))
+checks.append(bool((cfg.get('injection') or {}).get('maxContextPercent', 0)))
+checks.append(db_path.exists())
+checks.append(context_path.exists())
+
+row_count = 0
+if db_path.exists():
+    try:
+        conn = sqlite3.connect(db_path)
+        row_count = conn.execute('select count(*) from memory_entries').fetchone()[0]
+        conn.close()
+    except Exception:
+        row_count = 0
+
+passed = sum(1 for item in checks if item)
+total = len(checks)
+if passed == total:
+    print(f'通过: {passed}/{total} 项检查通过 | 条目数={row_count}')
+elif passed >= 3:
+    print(f'部分通过: {passed}/{total} 项检查通过 | 条目数={row_count}')
+else:
+    print(f'失败: {passed}/{total} 项检查通过 | 条目数={row_count}')
 PY
 }
 
@@ -2275,6 +2351,12 @@ PY
 
 openclaw_ai_stack_memory_injection_text() {
   local query="$1" merged_json
+  if [ "$(openclaw_memory_feature_enabled all 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    return 0
+  fi
+  if [ "$(openclaw_memory_feature_enabled longTerm 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    return 0
+  fi
   merged_json=$(python3 - "$query" "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
 import json
 import sqlite3
@@ -2340,13 +2422,149 @@ print('\n'.join(lines))
 PY
 }
 
+openclaw_ai_stack_short_term_context_text() {
+  [ "$(openclaw_memory_feature_enabled shortTerm 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" "$SKPL_AI_STACK_CONTEXT_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+path = Path(sys.argv[2])
+if not path.exists():
+    raise SystemExit(0)
+data = json.loads(path.read_text(encoding='utf-8'))
+turns = data.get('recentTurns') or []
+limit = int((cfg.get('shortTerm') or {}).get('maxItems', 24) or 24)
+items = [item for item in turns[-limit:] if isinstance(item, dict)]
+if not items:
+    raise SystemExit(0)
+lines = ['[short_term_context]']
+for item in items[-6:]:
+    query = str(item.get('query') or '').strip()
+    if query:
+        lines.append(f'- 最近请求: {query[:180]}')
+print('\n'.join(lines))
+PY
+}
+
+openclaw_ai_stack_mid_term_context_text() {
+  local query="$1"
+  [ "$(openclaw_memory_feature_enabled midTerm 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" "$SKPL_AI_STACK_CONTEXT_STATE_FILE" "$query" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+path = Path(sys.argv[2])
+query = str(sys.argv[3] or '').strip().lower()
+if not path.exists() or not query:
+    raise SystemExit(0)
+data = json.loads(path.read_text(encoding='utf-8'))
+turns = data.get('recentTurns') or []
+days = int((cfg.get('midTerm') or {}).get('retentionDays', 14) or 14)
+threshold = int(time.time()) - days * 86400
+
+def tokens(text):
+    return {part for part in ''.join(ch if ch.isalnum() else ' ' for ch in text.lower()).split() if part}
+
+query_tokens = tokens(query)
+matched = []
+for item in turns:
+    if not isinstance(item, dict):
+        continue
+    if int(item.get('ts', 0) or 0) < threshold:
+        continue
+    text = str(item.get('query') or '').strip()
+    cand = tokens(text)
+    if not text or not cand or not query_tokens:
+        continue
+    inter = len(cand & query_tokens)
+    union = len(cand | query_tokens)
+    score = (inter / union) if union else 0.0
+    if score >= 0.12:
+        matched.append((score, text))
+matched.sort(key=lambda x: x[0], reverse=True)
+if not matched:
+    raise SystemExit(0)
+lines = ['[mid_term_context]']
+for score, text in matched[:3]:
+    lines.append(f'- 历史相关请求: {text[:180]} (score={score:.2f})')
+print('\n'.join(lines))
+PY
+}
+
+openclaw_ai_stack_knowledge_context_text() {
+  local query="$1" raw
+  [ "$(openclaw_memory_feature_enabled knowledgeBase 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  raw=$(hybrid_memory_search_raw_json "$query" 2>/dev/null || printf '%s' '[]')
+  python3 - "$raw" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json
+import sys
+
+raw = json.loads(sys.argv[1]) if sys.argv[1] else []
+cfg = json.loads(open(sys.argv[2], 'r', encoding='utf-8').read())
+kb_cfg = cfg.get('knowledgeBase') or {}
+weight = float(kb_cfg.get('weight', 1.0) or 1.0)
+if not raw:
+    raise SystemExit(0)
+limit = 1 if weight < 0.8 else (3 if weight <= 1.4 else 5)
+lines = ['[knowledge_base_context]']
+for item in raw[:limit]:
+    summary = str(item.get('summary') or '').strip()
+    explain = str(item.get('explain') or '').strip()
+    if summary:
+        suffix = f' | {explain}' if explain else ''
+        lines.append(f'- {summary[:180]}{suffix[:120]}')
+print('\n'.join(lines))
+PY
+}
+
+openclaw_ai_stack_memory_context_text() {
+  local query="$1"
+  local short_text mid_text long_text kb_text
+  short_text=$(openclaw_ai_stack_short_term_context_text 2>/dev/null || true)
+  mid_text=$(openclaw_ai_stack_mid_term_context_text "$query" 2>/dev/null || true)
+  long_text=$(openclaw_ai_stack_memory_injection_text "$query" 2>/dev/null || true)
+  kb_text=$(openclaw_ai_stack_knowledge_context_text "$query" 2>/dev/null || true)
+  printf '%s\n%s\n%s\n%s\n' "$short_text" "$mid_text" "$long_text" "$kb_text" | python3 - <<'PY'
+import sys
+
+seen = set()
+lines = []
+for raw in sys.stdin.read().splitlines():
+    line = raw.strip()
+    if not line:
+        continue
+    if line in seen:
+        continue
+    seen.add(line)
+    lines.append(line)
+if lines:
+    print('\n'.join(lines))
+PY
+}
+
 openclaw_ai_stack_cloud_memory_policy() {
   memory_extension_prepare
   python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
 import json, sys
 cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
 privacy = cfg.get('privacy', {}) if isinstance(cfg, dict) else {}
-print('allow' if privacy.get('cloudUploadMemory', False) else 'strip')
+global_enabled = bool(cfg.get('enabled', True))
+long_enabled = bool((cfg.get('longTerm') or {}).get('enabled', True))
+local_only = bool(privacy.get('localOnly', True))
+cloud_upload = bool(privacy.get('cloudUploadMemory', False))
+if not global_enabled or not long_enabled:
+    print('disabled')
+elif local_only:
+    print('local-only')
+elif cloud_upload:
+    print('allow')
+else:
+    print('strip')
 PY
 }
 
@@ -2356,6 +2574,13 @@ openclaw_ai_stack_filter_memory_for_cloud() {
   policy=$(openclaw_ai_stack_cloud_memory_policy)
   if [ "$policy" = "allow" ]; then
     printf '%s\n' "$memory_text"
+    return 0
+  fi
+  if [ "$policy" = "disabled" ]; then
+    return 0
+  fi
+  if [ "$policy" = "local-only" ]; then
+    printf '%s\n' "[memory_context]\n- 当前为本地 only 模式，长期记忆只在本地推理链路使用。"
     return 0
   fi
   printf '%s\n' "[memory_context]\n- 云端模式已启用记忆禁传，本次不上传本地长期记忆。"
@@ -3177,6 +3402,200 @@ payload = {
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 print(json.dumps(payload, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_context_record_turn() {
+  local route_json="$1"
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_CONTEXT_STATE_FILE" "$route_json" <<'PY'
+import json
+import re
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+route = json.loads(sys.argv[2])
+
+def compact(value, limit):
+    text = re.sub(r'\s+', ' ', str(value or '').strip())
+    return text[:limit]
+
+current = {}
+if path.exists():
+    try:
+        current = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        current = {}
+
+recent = current.get('recentTurns') or []
+tool_result = route.get('toolResult') or {}
+tool_outputs = []
+for item in tool_result.get('results') or []:
+    if isinstance(item, dict):
+        output = compact(item.get('output') or '', 180)
+        if output:
+            tool_outputs.append(output)
+
+response = compact(route.get('cloudAggregatedText') or '', 320)
+if not response and tool_outputs:
+    response = ' | '.join(tool_outputs[:2])[:320]
+
+entry = {
+    'ts': int(time.time()),
+    'query': compact(route.get('inputPreview') or '', 220),
+    'route': route.get('route') or '',
+    'execution': route.get('execution') or '',
+    'model': route.get('model') or '',
+    'response': response,
+}
+if entry['query']:
+    recent.append(entry)
+recent = [item for item in recent if isinstance(item, dict)][-80:]
+current['updatedAt'] = int(time.time())
+current['recentTurns'] = recent
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(current, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps({'recentTurns': len(recent)}, ensure_ascii=False))
+PY
+}
+
+openclaw_memory_auto_capture_from_request() {
+  local input_text="$1" route_json="$2"
+  [ -n "$input_text" ] || return 0
+  [ "$(openclaw_memory_feature_enabled all 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  [ "$(openclaw_memory_feature_enabled longTerm 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  local extract_strength capture_text
+  extract_strength=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print((cfg.get('longTerm') or {}).get('autoExtract', 'balanced'))
+PY
+)
+  case "$extract_strength" in
+    low)
+      capture_text=$(python3 - "$input_text" <<'PY'
+import re, sys
+text = re.sub(r'\s+', ' ', sys.argv[1]).strip()
+if len(text) < 18:
+    raise SystemExit(0)
+markers = ['记住', '我叫', '我喜欢', '我的偏好', '你叫']
+if not any(marker in text for marker in markers):
+    raise SystemExit(0)
+print(text[:300])
+PY
+) || return 0
+      ;;
+    balanced)
+      capture_text=$(python3 - "$input_text" <<'PY'
+import re, sys
+text = re.sub(r'\s+', ' ', sys.argv[1]).strip()
+if len(text) < 12:
+    raise SystemExit(0)
+print(text[:800])
+PY
+) || return 0
+      ;;
+    high)
+      capture_text=$(python3 - "$route_json" "$input_text" <<'PY'
+import json, sys
+route = json.loads(sys.argv[1])
+query = sys.argv[2]
+parts = [query, route.get('cloudAggregatedText') or '']
+tool = route.get('toolResult') or {}
+for item in tool.get('results') or []:
+    if isinstance(item, dict):
+        output = str(item.get('output') or '').strip()
+        if output:
+            parts.append(output[:240])
+print('\n'.join([part for part in parts if isinstance(part, str) and part.strip()])[:2000])
+PY
+)
+      ;;
+    *)
+      capture_text="$input_text"
+      ;;
+  esac
+  openclaw_memory_extension_capture_text "$capture_text" >/dev/null 2>&1 || true
+}
+
+openclaw_memory_extension_automerge() {
+  [ "$(openclaw_memory_feature_enabled all 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  [ "$(openclaw_memory_feature_enabled longTerm 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  memory_extension_prepare >/dev/null 2>&1 || return 0
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json
+import sqlite3
+import time
+import sys
+from collections import defaultdict
+
+db_path = sys.argv[1]
+cfg = json.loads(open(sys.argv[2], 'r', encoding='utf-8').read())
+cleanup_days = int((cfg.get('maintenance') or {}).get('cleanupDays', 30) or 30)
+now = int(time.time())
+threshold = now - cleanup_days * 86400
+
+conn = sqlite3.connect(db_path)
+rows = conn.execute('select id, category, title, content, tags, sensitive, created_at, updated_at from memory_entries where deleted = 0 order by updated_at desc').fetchall()
+
+def normalize(text):
+    return ' '.join(str(text or '').lower().split())
+
+groups = defaultdict(list)
+for row in rows:
+    entry_id, category, title, content, tags, sensitive, created_at, updated_at = row
+    key = (str(category or '').strip().lower(), normalize(title))
+    groups[key].append(row)
+
+for key, items in groups.items():
+    if len(items) <= 1:
+        continue
+    keeper = items[0]
+    keeper_id = keeper[0]
+    merged_parts = []
+    merged_tags = []
+    sensitive_flag = 0
+    newest_updated = keeper[7]
+    oldest_created = keeper[6]
+    for item in items:
+        content = str(item[3] or '').strip()
+        if content and content not in merged_parts:
+            merged_parts.append(content)
+        try:
+            parsed_tags = json.loads(item[4] or '[]')
+            if isinstance(parsed_tags, list):
+                for tag in parsed_tags:
+                    tag_text = str(tag).strip()
+                    if tag_text and tag_text not in merged_tags:
+                        merged_tags.append(tag_text)
+        except Exception:
+            pass
+        sensitive_flag = max(sensitive_flag, int(item[5] or 0))
+        newest_updated = max(newest_updated, int(item[7] or 0))
+        oldest_created = min(oldest_created, int(item[6] or 0))
+
+    summary = '；'.join(merged_parts[:4]).strip()
+    if len(summary) > 600:
+        summary = summary[:600]
+    conn.execute(
+        'update memory_entries set content = ?, tags = ?, sensitive = ?, created_at = ?, updated_at = ? where id = ?',
+        (summary, json.dumps(merged_tags, ensure_ascii=False), sensitive_flag, oldest_created, newest_updated, keeper_id)
+    )
+    for item in items[1:]:
+        conn.execute('update memory_entries set deleted = 1 where id = ?', (item[0],))
+
+for row in rows:
+    entry_id, category, title, content, tags, sensitive, created_at, updated_at = row
+    content_text = str(content or '').strip()
+    if len(content_text) > 800:
+        compact = content_text[:800]
+        conn.execute('update memory_entries set content = ?, updated_at = ? where id = ?', (compact, max(int(updated_at or 0), now), entry_id))
+
+conn.execute('update memory_entries set deleted = 1 where deleted = 0 and updated_at < ?', (threshold,))
+conn.commit()
+conn.close()
 PY
 }
 
@@ -4619,6 +5038,14 @@ PY
 
 memory_extension_search_json() {
   local query="$1"
+  if [ "$(openclaw_memory_feature_enabled all 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    printf '%s\n' '[]'
+    return 0
+  fi
+  if [ "$(openclaw_memory_feature_enabled longTerm 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    printf '%s\n' '[]'
+    return 0
+  fi
   memory_extension_prepare
   python3 - "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" "$query" <<'PY'
 import json
@@ -4708,6 +5135,14 @@ memory_extension_upsert_entry() {
   [ -n "$category" ] || return 1
   [ -n "$title" ] || return 1
   [ -n "$content" ] || return 1
+  if [ "$(openclaw_memory_feature_enabled all 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    echo "ℹ️ 记忆总开关当前关闭，已跳过写入。"
+    return 0
+  fi
+  if [ "$(openclaw_memory_feature_enabled longTerm 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    echo "ℹ️ 长期记忆当前关闭，已跳过写入。"
+    return 0
+  fi
   memory_extension_prepare
   python3 - "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" "$category" "$title" "$content" "$tags_json" "$sensitive" <<'PY'
 import json
@@ -6072,7 +6507,7 @@ PY
     fi
     lock_result=$(openclaw_ai_stack_lock_acquire "smart-route:${selected_model:-default}" 900 2>/dev/null || true)
     openclaw_ai_stack_mark_activity >/dev/null 2>&1 || true
-    memory_injection=$(openclaw_ai_stack_memory_injection_text "$input_text" 2>/dev/null || true)
+    memory_injection=$(openclaw_ai_stack_memory_context_text "$input_text" 2>/dev/null || true)
     memory_for_execution="$memory_injection"
     if python3 - "$route_json" <<'PY' >/dev/null 2>&1
 import json, sys
@@ -6181,6 +6616,9 @@ PY
     openclaw_ai_stack_evolve_record "$route_json" >/dev/null 2>&1 || true
     openclaw_ai_stack_autotune_apply >/dev/null 2>&1 || true
     openclaw_ai_stack_predictive_cache_store "$input_text" "$route_json" >/dev/null 2>&1 || true
+    openclaw_ai_stack_context_record_turn "$route_json" >/dev/null 2>&1 || true
+    openclaw_memory_auto_capture_from_request "$input_text" "$route_json" >/dev/null 2>&1 || true
+    openclaw_memory_extension_automerge >/dev/null 2>&1 || true
     openclaw_ai_stack_write_route_status "$route_json" "$lock_result" >/dev/null 2>&1 || true
     python3 - "$route_json" "$lock_result" <<'PY'
 import json
@@ -6916,7 +7354,7 @@ openclaw_panel_menu() {
     echo
     skpl_ui_section "配置与接入"
     skpl_ui_menu_item 6 "API 管理" "Provider、Key、模型同步"
-    skpl_ui_menu_item 7 "设备连接" "Telegram / WhatsApp / QQ"
+    skpl_ui_menu_item 7 "渠道连接" "Telegram / WhatsApp / QQ 入口与诊断"
     skpl_ui_menu_item 8 "插件管理" "扩展插件"
     skpl_ui_menu_item 9 "技能管理" "导入和管理技能"
     skpl_ui_menu_item 10 "编辑主配置" "openclaw.json"
@@ -6924,16 +7362,13 @@ openclaw_panel_menu() {
 
     echo
       skpl_ui_section "运行与数据"
-      skpl_ui_menu_item 12 "健康检测与修复" "自动修复常见问题"
-      skpl_ui_menu_item 13 "WebUI 访问设置" "Token、域名、访问入口"
-      skpl_ui_menu_item 22 "网络诊断" "汇总代理、WebUI 与 WhatsApp 状态"
-      skpl_ui_menu_item 23 "官方诊断中心" "status、doctor、probe 与最近日志"
+      skpl_ui_menu_item 12 "健康检测与修复" "执行官方 doctor 修复与模型同步"
+      skpl_ui_menu_item 13 "WebUI 入口与待审批请求" "Token、本机入口、已记录域名与请求查看"
       skpl_ui_menu_item 14 "TUI 对话" "进入命令行对话界面"
-      skpl_ui_menu_item 15 "记忆管理" "索引、方案、融合检索"
+      skpl_ui_menu_item 15 "记忆管理" "方案应用、长期记忆、本地检索、经验沉淀"
       skpl_ui_menu_item 16 "权限管理" "策略与白名单"
-      skpl_ui_menu_item 17 "多智能体管理" "Agent、绑定、会话"
-      skpl_ui_menu_item 18 "备份与还原" "记忆与项目快照"
-      skpl_ui_menu_item 21 "EvoMap 管理" "安装、更新与混合记忆"
+      skpl_ui_menu_item 17 "多智能体管理" "Agent、绑定与会话缓存"
+      skpl_ui_menu_item 18 "备份与还原" "记忆、配置与项目文件归档"
 
     echo
     skpl_ui_section "维护"
@@ -8348,13 +8783,13 @@ PY
   }
 
   openclaw_api_providers_showcase() {
-    send_stats "OpenClaw API厂商推荐"
+    send_stats "OpenClaw API外部入口"
 
     clear
     echo ""
     echo -e "${gl_kjlan}╔════════════════════════════════════════════════════════════╗${gl_bai}"
-    echo -e "${gl_kjlan}║${gl_bai}            ${gl_huang}🌟 API 厂商推荐列表${gl_bai}                          ${gl_kjlan}║${gl_bai}"
-    echo -e "${gl_kjlan}║${gl_bai}            ${gl_zi}部分入口含 AFF${gl_bai}                            ${gl_kjlan}║${gl_bai}"
+    echo -e "${gl_kjlan}║${gl_bai}            ${gl_huang}🌟 API 外部入口列表${gl_bai}                          ${gl_kjlan}║${gl_bai}"
+    echo -e "${gl_kjlan}║${gl_bai}            ${gl_zi}以下为外部官网与注册链接${gl_bai}                      ${gl_kjlan}║${gl_bai}"
     echo -e "${gl_kjlan}╚════════════════════════════════════════════════════════════╝${gl_bai}"
     echo ""
     echo -e "  ${gl_lv}● DeepSeek${gl_bai}"
@@ -8400,7 +8835,7 @@ PY
     echo -e "    ${gl_kjlan}https://ai.baishan.com/${gl_bai}"
     echo ""
     echo -e "${gl_kjlan}────────────────────────────────────────────────────────────${gl_bai}"
-    echo -e "  ${gl_zi}图例：${gl_lv}● 官方入口${gl_bai}  ${gl_huang}● AFF 推荐入口${gl_bai}"
+    echo -e "  ${gl_zi}图例：${gl_lv}● 官方入口${gl_bai}  ${gl_huang}● 注册入口${gl_bai}"
     echo ""
     echo -e "${gl_huang}提示：复制链接到浏览器打开即可访问${gl_bai}"
     echo ""
@@ -8419,7 +8854,7 @@ PY
       skpl_ui_menu_item 2 "同步模型列表" "刷新供应商可用模型"
       skpl_ui_menu_item 3 "切换 API 类型" "completions / responses"
       skpl_ui_menu_item 4 "删除 API" "移除现有提供商"
-      skpl_ui_menu_item 5 "厂商推荐" "查看推荐入口"
+      skpl_ui_menu_item 5 "外部入口" "查看常见 Provider 官网与注册入口"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -er api_choice
@@ -8901,7 +9336,7 @@ PY
 
     openclaw_run_official_diagnostics() {
       clear
-      skpl_ui_header "官方诊断中心" "按 OpenClaw 官方推荐顺序执行诊断"
+      skpl_ui_header "官方诊断命令汇总" "顺序执行 OpenClaw 官方诊断命令并展示结果"
       echo
       skpl_ui_section "1. Runtime 状态"
       timeout 12 openclaw status 2>/dev/null || true
@@ -8998,7 +9433,7 @@ PY
       local choice value
       while true; do
         clear
-        skpl_ui_header "WhatsApp 高级设置" "官方高频配置项"
+    skpl_ui_header "WhatsApp 高级设置" "常用配置项"
         skpl_ui_kv "dmPolicy" "$(openclaw_json_get_string '.channels.whatsapp.dmPolicy // "pairing"' 2>/dev/null || echo pairing)"
         skpl_ui_kv "groupPolicy" "$(openclaw_json_get_string '.channels.whatsapp.groupPolicy // "allowlist"' 2>/dev/null || echo allowlist)"
         skpl_ui_kv "replyToMode" "$(openclaw_json_get_string '.channels.whatsapp.replyToMode // "off"' 2>/dev/null || echo off)"
@@ -9046,7 +9481,7 @@ PY
       local choice value
       while true; do
         clear
-        skpl_ui_header "Telegram 高级设置" "官方高频配置项"
+    skpl_ui_header "Telegram 高级设置" "常用配置项"
         skpl_ui_kv "dmPolicy" "$(openclaw_json_get_string '.channels.telegram.dmPolicy // "pairing"' 2>/dev/null || echo pairing)"
         skpl_ui_kv "groupPolicy" "$(openclaw_json_get_string '.channels.telegram.groupPolicy // "allowlist"' 2>/dev/null || echo allowlist)"
         skpl_ui_kv "streaming.mode" "$(openclaw_json_get_string '.channels.telegram.streaming.mode // "partial"' 2>/dev/null || echo partial)"
@@ -9285,11 +9720,12 @@ PYTHON_EOF
     send_stats "插件管理"
     while true; do
       clear
-      skpl_ui_header "插件管理" "安装、启用、删除与常用插件参考"
+      skpl_ui_header "插件管理" "安装、启用、删除与示例插件参考"
       skpl_ui_section "当前插件列表"
       openclaw_get_plugins_list_cached
       echo
-      skpl_ui_section "推荐插件"
+      skpl_ui_section "示例插件"
+      echo "以下仅为可尝试插件，实际可用性取决于当前环境与插件版本。"
       echo "直接复制括号内的 ID 即可："
       echo "📱 通讯渠道:"
       echo "  - [feishu]        # 飞书/Lark 集成"
@@ -9415,13 +9851,14 @@ PYTHON_EOF
     send_stats "技能管理"
     while true; do
       clear
-      skpl_ui_header "技能管理" "安装、删除与查看推荐技能"
+      skpl_ui_header "技能管理" "安装、删除与查看示例技能"
       skpl_ui_section "当前已安装技能"
       openclaw skills list
       echo
 
       # 输出推荐的实用技能列表
-      skpl_ui_section "推荐技能"
+      skpl_ui_section "示例技能"
+      echo "以下仅为可尝试技能，部分技能依赖桌面系统、外部账号或额外工具。"
       echo "可直接复制名称输入："
       echo "github             # 管理 GitHub Issues/PR/CI (gh CLI)"
       echo "notion             # 操作 Notion 页面、数据库和块"
@@ -9988,7 +10425,7 @@ exit 1
     provider_summary=$(openclaw_domestic_provider_summary)
 
     clear
-    skpl_ui_header "网络诊断" "汇总网关、本地入口、域名代理与 WhatsApp 状态"
+    skpl_ui_header "网络状态总览" "汇总网关、本地入口、域名记录、代理与 WhatsApp 状态"
     skpl_ui_section "网关与代理"
     openclaw_network_diagnosis_status "网关监听" "$(openclaw_gateway_port_reachable && echo 正常 || echo 未就绪)"
     skpl_ui_kv "网关地址" "${scheme}://127.0.0.1:${port}/"
@@ -10210,25 +10647,27 @@ PY
     local choice
     while true; do
       clear
-      skpl_ui_header "渠道诊断与高级设置" "官方 probe、诊断与网关参数入口"
+      skpl_ui_header "渠道诊断与高级设置" "网络状态、官方诊断、probe 与网关参数入口"
       echo
       skpl_ui_section "诊断"
-      skpl_ui_menu_item 1 "官方诊断中心" "status / gateway status / doctor / probe / logs"
-      skpl_ui_menu_item 2 "单渠道 Probe" "按渠道执行 channels status --probe"
+      skpl_ui_menu_item 1 "网络状态总览" "查看代理、WebUI、本机入口与 WhatsApp 状态"
+      skpl_ui_menu_item 2 "官方诊断命令汇总" "status / gateway status / doctor / probe / logs"
+      skpl_ui_menu_item 3 "单渠道 Probe" "按渠道执行 channels status --probe"
       echo
       skpl_ui_section "高级设置"
-      skpl_ui_menu_item 3 "WhatsApp 高级设置" "dmPolicy、replyToMode、historyLimit 等"
-      skpl_ui_menu_item 4 "Telegram 高级设置" "streaming、timeout、proxy 等"
-      skpl_ui_menu_item 5 "Gateway 高级设置" "reload 与健康监控参数"
+      skpl_ui_menu_item 4 "WhatsApp 高级设置" "dmPolicy、replyToMode、historyLimit 等"
+      skpl_ui_menu_item 5 "Telegram 高级设置" "streaming、timeout、proxy 等"
+      skpl_ui_menu_item 6 "Gateway 高级设置" "reload 与健康监控参数"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请选择: "
       read -e choice
       case "$choice" in
-        1) openclaw_run_official_diagnostics ;;
-        2) openclaw_probe_single_channel_menu ;;
-        3) openclaw_whatsapp_advanced_menu ;;
-        4) openclaw_telegram_advanced_menu ;;
-        5) openclaw_gateway_advanced_menu ;;
+        1) openclaw_network_diagnosis_menu ;;
+        2) openclaw_run_official_diagnostics ;;
+        3) openclaw_probe_single_channel_menu ;;
+        4) openclaw_whatsapp_advanced_menu ;;
+        5) openclaw_telegram_advanced_menu ;;
+        6) openclaw_gateway_advanced_menu ;;
         0) return 0 ;;
         *)
           echo "无效的选择，请重试。"
@@ -10510,7 +10949,7 @@ PY
     send_stats "机器人对接"
     while true; do
       clear
-      skpl_ui_header "机器人连接对接" "渠道连接与设备授权分离，海外渠道自动继承安装代理端口"
+      skpl_ui_header "渠道连接" "渠道接入、授权提示与常用诊断入口"
       openclaw_show_bot_local_status_block
       echo
       echo "代理规则：Telegram / WhatsApp / Discord / Slack 自动使用安装时输入的代理端口。"
@@ -10525,8 +10964,8 @@ PY
       skpl_ui_menu_item 3 "WhatsApp 对接" "自动写入代理并执行官方登录"
       skpl_ui_menu_item 4 "Discord 对接" "自动写入代理并启用渠道"
       skpl_ui_menu_item 5 "Slack 对接" "自动写入代理并启用渠道"
-      skpl_ui_menu_item 6 "QQ 对接" "查看官方接入地址"
-      skpl_ui_menu_item 7 "微信对接" "安装 Weixin CLI"
+      skpl_ui_menu_item 6 "QQ 官方入口" "显示官方接入地址"
+      skpl_ui_menu_item 7 "微信 CLI 安装" "执行 Weixin CLI 安装，后续按官方流程继续"
       skpl_ui_menu_item 8 "渠道诊断与高级设置" "官方诊断、单渠道 Probe、Telegram/WhatsApp/Gateway 设置"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
@@ -10624,13 +11063,13 @@ PY
         ;;
       project)
         case "$rel" in
-          openclaw.json|workspace/*|extensions/*|skills/*|prompts/*|tools/*|telegram/*|feishu/*|whatsapp/*|discord/*|slack/*|qqbot/*|logs/*|memos/*|DREAMS.md|memory/dreaming/*) return 0 ;;
+          openclaw.json|workspace/*|extensions/*|skills/*|prompts/*|tools/*|telegram/*|feishu/*|whatsapp/*|discord/*|slack/*|qqbot/*|logs/*|memos/*|DREAMS.md|memory/dreaming/*|ai-stack/*) return 0 ;;
           *) return 1 ;;
         esac
         ;;
       bundle)
         case "$rel" in
-          openclaw-root/openclaw.json|openclaw-root/workspace/*|openclaw-root/extensions/*|openclaw-root/skills/*|openclaw-root/prompts/*|openclaw-root/tools/*|openclaw-root/telegram/*|openclaw-root/feishu/*|openclaw-root/whatsapp/*|openclaw-root/discord/*|openclaw-root/slack/*|openclaw-root/qqbot/*|openclaw-root/logs/*|openclaw-root/memos/*|openclaw-root/DREAMS.md|openclaw-root/memory/dreaming/*|agents/*/MEMORY.md|agents/*/memory/*|hybrid-memory/*|memory-extension/*|evomap/*|evomap-memory/*|evomap-backups/*|memos/*|memory-config/openclaw.json|enterprise-memory/state.json) return 0 ;;
+          openclaw-root/openclaw.json|openclaw-root/workspace/*|openclaw-root/extensions/*|openclaw-root/skills/*|openclaw-root/prompts/*|openclaw-root/tools/*|openclaw-root/telegram/*|openclaw-root/feishu/*|openclaw-root/whatsapp/*|openclaw-root/discord/*|openclaw-root/slack/*|openclaw-root/qqbot/*|openclaw-root/logs/*|openclaw-root/memos/*|openclaw-root/DREAMS.md|openclaw-root/memory/dreaming/*|agents/*/MEMORY.md|agents/*/memory/*|hybrid-memory/*|memory-extension/*|ai-stack/*|evomap/*|evomap-memory/*|evomap-backups/*|memos/*|memory-config/openclaw.json|enterprise-memory/state.json) return 0 ;;
           *) return 1 ;;
         esac
         ;;
@@ -10782,13 +11221,14 @@ for item in workspaces:
 " "$workspaces_json" "$tmp_payload"
     [ -d "$SKPL_HYBRID_MEMORY_ROOT" ] && cp -a "$SKPL_HYBRID_MEMORY_ROOT" "$tmp_payload/hybrid-memory"
     [ -d "$SKPL_MEMORY_EXTENSION_ROOT" ] && cp -a "$SKPL_MEMORY_EXTENSION_ROOT" "$tmp_payload/memory-extension"
+    [ -d "$SKPL_AI_STACK_ROOT" ] && cp -a "$SKPL_AI_STACK_ROOT" "$tmp_payload/ai-stack"
     [ -d "$SKPL_MEMOS_ROOT" ] && cp -a "$SKPL_MEMOS_ROOT" "$tmp_payload/memos"
     [ -d "$EVOMAP_MEMORY_DIR" ] && cp -a "$EVOMAP_MEMORY_DIR" "$tmp_payload/evomap-memory"
     if ! find "$tmp_payload" -mindepth 1 -print -quit | grep -q .; then
       echo "❌ 未找到可备份的记忆文件"; rm -rf "$tmp_payload"; break_end; return 1
     fi
     if openclaw_pack_backup_archive "memory-full" "multi-agent" "$tmp_payload" "$out_file"; then
-      echo "✅ 记忆全量备份完成 (含多智能体/混合记忆/MemOS): $out_file"; openclaw_offer_transfer_hint "$out_file"
+      echo "✅ 记忆全量备份完成 (含多智能体/混合记忆/AI 栈/MemOS): $out_file"; openclaw_offer_transfer_hint "$out_file"
     else
       echo "❌ 记忆全量备份失败"
     fi
@@ -10802,7 +11242,7 @@ for item in workspaces:
     local tmp_unpack=$(mktemp -d) || return 1
     local pkg_dir=$(openclaw_prepare_import_archive "memory-full" "$archive_path" "$tmp_unpack") || { rm -rf "$tmp_unpack"; break_end; return 1; }
     local workspaces_json=$(openclaw_get_all_agent_workspaces)
-    python3 - "$workspaces_json" "$pkg_dir/payload" "$SKPL_HYBRID_MEMORY_ROOT" "$SKPL_MEMOS_ROOT" "$EVOMAP_MEMORY_DIR" "$SKPL_MEMORY_EXTENSION_ROOT" <<'PY'
+    python3 - "$workspaces_json" "$pkg_dir/payload" "$SKPL_HYBRID_MEMORY_ROOT" "$SKPL_MEMOS_ROOT" "$EVOMAP_MEMORY_DIR" "$SKPL_MEMORY_EXTENSION_ROOT" "$SKPL_AI_STACK_ROOT" <<'PY'
 import json, sys, os, shutil
 
 workspaces = {item["id"]: item["ws"] for item in json.loads(sys.argv[1])}
@@ -10811,6 +11251,7 @@ hybrid_root = sys.argv[3]
 memos_root = sys.argv[4]
 evomap_memory_dir = sys.argv[5]
 memory_extension_root = sys.argv[6]
+ai_stack_root = sys.argv[7]
 
 def copy_replace(src, dest):
     parent = os.path.dirname(dest)
@@ -10845,6 +11286,7 @@ for src_name, dest in [
     ("memos", memos_root),
     ("evomap-memory", evomap_memory_dir),
     ("memory-extension", memory_extension_root),
+    ("ai-stack", ai_stack_root),
 ]:
     src = os.path.join(payload_dir, src_name)
     if os.path.exists(src):
@@ -10867,7 +11309,7 @@ PY
 
     if [ -d "$openclaw_root" ]; then
       mkdir -p "$tmp_payload/openclaw-root"
-      for d in workspace extensions skills prompts tools telegram feishu whatsapp discord slack qqbot logs memos; do
+      for d in workspace extensions skills prompts tools telegram feishu whatsapp discord slack qqbot logs memos ai-stack; do
         [ -e "$openclaw_root/$d" ] && cp -a "$openclaw_root/$d" "$tmp_payload/openclaw-root/"
       done
       [ -f "$openclaw_root/openclaw.json" ] && cp -a "$openclaw_root/openclaw.json" "$tmp_payload/openclaw-root/"
@@ -10893,6 +11335,7 @@ for item in workspaces:
 
     [ -d "$SKPL_HYBRID_MEMORY_ROOT" ] && cp -a "$SKPL_HYBRID_MEMORY_ROOT" "$tmp_payload/hybrid-memory"
     [ -d "$SKPL_MEMORY_EXTENSION_ROOT" ] && cp -a "$SKPL_MEMORY_EXTENSION_ROOT" "$tmp_payload/memory-extension"
+    [ -d "$SKPL_AI_STACK_ROOT" ] && cp -a "$SKPL_AI_STACK_ROOT" "$tmp_payload/ai-stack"
     [ -d "$SKPL_MEMOS_ROOT" ] && cp -a "$SKPL_MEMOS_ROOT" "$tmp_payload/memos"
     [ -d "$EVOMAP_DIR" ] && cp -a "$EVOMAP_DIR" "$tmp_payload/evomap"
     [ -d "$EVOMAP_MEMORY_DIR" ] && cp -a "$EVOMAP_MEMORY_DIR" "$tmp_payload/evomap-memory"
@@ -10915,7 +11358,7 @@ for item in workspaces:
 
     if openclaw_pack_backup_archive "openclaw-bundle" "full" "$tmp_payload" "$out_file"; then
       echo "✅ 统一全量备份完成: $out_file"
-      echo "包含: OpenClaw 项目、所有智能体记忆、记忆方案配置、混合记忆、MemOS、Dream Diary、企业增强状态、EvoMap 目录与 EvoMap 备份目录。"
+      echo "包含: OpenClaw 项目、所有智能体记忆、记忆方案配置、AI 栈配置与状态、混合记忆、MemOS、Dream Diary、企业增强状态、EvoMap 目录与 EvoMap 备份目录。"
       openclaw_offer_transfer_hint "$out_file"
     else
       echo "❌ 统一全量备份失败"
@@ -10979,7 +11422,7 @@ for item in workspaces:
     evomap_stop_loop >/dev/null 2>&1 || true
 
     workspaces_json=$(openclaw_get_all_agent_workspaces)
-    python3 - "$workspaces_json" "$pkg_dir/payload" "$openclaw_root" "$SKPL_HYBRID_MEMORY_ROOT" "$EVOMAP_DIR" "$EVOMAP_MEMORY_DIR" "$EVOMAP_BACKUP_DIR" "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" <<'PY'
+    python3 - "$workspaces_json" "$pkg_dir/payload" "$openclaw_root" "$SKPL_HYBRID_MEMORY_ROOT" "$EVOMAP_DIR" "$EVOMAP_MEMORY_DIR" "$EVOMAP_BACKUP_DIR" "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" "$SKPL_AI_STACK_ROOT" <<'PY'
 import json, os, shutil, sys
 
 workspaces = {item['id']: item['ws'] for item in json.loads(sys.argv[1])}
@@ -10990,6 +11433,7 @@ evomap_dir = sys.argv[5]
 evomap_memory_dir = sys.argv[6]
 evomap_backup_dir = sys.argv[7]
 enterprise_state_file = sys.argv[8]
+ai_stack_root = sys.argv[9]
 
 def copy_replace(src, dest):
     parent = os.path.dirname(dest)
@@ -11026,6 +11470,7 @@ if os.path.isdir(agents_root):
 
 for src_name, dest in [
     ('hybrid-memory', hybrid_root),
+    ('ai-stack', ai_stack_root),
     ('evomap', evomap_dir),
     ('evomap-memory', evomap_memory_dir),
     ('evomap-backups', evomap_backup_dir),
@@ -11085,7 +11530,7 @@ PY
 
     if [ "$export_mode" = "2" ]; then
       mode_label="full"
-      for d in workspace extensions skills prompts tools memos; do
+      for d in workspace extensions skills prompts tools memos ai-stack; do
         [ -e "$openclaw_root/$d" ] && cp -a "$openclaw_root/$d" "$tmp_payload/"
       done
       [ -f "$openclaw_root/openclaw.json" ] && cp -a "$openclaw_root/openclaw.json" "$tmp_payload/"
@@ -11097,7 +11542,7 @@ PY
     else
       [ -d "$openclaw_root/workspace" ] && cp -a "$openclaw_root/workspace" "$tmp_payload/"
       [ -f "$openclaw_root/openclaw.json" ] && cp -a "$openclaw_root/openclaw.json" "$tmp_payload/"
-      for d in extensions skills prompts tools memos; do
+      for d in extensions skills prompts tools memos ai-stack; do
         [ -e "$openclaw_root/$d" ] && cp -a "$openclaw_root/$d" "$tmp_payload/"
       done
       [ -f "$openclaw_root/$SKPL_MEMORY_DREAMS_FILENAME" ] && cp -a "$openclaw_root/$SKPL_MEMORY_DREAMS_FILENAME" "$tmp_payload/"
@@ -12429,7 +12874,7 @@ PY
         skpl_ui_menu_item 5 "本地模型运行时" "安装 ollama 并拉取本地文本/代码模型"
         skpl_ui_menu_item 6 "一键推荐配置" "写入推荐的文本/视觉/代码模型组合"
         skpl_ui_menu_item 7 "安装后验收检查" "检查 openclaw、gateway、ollama、记忆索引状态"
-        skpl_ui_menu_item 8 "一键完整本地落地" "安装 ollama、拉模型、启用记忆、重建索引、验收"
+        skpl_ui_menu_item 8 "一键完整本地落地" "安装 ollama、拉取推荐模型、启用本地检索并执行验收"
         skpl_ui_menu_item 9 "一键应用并重启" "保存配置并让 AI 立即生效"
         skpl_ui_menu_item 0 "返回上一级"
         skpl_ui_footer_prompt "请选择: "
@@ -13345,16 +13790,16 @@ openclaw_memory_enable_local_retrieval() {
   openclaw_memory_local_retrieval_menu() {
     while true; do
       clear
-      skpl_ui_header "本地记忆检索加速" "SQLite + LanceDB + 本地 embedding 模型"
+      skpl_ui_header "本地检索与索引" "管理 SQLite、LanceDB、embedding 模型和索引；大模型安装在完整本地 AI 栈里处理"
       openclaw_runtime_self_heal || true
       openclaw_memory_local_retrieval_status
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "一键启用 Local" "下载 embedding 模型并启用本地向量检索"
+      skpl_ui_menu_item 1 "启用本地检索" "下载 embedding 模型并启用本地向量检索"
       skpl_ui_menu_item 2 "重建全部索引" "提升召回率与命中率"
-      skpl_ui_menu_item 3 "查看预热日志" "查看模型下载与索引预热进度"
-      skpl_ui_menu_item 4 "本地模型运行时" "安装 ollama 并准备本地大模型"
-      skpl_ui_menu_item 5 "一键完整本地落地" "安装模型、启用检索、重建索引、验收"
+      skpl_ui_menu_item 3 "查看预热日志" "查看 embedding 模型准备与索引预热日志"
+      skpl_ui_menu_item 4 "查看运行时说明" "说明 embedding 检索与 Ollama 大模型的职责边界"
+      skpl_ui_menu_item 5 "一键完整本地落地" "跳转完整本地 AI 栈：安装 Ollama、拉模型、启用检索、验收"
       skpl_ui_menu_item 6 "自动部署菜单" "进入现有高级记忆部署入口"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
@@ -13373,11 +13818,14 @@ openclaw_memory_enable_local_retrieval() {
           break_end
           ;;
         4)
-          openclaw_ollama_quick_setup_menu
+          echo "本地检索与索引只负责 embedding 模型、SQLite/LanceDB 和索引。"
+          echo "完整本地 AI 栈才负责安装 Ollama 运行时，以及文本、代码、视觉模型。"
+          echo "安装 Ollama 前会检查 curl、ca-certificates、tar、zstd。"
+          echo "安装后会优先尝试 systemd 启动 ollama，失败时再尝试 ollama serve。"
+          break_end
           ;;
         5)
-          openclaw_full_local_stack_setup
-          break_end
+          openclaw_full_local_ai_stack_menu
           ;;
         6)
           openclaw_memory_auto_setup_menu
@@ -13649,6 +14097,7 @@ openclaw_memory_apply_current_scheme() {
   local config_file
   config_file=$(openclaw_get_config_file)
   echo "正在应用当前全栈分层记忆方案..."
+  openclaw_runtime_self_heal || return 1
   openclaw_memory_prepare_workspace_all >/dev/null 2>&1 || true
   openclaw_apply_recommended_model_profile >/dev/null 2>&1 || true
   openclaw_optimize_memory_and_skills >/dev/null 2>&1 || true
@@ -13687,51 +14136,675 @@ if memory_cfg_path.exists():
         memory_cfg = json.loads(memory_cfg_path.read_text(encoding='utf-8'))
     except Exception:
         memory_cfg = {}
-memory_cfg['enabled'] = True
-memory_cfg.setdefault('shortTerm', {})['enabled'] = True
-memory_cfg.setdefault('midTerm', {})['enabled'] = True
-memory_cfg.setdefault('longTerm', {})['enabled'] = True
+memory_cfg.setdefault('enabled', True)
+memory_cfg.setdefault('shortTerm', {}).setdefault('enabled', True)
+memory_cfg.setdefault('midTerm', {}).setdefault('enabled', True)
+memory_cfg.setdefault('longTerm', {}).setdefault('enabled', True)
 memory_cfg.setdefault('longTerm', {})['autoExtract'] = memory_cfg.get('longTerm', {}).get('autoExtract') or 'balanced'
-memory_cfg.setdefault('knowledgeBase', {})['enabled'] = True
+memory_cfg.setdefault('knowledgeBase', {}).setdefault('enabled', True)
 privacy = memory_cfg.setdefault('privacy', {})
-privacy['localOnly'] = True
-privacy['maskSensitive'] = True
+privacy.setdefault('localOnly', True)
+privacy.setdefault('maskSensitive', True)
 privacy.setdefault('blockedKeywords', [])
 privacy.setdefault('encryptAtRest', False)
-privacy['cloudUploadMemory'] = False
+privacy.setdefault('cloudUploadMemory', False)
 injection = memory_cfg.setdefault('injection', {})
-injection['maxContextPercent'] = 15
-injection['similarityThreshold'] = 0.58
+injection.setdefault('maxContextPercent', 15)
+injection.setdefault('similarityThreshold', 0.58)
 maintenance = memory_cfg.setdefault('maintenance', {})
 maintenance['cleanupDays'] = int(maintenance.get('cleanupDays', 30) or 30)
 maintenance['autoUpdateMinutes'] = int(maintenance.get('autoUpdateMinutes', 30) or 30)
 memory_cfg_path.write_text(json.dumps(memory_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 PY
   memory_extension_prepare >/dev/null 2>&1 || true
+  echo "正在安装并启用本地记忆检索..."
+  OPENCLAW_MEMORY_CONFIG_ONLY="false"
+  OPENCLAW_MEMORY_PREHEAT="true"
+  openclaw_memory_enable_local_retrieval || {
+    echo "❌ 当前记忆方案写入成功，但本地 embedding 模型或检索索引落地失败"
+    return 1
+  }
+  if openclaw_has_command ollama; then
+    openclaw_ensure_ollama_running >/dev/null 2>&1 || true
+  else
+    echo "ℹ️ 未检测到 ollama，本次已完成记忆 embedding 模型和本地检索落地。"
+    echo "ℹ️ 如需继续安装本地文本/代码/视觉模型，可进入【完整本地 AI 栈】或相关模型设置菜单。"
+  fi
   openclaw_validate_global_tools_runtime >/dev/null 2>&1 || true
   openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
-  echo "✅ 当前记忆方案已一键应用"
+  openclaw_postinstall_acceptance_check >/dev/null 2>&1 || true
+  echo "✅ 当前记忆方案已一键应用并完成本地记忆检索落地"
+}
+
+openclaw_memory_scheme_settings_menu() {
+  local enabled short_enabled short_max mid_enabled mid_days long_enabled extract_strength kb_enabled kb_weight
+  local local_only mask_sensitive encrypt_at_rest cloud_upload blocked max_percent threshold cleanup_days auto_minutes
+  while true; do
+    memory_extension_prepare
+    enabled=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('enabled', True) else 'false')
+PY
+)
+    short_enabled=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('shortTerm', {}).get('enabled', True) else 'false')
+PY
+)
+    short_max=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('shortTerm', {}).get('maxItems', 24))
+PY
+)
+    mid_enabled=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('midTerm', {}).get('enabled', True) else 'false')
+PY
+)
+    mid_days=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('midTerm', {}).get('retentionDays', 14))
+PY
+)
+    long_enabled=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('longTerm', {}).get('enabled', True) else 'false')
+PY
+)
+    extract_strength=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('longTerm', {}).get('autoExtract', 'balanced'))
+PY
+)
+    kb_enabled=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('knowledgeBase', {}).get('enabled', True) else 'false')
+PY
+)
+    kb_weight=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('knowledgeBase', {}).get('weight', 1.0))
+PY
+)
+    local_only=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('privacy', {}).get('localOnly', True) else 'false')
+PY
+)
+    mask_sensitive=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('privacy', {}).get('maskSensitive', True) else 'false')
+PY
+)
+    encrypt_at_rest=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('privacy', {}).get('encryptAtRest', False) else 'false')
+PY
+)
+    cloud_upload=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('privacy', {}).get('cloudUploadMemory', False) else 'false')
+PY
+)
+    blocked=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(','.join(cfg.get('privacy', {}).get('blockedKeywords', [])))
+PY
+)
+    max_percent=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('injection', {}).get('maxContextPercent', 15))
+PY
+)
+    threshold=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('injection', {}).get('similarityThreshold', 0.58))
+PY
+)
+    cleanup_days=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('maintenance', {}).get('cleanupDays', 30))
+PY
+)
+    auto_minutes=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('maintenance', {}).get('autoUpdateMinutes', 30))
+PY
+)
+
+    clear
+    skpl_ui_header "记忆方案设置" "管理短期、中期、长期、知识库记忆，以及隐私和高级参数"
+    echo "1. 记忆总开关: $enabled"
+    echo "2. 短期记忆开关: $short_enabled"
+    echo "3. 短期记忆长度: $short_max"
+    echo "4. 中期记忆开关: $mid_enabled"
+    echo "5. 中期记忆保留天数: $mid_days"
+    echo "6. 长期记忆开关: $long_enabled"
+    echo "7. 长期记忆自动提取强度: $extract_strength"
+    echo "8. 知识库记忆开关: $kb_enabled"
+    echo "9. 知识库检索权重: $kb_weight"
+    echo "10. 本地 only: $local_only"
+    echo "11. 敏感信息自动脱敏: $mask_sensitive"
+    echo "12. 本地加密存储: $encrypt_at_rest"
+    echo "13. 云端推理上传记忆: $cloud_upload"
+    echo "14. 禁止记忆关键词: ${blocked:-<空>}"
+    echo "15. 记忆注入上限(%): $max_percent"
+    echo "16. 检索相似度阈值: $threshold"
+    echo "17. 过时记忆清理周期(天): $cleanup_days"
+    echo "18. 自动更新频率(分钟): $auto_minutes"
+    echo "19. 重置为当前方案默认值"
+    read -e -p "输入要修改的编号(0 返回): " settings_choice
+    case "$settings_choice" in
+      1) read -e -p "输入 true/false: " v; memory_extension_update_config_field "enabled" "$v" bool ;;
+      2) read -e -p "输入 true/false: " v; memory_extension_update_config_field "shortTerm.enabled" "$v" bool ;;
+      3) read -e -p "输入短期记忆最大条数: " v; memory_extension_update_config_field "shortTerm.maxItems" "$v" int ;;
+      4) read -e -p "输入 true/false: " v; memory_extension_update_config_field "midTerm.enabled" "$v" bool ;;
+      5) read -e -p "输入中期记忆保留天数: " v; memory_extension_update_config_field "midTerm.retentionDays" "$v" int ;;
+      6) read -e -p "输入 true/false: " v; memory_extension_update_config_field "longTerm.enabled" "$v" bool ;;
+      7) read -e -p "输入 autoExtract 强度(low/balanced/high): " v; memory_extension_update_config_field "longTerm.autoExtract" "$v" string ;;
+      8) read -e -p "输入 true/false: " v; memory_extension_update_config_field "knowledgeBase.enabled" "$v" bool ;;
+      9) read -e -p "输入知识库检索权重(如 1.0): " v; memory_extension_update_config_field "knowledgeBase.weight" "$v" float ;;
+      10) read -e -p "输入 true/false: " v; memory_extension_update_config_field "privacy.localOnly" "$v" bool ;;
+      11) read -e -p "输入 true/false: " v; memory_extension_update_config_field "privacy.maskSensitive" "$v" bool ;;
+      12) read -e -p "输入 true/false: " v; memory_extension_update_config_field "privacy.encryptAtRest" "$v" bool ;;
+      13) read -e -p "输入 true/false: " v; memory_extension_update_config_field "privacy.cloudUploadMemory" "$v" bool ;;
+      14) read -e -p "输入逗号分隔关键词: " v; python3 - "$v" <<'PY' >/tmp/openclaw-memory-blocked.json
+import json, sys
+items = [x.strip() for x in sys.argv[1].split(',') if x.strip()]
+print(json.dumps(items, ensure_ascii=False))
+PY
+          memory_extension_update_config_field "privacy.blockedKeywords" "$(python3 - <<'PY'
+from pathlib import Path
+print(Path('/tmp/openclaw-memory-blocked.json').read_text(encoding='utf-8').strip())
+PY
+)" json ;;
+      15) read -e -p "输入整数百分比: " v; memory_extension_update_config_field "injection.maxContextPercent" "$v" int ;;
+      16) read -e -p "输入浮点阈值: " v; memory_extension_update_config_field "injection.similarityThreshold" "$v" float ;;
+      17) read -e -p "输入清理天数: " v; memory_extension_update_config_field "maintenance.cleanupDays" "$v" int ;;
+      18) read -e -p "输入分钟数: " v; memory_extension_update_config_field "maintenance.autoUpdateMinutes" "$v" int ;;
+      19) openclaw_memory_apply_current_scheme; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+    echo "✅ 设置已更新"
+    sleep 1
+  done
+}
+
+openclaw_memory_system_overview() {
+  local profile_json resource_summary predictive_hint sync_json sync_log sync_error_log sync_stamp
+  profile_json=$(openclaw_detect_hardware_profile_json)
+  resource_summary=$(openclaw_ai_stack_resource_status_summary 2>/dev/null || printf '%s' '未记录')
+  predictive_hint=$(openclaw_ai_stack_predictive_cache_hint "memory retrieval long term preference" 2>/dev/null || printf '%s' '未记录')
+  sync_json=$(hybrid_memory_status_json 2>/dev/null || printf '%s' '{"objects":0,"syncStamp":""}')
+  sync_log="$SKPL_HYBRID_MEMORY_SYNC_LOG"
+  sync_error_log="$SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG"
+  sync_stamp="$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE"
+  clear
+  skpl_ui_header "记忆系统总览" "查看硬件分级、资源预算、同步状态和长期记忆相关运行信息"
+  python3 - "$profile_json" "$sync_json" "$resource_summary" "$predictive_hint" "$sync_log" "$sync_error_log" "$sync_stamp" <<'PY'
+import json, os, sys
+profile = json.loads(sys.argv[1] or '{}')
+sync = json.loads(sys.argv[2] or '{}')
+resource_summary, predictive_hint, sync_log, sync_error_log, sync_stamp = sys.argv[3:8]
+tier = profile.get('tier', 'unknown')
+gpu = profile.get('gpu', {}) or {}
+budget = profile.get('budget', {}) or {}
+memory = profile.get('memory', {}) or {}
+network = profile.get('network', {}) or {}
+storage = profile.get('storage', {}) or {}
+print(f"硬件分级: {tier}")
+print(f"GPU: {gpu.get('name') or '无'} | 显存={gpu.get('vramMb', 0)}MB | 可用={gpu.get('freeVramMb', 0)}MB")
+print(f"系统内存: total={memory.get('totalMb', 0)}MB | 可用预算={budget.get('usableMemoryMb', 0)}MB")
+print(f"记忆预留: gpu={budget.get('reserveGpuMb', 0)}MB | memory={budget.get('reserveMemoryMb', 0)}MB")
+print(f"存储: {storage.get('type', 'unknown')} | free={storage.get('freeGb', 0)}GB")
+print(f"网络: online={network.get('online')} | quality={network.get('quality')} | latency={network.get('latencyMs')}")
+print(f"资源预算: {resource_summary}")
+print(f"预测缓存提示: {predictive_hint}")
+print(f"同步对象数: {sync.get('objects', 0)}")
+print(f"最近同步戳: {sync.get('syncStamp') or '-'}")
+print(f"同步日志: {sync_log if os.path.exists(sync_log) else '未生成'}")
+print(f"同步错误日志: {sync_error_log if os.path.exists(sync_error_log) else '未生成'}")
+print(f"同步状态文件: {sync_stamp if os.path.exists(sync_stamp) else '未生成'}")
+PY
+}
+
+openclaw_memory_sync_menu() {
+  while true; do
+    clear
+    skpl_ui_header "同步与资源" "查看混合记忆同步状态、同步日志、资源预算与硬件分级"
+    skpl_ui_menu_item 1 "记忆系统总览" "查看硬件分级、资源预算、同步状态和相关运行提示"
+    skpl_ui_menu_item 2 "立即同步记忆" "执行一次混合记忆同步，刷新当前记忆对象状态"
+    skpl_ui_menu_item 3 "查看同步状态" "查看同步对象数量、最近同步戳和当前融合状态"
+    skpl_ui_menu_item 4 "查看同步日志" "查看最近同步日志"
+    skpl_ui_menu_item 5 "查看同步错误日志" "查看同步失败日志"
+    skpl_ui_menu_item 6 "刷新资源预算状态" "重新探测硬件分级、资源预算和加速状态"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e sync_choice
+    case "$sync_choice" in
+      1) openclaw_memory_system_overview; break_end ;;
+      2) hybrid_memory_enqueue_event "memory-manual-sync" "用户在记忆面板触发同步"; hybrid_memory_sync_once; break_end ;;
+      3) hybrid_memory_status_report; break_end ;;
+      4) hybrid_memory_show_sync_log; break_end ;;
+      5) if [ -f "$SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG" ]; then python3 - "$SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+lines = path.read_text(encoding='utf-8', errors='ignore').splitlines()
+for line in lines[-80:]:
+    print(line)
+PY
+         else echo "暂无同步错误日志。"; fi; break_end ;;
+      6) openclaw_ai_stack_prepare >/dev/null 2>&1 || true; openclaw_ai_stack_detect_acceleration_state >/dev/null 2>&1 || true; openclaw_ai_stack_resource_guard_json '{"route":"search"}' >/dev/null 2>&1 || true; openclaw_memory_system_overview; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_memory_apply_quick_profile() {
+  local profile_key="$1"
+  local config_file
+  config_file=$(openclaw_get_config_file)
+  openclaw_runtime_self_heal || return 1
+  python3 - "$config_file" "$SKPL_MEMORY_EXTENSION_CONFIG" "$SKPL_AI_STACK_ROOT/config.json" "$profile_key" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+memory_cfg_path = Path(sys.argv[2])
+ai_stack_path = Path(sys.argv[3])
+profile_key = sys.argv[4]
+
+cfg = json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+memory_cfg = json.loads(memory_cfg_path.read_text(encoding='utf-8')) if memory_cfg_path.exists() else {}
+ai_cfg = json.loads(ai_stack_path.read_text(encoding='utf-8')) if ai_stack_path.exists() else {}
+
+profiles = {
+    'beginner-safe': {
+        'memory': {'maxContextPercent': 12, 'similarityThreshold': 0.6, 'autoUpdateMinutes': 60, 'cleanupDays': 15, 'cloudUploadMemory': False, 'localOnly': True},
+        'routing': {'defaultTextModel': 'ollama/qwen3:0.5b', 'defaultCodeModel': 'ollama/qwen3:0.5b'},
+        'cache': {'routeTtlSeconds': 1200, 'resultTtlSeconds': 2400, 'toolTtlSeconds': 1200},
+    },
+    'balanced-local': {
+        'memory': {'maxContextPercent': 15, 'similarityThreshold': 0.58, 'autoUpdateMinutes': 30, 'cleanupDays': 30, 'cloudUploadMemory': False, 'localOnly': True},
+        'routing': {'defaultTextModel': 'ollama/deepseek-v4:7b-instruct-q4_K_M', 'defaultCodeModel': 'ollama/qwen2.5-coder:7b'},
+        'cache': {'routeTtlSeconds': 900, 'resultTtlSeconds': 1800, 'toolTtlSeconds': 900},
+    },
+    'privacy-first': {
+        'memory': {'maxContextPercent': 10, 'similarityThreshold': 0.62, 'autoUpdateMinutes': 45, 'cleanupDays': 14, 'cloudUploadMemory': False, 'localOnly': True},
+        'routing': {'defaultTextModel': 'ollama/qwen3:1.8b', 'defaultCodeModel': 'ollama/qwen3:1.8b'},
+        'cache': {'routeTtlSeconds': 1500, 'resultTtlSeconds': 2400, 'toolTtlSeconds': 1200},
+    },
+    'cloud-power': {
+        'memory': {'maxContextPercent': 20, 'similarityThreshold': 0.55, 'autoUpdateMinutes': 20, 'cleanupDays': 45, 'cloudUploadMemory': False, 'localOnly': True},
+        'routing': {'defaultTextModel': 'google/gemini-2.5-flash', 'defaultCodeModel': 'google/gemini-2.5-flash', 'defaultVisionModel': 'google/gemini-2.5-pro'},
+        'cache': {'routeTtlSeconds': 600, 'resultTtlSeconds': 1200, 'toolTtlSeconds': 900},
+    },
+    'low-resource': {
+        'memory': {'maxContextPercent': 8, 'similarityThreshold': 0.65, 'autoUpdateMinutes': 90, 'cleanupDays': 10, 'cloudUploadMemory': False, 'localOnly': True},
+        'routing': {'defaultTextModel': 'ollama/qwen3:0.3b', 'defaultCodeModel': 'ollama/qwen3:0.5b'},
+        'cache': {'routeTtlSeconds': 1800, 'resultTtlSeconds': 1800, 'toolTtlSeconds': 1200},
+    },
+}
+
+profile = profiles.get(profile_key)
+if not profile:
+    raise SystemExit(1)
+
+memory = cfg.setdefault('memory', {})
+memory.setdefault('backend', 'qmd')
+memory.setdefault('qmd', {})['includeDefaultMemory'] = True
+cfg.setdefault('memorySearch', {})['provider'] = 'ollama'
+cfg['memorySearch'].setdefault('ollama', {})['model'] = profile['routing']['defaultTextModel'].split('/', 1)[1] if '/' in profile['routing']['defaultTextModel'] else profile['routing']['defaultTextModel']
+cfg.setdefault('tools', {}).setdefault('global', {})['enabled'] = True
+
+agents_defaults = cfg.setdefault('agents', {}).setdefault('defaults', {})
+agents_defaults.setdefault('workspace', '~/.openclaw/workspace')
+agents_defaults.setdefault('model', {})['primary'] = profile['routing']['defaultTextModel']
+agents_defaults.setdefault('imageModel', {})['primary'] = profile['routing'].get('defaultVisionModel', agents_defaults.get('imageModel', {}).get('primary', 'google/gemini-2.5-pro'))
+agents_defaults.setdefault('models', {})
+agents_defaults['models'].setdefault(profile['routing']['defaultTextModel'], {})
+agents_defaults['models'].setdefault(profile['routing']['defaultCodeModel'], {})
+
+memory_cfg.setdefault('enabled', True)
+memory_cfg.setdefault('shortTerm', {}).setdefault('enabled', True)
+memory_cfg.setdefault('midTerm', {}).setdefault('enabled', True)
+memory_cfg.setdefault('longTerm', {}).setdefault('enabled', True)
+memory_cfg.setdefault('knowledgeBase', {}).setdefault('enabled', True)
+memory_cfg.setdefault('privacy', {}).setdefault('maskSensitive', True)
+memory_cfg['privacy'].setdefault('localOnly', profile['memory']['localOnly'])
+memory_cfg['privacy'].setdefault('cloudUploadMemory', profile['memory']['cloudUploadMemory'])
+memory_cfg['privacy'].setdefault('blockedKeywords', [])
+memory_cfg['privacy'].setdefault('encryptAtRest', False)
+memory_cfg.setdefault('injection', {})['maxContextPercent'] = profile['memory']['maxContextPercent']
+memory_cfg['injection']['similarityThreshold'] = profile['memory']['similarityThreshold']
+memory_cfg.setdefault('maintenance', {})['autoUpdateMinutes'] = profile['memory']['autoUpdateMinutes']
+memory_cfg['maintenance']['cleanupDays'] = profile['memory']['cleanupDays']
+
+ai_cfg.setdefault('routing', {}).update(profile['routing'])
+ai_cfg.setdefault('cache', {}).update(profile['cache'])
+
+config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+memory_cfg_path.write_text(json.dumps(memory_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+ai_stack_path.write_text(json.dumps(ai_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+  openclaw_memory_apply_current_scheme || return 1
+  echo "✅ 已应用快速方案: $profile_key"
+}
+
+openclaw_memory_quick_profile_label() {
+  case "$1" in
+    beginner-safe) echo "新手安全版" ;;
+    balanced-local) echo "均衡本地版" ;;
+    privacy-first) echo "隐私优先版" ;;
+    cloud-power) echo "云端增强版" ;;
+    low-resource) echo "低配省资源版" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+openclaw_memory_recommend_quick_profile() {
+  local device_choice="$1"
+  local usecase_choice="$2"
+  local privacy_choice="$3"
+  local network_choice="$4"
+  local profile_json
+  profile_json=$(openclaw_detect_hardware_profile_json)
+  python3 - "$profile_json" "$device_choice" "$usecase_choice" "$privacy_choice" "$network_choice" <<'PY'
+import json
+import sys
+
+profile = json.loads(sys.argv[1])
+device_choice = sys.argv[2]
+usecase_choice = sys.argv[3]
+privacy_choice = sys.argv[4]
+network_choice = sys.argv[5]
+
+tier = profile.get('tier', 'unknown')
+network = (profile.get('network') or {}).get('quality', 'offline')
+memory_mb = int(profile.get('memoryMb') or 0)
+gpu = profile.get('gpu') or {}
+gpu_present = bool(gpu.get('present'))
+
+profile_key = 'balanced-local'
+reasons = []
+
+if privacy_choice == 'strict-local':
+    profile_key = 'privacy-first'
+    reasons.append('你选择了本地优先和更保守的记忆策略')
+elif network_choice == 'cloud' and network in ('excellent', 'normal', 'online'):
+    profile_key = 'cloud-power'
+    reasons.append('当前网络可用，适合启用云端增强能力')
+elif device_choice == 'low' or tier in ('emergency-cpu', 'entry-cpu', 'entry-gpu') or memory_mb < 8192:
+    profile_key = 'low-resource'
+    reasons.append('当前设备更适合轻量模型和省资源配置')
+elif usecase_choice == 'starter':
+    profile_key = 'beginner-safe'
+    reasons.append('你更适合先用稳妥方案快速上手')
+elif usecase_choice == 'multimodal' and network in ('excellent', 'normal', 'online'):
+    profile_key = 'cloud-power'
+    reasons.append('多模态任务配合云端视觉模型更省心')
+elif usecase_choice == 'offline':
+    profile_key = 'privacy-first' if memory_mb < 12288 else 'balanced-local'
+    reasons.append('离线场景优先本地记忆和本地模型')
+elif usecase_choice == 'coding' and (gpu_present or memory_mb >= 12288):
+    profile_key = 'balanced-local'
+    reasons.append('代码场景更适合均衡本地模型组合')
+elif device_choice == 'high' or tier in ('golden-gpu', 'flagship-gpu', 'workstation', 'server', 'advanced-cpu-plus'):
+    profile_key = 'balanced-local'
+    reasons.append('当前设备有空间运行更完整的本地方案')
+else:
+    reasons.append('综合硬件、用途和网络后，均衡方案更稳妥')
+
+if network_choice == 'offline':
+    if profile_key == 'cloud-power':
+        profile_key = 'balanced-local'
+    reasons.append('你选择了离线模式，结果会优先本地能力')
+
+if privacy_choice == 'flexible' and network_choice == 'hybrid' and profile_key == 'privacy-first' and memory_mb >= 12288:
+    profile_key = 'balanced-local'
+    reasons.append('设备资源允许时，混合模式适合更均衡的本地配置')
+
+print(profile_key)
+print(tier)
+print(network)
+print('；'.join(reasons[:3]))
+PY
+}
+
+openclaw_memory_quick_profile_wizard() {
+  local device_choice="auto"
+  local usecase_choice="starter"
+  local privacy_choice="strict-local"
+  local network_choice="hybrid"
+  local recommendation profile_key detected_tier detected_network reason_text profile_label
+
+  while true; do
+    clear
+    skpl_ui_header "筛选向导" "按你的设备和目标筛选，系统会自动给出适合的一键方案"
+    skpl_ui_menu_item 1 "设备自动判断" "系统读取当前机器配置后自动推荐"
+    skpl_ui_menu_item 2 "设备偏低配" "4G 到 8G 内存、无独显或希望更省资源"
+    skpl_ui_menu_item 3 "设备偏高配" "12G 以上内存、独显或希望能力更完整"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "先选设备情况: "
+    read -e quick_device_choice
+    case "$quick_device_choice" in
+      1) device_choice="auto"; break ;;
+      2) device_choice="low"; break ;;
+      3) device_choice="high"; break ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+
+  while true; do
+    clear
+    skpl_ui_header "筛选向导" "选择你主要想做什么，系统会把方案调到更合适的方向"
+    skpl_ui_menu_item 1 "新手通用" "第一次使用、日常问答、想少折腾"
+    skpl_ui_menu_item 2 "代码开发" "更关注代码生成、修复和工程辅助"
+    skpl_ui_menu_item 3 "多模态" "更关注图片理解、视觉模型和综合能力"
+    skpl_ui_menu_item 4 "离线优先" "更看重断网可用和本地完成度"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "再选主要用途: "
+    read -e quick_usecase_choice
+    case "$quick_usecase_choice" in
+      1) usecase_choice="starter"; break ;;
+      2) usecase_choice="coding"; break ;;
+      3) usecase_choice="multimodal"; break ;;
+      4) usecase_choice="offline"; break ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+
+  while true; do
+    clear
+    skpl_ui_header "筛选向导" "选择你的隐私偏好，系统会决定记忆策略要保守还是均衡"
+    skpl_ui_menu_item 1 "本地优先" "记忆尽量留在本地，默认更保守"
+    skpl_ui_menu_item 2 "可以灵活" "我接受更均衡的配置，优先体验"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "再选隐私偏好: "
+    read -e quick_privacy_choice
+    case "$quick_privacy_choice" in
+      1) privacy_choice="strict-local"; break ;;
+      2) privacy_choice="flexible"; break ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+
+  while true; do
+    clear
+    skpl_ui_header "筛选向导" "最后选联网方式，系统会决定更偏本地还是更偏云端"
+    skpl_ui_menu_item 1 "离线为主" "优先本地能力，减少对网络的依赖"
+    skpl_ui_menu_item 2 "混合模式" "本地和联网能力一起用，适合大多数用户"
+    skpl_ui_menu_item 3 "联网增强" "我更在意效果，网络可用时优先增强能力"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "最后选联网方式: "
+    read -e quick_network_choice
+    case "$quick_network_choice" in
+      1) network_choice="offline"; break ;;
+      2) network_choice="hybrid"; break ;;
+      3) network_choice="cloud"; break ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+
+  recommendation=$(openclaw_memory_recommend_quick_profile "$device_choice" "$usecase_choice" "$privacy_choice" "$network_choice") || return 1
+  {
+    IFS= read -r profile_key
+    IFS= read -r detected_tier
+    IFS= read -r detected_network
+    IFS= read -r reason_text
+  } <<EOF
+$recommendation
+EOF
+  profile_label=$(openclaw_memory_quick_profile_label "$profile_key")
+
+  while true; do
+    clear
+    skpl_ui_header "推荐结果" "系统已经根据你的筛选条件给出一键方案"
+    echo "推荐方案: $profile_label"
+    echo "设备分级: ${detected_tier:-unknown}"
+    echo "网络状态: ${detected_network:-unknown}"
+    echo "推荐理由: ${reason_text:-综合当前条件自动推荐}"
+    echo
+    skpl_ui_menu_item 1 "立即应用" "把这个推荐方案直接写入并完成记忆落地"
+    skpl_ui_menu_item 2 "查看所有预设" "返回预设列表，手动选择其他方案"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e quick_apply_choice
+    case "$quick_apply_choice" in
+      1) openclaw_memory_apply_quick_profile "$profile_key"; break_end; return 0 ;;
+      2) openclaw_memory_quick_profiles_menu; return 0 ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_memory_quick_profiles_menu() {
+  while true; do
+    clear
+    skpl_ui_header "快速筛选方案" "按设备、目标、隐私和联网模式一键选择，小白直接点即可"
+    skpl_ui_menu_item 1 "按条件自动推荐" "先选设备、用途、隐私和联网模式，再自动给你推荐结果"
+    skpl_ui_menu_item 2 "新手安全版" "稳妥、少折腾、默认本地优先，适合第一次使用"
+    skpl_ui_menu_item 3 "均衡本地版" "本地记忆与本地模型平衡，适合大多数用户"
+    skpl_ui_menu_item 4 "隐私优先版" "尽量本地处理，记忆不上云，注入更保守"
+    skpl_ui_menu_item 5 "云端增强版" "保留本地记忆，文本/视觉更多走云端模型"
+    skpl_ui_menu_item 6 "低配省资源版" "适合低内存或无独显设备，优先轻量模型"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e quick_profile_choice
+    case "$quick_profile_choice" in
+      1) openclaw_memory_quick_profile_wizard ;;
+      2) openclaw_memory_apply_quick_profile "beginner-safe"; break_end ;;
+      3) openclaw_memory_apply_quick_profile "balanced-local"; break_end ;;
+      4) openclaw_memory_apply_quick_profile "privacy-first"; break_end ;;
+      5) openclaw_memory_apply_quick_profile "cloud-power"; break_end ;;
+      6) openclaw_memory_apply_quick_profile "low-resource"; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_full_local_ai_stack_menu() {
+  while true; do
+    clear
+    skpl_ui_header "完整本地 AI 栈" "安装 Ollama 运行时和本地模型，并把推荐模型写入配置；需要联网下载"
+    openclaw_ollama_status
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "安装 Ollama 运行时" "仅安装运行时，systemd 或 ollama serve 会自动尝试拉起"
+    skpl_ui_menu_item 2 "拉取文本模型" "deepseek-v4:7b-instruct-q4_K_M，适合通用对话与工具调用"
+    skpl_ui_menu_item 3 "拉取代码模型" "qwen2.5-coder:7b，适合开发辅助"
+    skpl_ui_menu_item 4 "拉取视觉模型" "qwen2.5vl:7b，适合多模态任务"
+    skpl_ui_menu_item 5 "应用推荐本地模型配置" "把文本、代码、视觉默认模型写入 OpenClaw 配置"
+    skpl_ui_menu_item 6 "一键完整本地落地" "安装运行时、拉取推荐模型、启用本地检索并执行验收"
+    skpl_ui_menu_item 7 "自定义 Ollama 模型" "手动输入任意 ollama 模型名并拉取"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e ai_stack_choice
+    case "$ai_stack_choice" in
+      1) openclaw_install_ollama_runtime; break_end ;;
+      2) openclaw_ollama_pull_model "deepseek-v4:7b-instruct-q4_K_M"; break_end ;;
+      3) openclaw_ollama_pull_model "qwen2.5-coder:7b"; break_end ;;
+      4) openclaw_ollama_pull_model "qwen2.5vl:7b"; break_end ;;
+      5) openclaw_apply_recommended_model_profile; break_end ;;
+      6) openclaw_full_local_stack_setup; break_end ;;
+      7) read -e -p "请输入 ollama 模型名: " custom_ollama_model; [ -n "$custom_ollama_model" ] && openclaw_ollama_pull_model "$custom_ollama_model"; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
 }
 
 openclaw_memory_strategy_panel() {
   while true; do
     clear
-    skpl_ui_header "记忆方案控制台" "一键应用当前分层记忆方案，并统一管理短中长期记忆"
+        skpl_ui_header "记忆功能面板" "小白只看前三项，需要更多能力再进入高级设置"
     openclaw_memory_extension_render_status
     echo
-    skpl_ui_section "方案入口"
-    skpl_ui_menu_item 1 "一键应用当前方案" "按你当前的分层记忆方案重写配置、技能和长期记忆策略"
-    skpl_ui_menu_item 2 "长期记忆管理" "查看、搜索、编辑、导入导出长期记忆"
-    skpl_ui_menu_item 3 "本地混合检索" "查看本地检索、索引和融合检索状态"
-    skpl_ui_menu_item 4 "记忆验收报告" "输出当前记忆方案落地结果"
+    skpl_ui_section "常用入口"
+    skpl_ui_menu_item 1 "一键启用推荐记忆" "系统自动推荐并落地记忆方案，适合大多数用户"
+    skpl_ui_menu_item 2 "查看记忆内容" "查看、筛选、编辑、导入导出和清理长期记忆"
+    skpl_ui_menu_item 3 "隐私与安全" "总开关、本地 only、脱敏、加密和禁止记忆关键词"
+    skpl_ui_menu_item 4 "高级设置" "本地检索、同步资源、完整本地 AI 栈和验收报告"
     skpl_ui_menu_item 0 "返回上一级"
     skpl_ui_footer_prompt "请输入你的选择: "
     read -e memory_panel_choice
     case "$memory_panel_choice" in
-      1) openclaw_memory_apply_current_scheme; break_end ;;
+      1) openclaw_memory_quick_profiles_menu ;;
       2) openclaw_memory_extension_menu ;;
-      3) openclaw_memory_local_retrieval_menu ;;
-      4) openclaw_ai_stack_acceptance_report; break_end ;;
+      3) openclaw_memory_scheme_settings_menu ;;
+      4)
+        while true; do
+          clear
+          skpl_ui_header "高级设置" "这里放完整能力，平时可以不用进入"
+          skpl_ui_menu_item 1 "重新应用当前记忆方案" "按当前配置重新落地记忆、检索和相关策略"
+          skpl_ui_menu_item 2 "本地检索与索引" "仅处理 embedding、SQLite/LanceDB 和索引"
+          skpl_ui_menu_item 3 "同步与资源" "查看混合记忆同步、硬件分级、资源预算和运行提示"
+          skpl_ui_menu_item 4 "完整本地 AI 栈" "安装 Ollama 运行时和本地文本、代码、视觉模型"
+          skpl_ui_menu_item 5 "EvoMap 管理" "安装、更新、同步与经验目录管理"
+          skpl_ui_menu_item 6 "记忆验收报告" "查看当前记忆方案是否已经落地生效"
+          skpl_ui_menu_item 0 "返回上一级"
+          skpl_ui_footer_prompt "请输入你的选择: "
+          read -e memory_advanced_choice
+          case "$memory_advanced_choice" in
+            1) openclaw_memory_apply_current_scheme; break_end ;;
+            2) openclaw_memory_local_retrieval_menu ;;
+            3) openclaw_memory_sync_menu ;;
+            4) openclaw_full_local_ai_stack_menu ;;
+            5) openclaw_evomap_menu ;;
+            6) openclaw_ai_stack_acceptance_report; break_end ;;
+            0) break ;;
+            *) echo "无效的选择，请重试。"; sleep 1 ;;
+          esac
+        done
+        ;;
       0) return 0 ;;
       *) echo "无效的选择，请重试。"; sleep 1 ;;
     esac
@@ -13774,6 +14847,146 @@ if not rows:
 else:
     for row in rows:
         print(f"{row[0]} | {row[1]} | {row[2]} | sensitive={row[3]} | updated_at={row[4]}")
+PY
+}
+
+openclaw_memory_extension_filter_entries() {
+  local query="${1:-}" category="${2:-}" days="${3:-0}"
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$query" "$category" "$days" <<'PY'
+import json
+import sqlite3
+import sys
+import time
+
+db_path, query, category, days = sys.argv[1:5]
+query = (query or '').strip().lower()
+category = (category or '').strip().lower()
+days = int(days or 0)
+threshold = int(time.time()) - days * 86400 if days > 0 else 0
+
+conn = sqlite3.connect(db_path)
+rows = conn.execute('select id, category, title, content, tags, sensitive, updated_at from memory_entries where deleted = 0 order by updated_at desc limit 500').fetchall()
+conn.close()
+
+items = []
+for row in rows:
+    entry_id, entry_category, title, content, tags_raw, sensitive, updated_at = row
+    try:
+        tags = json.loads(tags_raw or '[]')
+        if not isinstance(tags, list):
+            tags = []
+    except Exception:
+        tags = []
+    if category and entry_category.lower() != category:
+        continue
+    if threshold and int(updated_at or 0) < threshold:
+        continue
+    haystack = ' '.join([entry_category or '', title or '', content or '', ' '.join(str(x) for x in tags)]).lower()
+    if query and query not in haystack:
+        continue
+    items.append({
+        'id': entry_id,
+        'category': entry_category,
+        'title': title,
+        'sensitive': int(sensitive or 0),
+        'updated_at': int(updated_at or 0),
+    })
+
+print(json.dumps(items, ensure_ascii=False))
+PY
+}
+
+openclaw_memory_extension_filter_menu() {
+  local query category days
+  read -e -p "关键词（可空）: " query
+  read -e -p "分类（identity/preference/knowledge/project，可空）: " category
+  read -e -p "最近多少天（0 表示不限）: " days
+  [ -z "$days" ] && days=0
+  openclaw_memory_extension_filter_entries "$query" "$category" "$days" | python3 - <<'PY'
+import json, sys, datetime
+raw = sys.stdin.read().strip() or '[]'
+items = json.loads(raw)
+if not items:
+    print('未找到符合条件的记忆条目。')
+else:
+    print('ID | 分类 | 标题 | 敏感 | 更新时间')
+    print('-' * 72)
+    for item in items:
+        ts = item.get('updated_at') or 0
+        text = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S') if ts else '-'
+        print(f"{item['id']} | {item['category']} | {item['title']} | {item['sensitive']} | {text}")
+PY
+}
+
+openclaw_memory_extension_view_entry() {
+  local entry_id
+  read -e -p "输入要查看的记忆 ID: " entry_id
+  [ -z "$entry_id" ] && return 1
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$entry_id" <<'PY'
+import json
+import sqlite3
+import sys
+import datetime
+
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute('select id, category, title, content, tags, sensitive, created_at, updated_at from memory_entries where deleted = 0 and id = ? limit 1', (sys.argv[2],)).fetchone()
+conn.close()
+if not row:
+    print('❌ 未找到该记忆条目')
+    raise SystemExit(1)
+tags = []
+try:
+    tags = json.loads(row[4] or '[]')
+    if not isinstance(tags, list):
+        tags = []
+except Exception:
+    tags = []
+print(f"ID: {row[0]}")
+print(f"分类: {row[1]}")
+print(f"标题: {row[2]}")
+print(f"内容: {row[3]}")
+print(f"标签: {', '.join(str(x) for x in tags) if tags else '<空>'}")
+print(f"敏感: {row[5]}")
+print(f"创建时间: {datetime.datetime.fromtimestamp(row[6]).strftime('%Y-%m-%d %H:%M:%S') if row[6] else '-'}")
+print(f"更新时间: {datetime.datetime.fromtimestamp(row[7]).strftime('%Y-%m-%d %H:%M:%S') if row[7] else '-'}")
+PY
+}
+
+openclaw_memory_extension_batch_delete() {
+  local query category days confirm
+  read -e -p "关键词（可空）: " query
+  read -e -p "分类（identity/preference/knowledge/project，可空）: " category
+  read -e -p "最近多少天（0 表示不限）: " days
+  [ -z "$days" ] && days=0
+  local matched_json matched_count
+  matched_json=$(openclaw_memory_extension_filter_entries "$query" "$category" "$days")
+  matched_count=$(python3 - "$matched_json" <<'PY'
+import json, sys
+print(len(json.loads(sys.argv[1] or '[]')))
+PY
+)
+  if [ "$matched_count" = "0" ]; then
+    echo "未找到符合条件的记忆条目。"
+    return 0
+  fi
+  echo "将批量删除 ${matched_count} 条记忆。"
+  read -e -p "输入 DELETE 确认批量删除: " confirm
+  [ "$confirm" = "DELETE" ] || { echo "已取消"; return 1; }
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$matched_json" <<'PY'
+import json
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+items = json.loads(sys.argv[2] or '[]')
+ids = [int(item['id']) for item in items if str(item.get('id', '')).isdigit()]
+for entry_id in ids:
+    conn.execute('update memory_entries set deleted = 1 where id = ?', (entry_id,))
+conn.commit()
+conn.close()
+print(len(ids))
 PY
 }
 
@@ -14164,40 +15377,48 @@ openclaw_memory_extension_menu() {
   send_stats "OpenClaw长期记忆扩展"
   while true; do
     clear
-    skpl_ui_header "长期记忆扩展中心" "独立组件、结构化记忆、零侵入官方核心"
+    skpl_ui_header "长期记忆管理" "查看和维护长期记忆条目，支持导入导出、清理和隐私设置"
     openclaw_memory_extension_render_status
     echo
     openclaw_render_hardware_profile
     echo
     skpl_ui_section "操作"
-    skpl_ui_menu_item 1 "查看条目" "查看长期记忆条目列表"
-    skpl_ui_menu_item 2 "新增条目" "新增或覆盖 identity/preference/knowledge/project 记忆"
-    skpl_ui_menu_item 3 "搜索条目" "按关键词检索长期记忆"
-    skpl_ui_menu_item 4 "编辑条目" "修改单条长期记忆"
-    skpl_ui_menu_item 5 "删除条目" "软删除单条长期记忆"
-    skpl_ui_menu_item 6 "导出 JSON" "导出全部长期记忆"
-    skpl_ui_menu_item 7 "导入 JSON" "导入长期记忆备份"
-    skpl_ui_menu_item 8 "高级设置" "总开关 / 注入阈值 / 清理周期 / 隐私策略"
-    skpl_ui_menu_item 9 "手动抽取事实" "从一段文本自动提取身份与偏好"
-    skpl_ui_menu_item 10 "执行清理" "按清理周期标记过时长期记忆"
-    skpl_ui_menu_item 11 "清空全部" "将全部长期记忆标记删除"
-    skpl_ui_menu_item 12 "物理清除已删" "彻底删除已软删除条目"
+    skpl_ui_menu_item 1 "查看条目列表" "查看长期记忆条目列表"
+    skpl_ui_menu_item 2 "筛选条目" "按时间、分类、关键词筛选长期记忆"
+    skpl_ui_menu_item 3 "查看条目详情" "查看单条长期记忆的完整内容"
+    skpl_ui_menu_item 4 "新增条目" "新增一条长期记忆，支持 identity/preference/knowledge/project 分类"
+    skpl_ui_menu_item 5 "编辑条目" "修改单条长期记忆"
+    skpl_ui_menu_item 6 "删除单条" "软删除单条长期记忆"
+    skpl_ui_menu_item 7 "批量删除" "按筛选条件批量软删除长期记忆"
+    skpl_ui_menu_item 8 "导出 JSON" "导出全部长期记忆"
+    skpl_ui_menu_item 9 "导入 JSON" "导入长期记忆备份"
+    skpl_ui_menu_item 10 "备份记忆库" "导出记忆全量备份包"
+    skpl_ui_menu_item 11 "恢复记忆库" "从备份包恢复记忆库"
+    skpl_ui_menu_item 12 "记忆设置" "总开关、注入阈值、清理周期和隐私策略"
+    skpl_ui_menu_item 13 "从文本提取记忆" "从一段文本自动提取身份、偏好和事实"
+    skpl_ui_menu_item 14 "执行清理" "按清理周期标记过时长期记忆"
+    skpl_ui_menu_item 15 "清空全部" "将全部长期记忆标记删除"
+    skpl_ui_menu_item 16 "物理清除已删" "彻底删除已软删除条目"
     skpl_ui_menu_item 0 "返回上一级"
     skpl_ui_footer_prompt "请输入你的选择: "
     read -e ext_choice
     case "$ext_choice" in
       1) openclaw_memory_extension_list_entries; break_end ;;
-      2) openclaw_memory_extension_add_entry; break_end ;;
-      3) openclaw_memory_search_test; break_end ;;
-      4) openclaw_memory_extension_edit_entry; break_end ;;
-      5) openclaw_memory_extension_delete_entry; break_end ;;
-      6) openclaw_memory_extension_export_json; break_end ;;
-      7) openclaw_memory_extension_import_json; break_end ;;
-      8) openclaw_memory_extension_settings_menu; break_end ;;
-      9) read -e -p "输入要抽取的文本: " raw_text; openclaw_memory_extension_capture_text "$raw_text"; break_end ;;
-      10) openclaw_memory_extension_cleanup_entries; break_end ;;
-      11) openclaw_memory_extension_clear_all_entries; break_end ;;
-      12) openclaw_memory_extension_purge_deleted; break_end ;;
+      2) openclaw_memory_extension_filter_menu; break_end ;;
+      3) openclaw_memory_extension_view_entry; break_end ;;
+      4) openclaw_memory_extension_add_entry; break_end ;;
+      5) openclaw_memory_extension_edit_entry; break_end ;;
+      6) openclaw_memory_extension_delete_entry; break_end ;;
+      7) openclaw_memory_extension_batch_delete; break_end ;;
+      8) openclaw_memory_extension_export_json; break_end ;;
+      9) openclaw_memory_extension_import_json; break_end ;;
+      10) openclaw_memory_backup_export ;;
+      11) openclaw_memory_backup_import ;;
+      12) openclaw_memory_extension_settings_menu; break_end ;;
+      13) read -e -p "输入要抽取的文本: " raw_text; openclaw_memory_extension_capture_text "$raw_text"; break_end ;;
+      14) openclaw_memory_extension_cleanup_entries; break_end ;;
+      15) openclaw_memory_extension_clear_all_entries; break_end ;;
+      16) openclaw_memory_extension_purge_deleted; break_end ;;
       0) return 0 ;;
       *) echo "无效的选择，请重试。"; sleep 1 ;;
     esac
@@ -14223,7 +15444,7 @@ openclaw_memory_menu() {
     send_stats "OpenClaw记忆管理"
     while true; do
       clear
-      skpl_ui_header "OpenClaw 记忆方案中心" "一键应用当前分层记忆方案 / 混合检索 / 长期记忆治理"
+      skpl_ui_header "OpenClaw 记忆管理" "统一管理记忆方案、长期记忆、本地检索与隐私设置"
       openclaw_memory_render_status
       echo
       python3 - "$config_file" <<'PY'
@@ -14236,39 +15457,23 @@ try:
 except: pass
 PY
       echo
-      skpl_ui_section "操作 (按当前记忆方案工作)"
-      skpl_ui_menu_item 1 "一键应用当前方案" "统一应用短期/中期/长期记忆、隐私策略、默认模型和技能注入"
-      skpl_ui_menu_item 2 "记忆方案控制台" "进入当前方案专用面板"
-      skpl_ui_menu_item 3 "本地混合检索" "启用本地 embedding + SQLite/LanceDB + 融合检索"
-      skpl_ui_menu_item 4 "长期记忆治理" "结构化长期记忆、导入导出、编辑与高级设置"
-      skpl_ui_menu_item 5 "经验进化 EvoMap" "沉淀报错/操作经验, 下次遇到问题自动复用"
-      skpl_ui_menu_item 6 "备份/恢复" "记忆库、方案配置与核心数据备份"
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "进入记忆功能面板" "推荐方案、记忆内容、隐私设置和高级能力统一入口"
+      skpl_ui_menu_item 2 "经验沉淀 EvoMap" "把经验写入 EvoMap 目录，方便后续查看与整理"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e memory_choice
       case "$memory_choice" in
         1)
-          openclaw_memory_apply_current_scheme
-          ;;
-        2)
           openclaw_memory_strategy_panel
           ;;
-        3)
-          openclaw_memory_local_retrieval_menu
-          ;;
-        4)
-          openclaw_memory_extension_menu
-          ;;
-        5)
+        2)
           echo "开始进化经验沉淀..."
           read -e -p "标题 (如: 代理配置失败): " title
           [ -z "$title" ] && title="日常经验"
           read -e -p "经验内容/解法: " content
           openclaw_evomap_real_ingest "$title" "$content"
           read -n 1 -s -r -p "经验已存入大脑！按任意键返回..."
-          ;;
-        6)
-          openclaw_backup_restore_menu
           ;;
         0)
           return 0
@@ -14459,7 +15664,7 @@ try:
     elif p == "coding" and s == "allowlist" and a == "on-miss" and e == "true" and b == "true" and ap == "true" and w == "true":
         print("开发增强模式")
     elif (p == "full" or p == "(unset)") and s == "full" and a == "off" and e == "true" and b == "true" and ap == "true":
-        print("完全开放模式")
+        print("最低拦截模式")
     else:
         print("自定义模式")
 except Exception:
@@ -14523,7 +15728,7 @@ print(json.dumps(data, indent=2))
 
     local current_mode="未知 / 自定义"
     if [ "$current_profile" = "full" ] && [ "$current_sec" = "full" ] && [ "$current_ask" = "off" ]; then
-      current_mode="\033[1;31m完全开放模式\033[0m"
+      current_mode="\033[1;31m最低拦截模式\033[0m"
     elif [ "$current_profile" = "coding" ] && [ "$current_sec" = "allowlist" ] && [ "$current_ask" = "on-miss" ] && [ "$current_elevated" = "true" ]; then
       current_mode="\033[1;33m开发增强模式\033[0m"
     elif [ "$current_profile" = "coding" ] && [ "$current_sec" = "allowlist" ] && [ "$current_ask" = "on-miss" ] && [ "$current_elevated" != "true" ]; then
@@ -14624,7 +15829,7 @@ except Exception:
   }
 
   openclaw_permission_apply_full() {
-    send_stats "OpenClaw权限-完全开放模式"
+    send_stats "OpenClaw权限-最低拦截模式"
     openclaw_permission_require_openclaw || return 1
 
     echo "正在配置应用层策略..."
@@ -14634,12 +15839,12 @@ except Exception:
     openclaw config set tools.elevated.enabled true >/dev/null 2>&1
     openclaw config set tools.exec.strictInlineEval false >/dev/null 2>&1
 
-    echo "正在瓦解宿主机拦截防御..."
-    # 这里的 full 和 off 将彻底绕过底层宿主机的 exec 审批系统
+    echo "正在放宽宿主机审批拦截配置..."
+    # 这里会把审批策略调整到最宽松档位
     openclaw_permission_update_exec_approvals "full" "off" "full"
 
     openclaw_permission_restart_gateway
-    echo -e "${gl_lv}✅ 已切换为完全开放模式 (警告：所有宿主机命令拦截已失效，智能体具有最高权限)${gl_bai}"
+    echo -e "${gl_lv}✅ 已切换为最低拦截模式 (警告：审批与工具限制会降到很低，风险极高)${gl_bai}"
   }
 
   openclaw_permission_restore_official_defaults() {
@@ -14748,7 +15953,7 @@ except Exception as e:
       skpl_ui_section "模式切换"
       skpl_ui_menu_item_tone 1 "标准安全模式" "日常推荐，弹卡片审批" "ok"
       skpl_ui_menu_item_tone 2 "开发增强模式" "允许智能体申请提权" "warn"
-      skpl_ui_menu_item_tone 3 "完全开放模式" "高风险，解除宿主机拦截" "danger"
+      skpl_ui_menu_item_tone 3 "最低拦截模式" "高风险，尽量减少审批拦截" "danger"
       skpl_ui_menu_item 4 "恢复官方默认" "恢复初始沙盒防御策略"
       skpl_ui_menu_item 5 "安全审计与修复" "检查并自动修复"
       skpl_ui_menu_item 6 "Exec 命令白名单" "管理 allowlist"
@@ -14769,7 +15974,7 @@ except Exception as e:
           break_end
           ;;
         3)
-          skpl_ui_alert "danger" "完全开放模式会彻底瓦解 exec 审批并自动放行高危代码。" "仅适用于你明确知晓风险并需要最高权限的场景。"
+          skpl_ui_alert "danger" "最低拦截模式会尽量放宽 exec 审批与工具限制。" "仅适用于你明确知晓风险并需要高权限的场景。"
           read -e -p "输入 FULL 确认继续: " confirm
           if [ "$confirm" = "FULL" ]; then openclaw_permission_apply_full; else echo "已取消"; fi
           break_end
@@ -15161,7 +16366,7 @@ for idx,item in enumerate(bindings,1):
 
 
   openclaw_multiagent_show_sessions() {
-    send_stats "OpenClaw多智能体-会话概况"
+    send_stats "OpenClaw多智能体-会话缓存"
     python3 -c '
 import json,sys
 sess_obj=json.loads(sys.argv[1] or "{}")
@@ -15258,17 +16463,17 @@ print("✅ 多智能体健康检查完成")
     send_stats "OpenClaw多智能体管理"
     while true; do
       clear
-      skpl_ui_header "多智能体管理" "智能体、绑定与会话"
+      skpl_ui_header "多智能体管理" "智能体、绑定与会话缓存"
       openclaw_multiagent_render_status
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "刷新运行时状态" "更新 agents / bindings / sessions 缓存"
+      skpl_ui_menu_item 1 "刷新缓存状态" "更新 agents / bindings / sessions 缓存"
       skpl_ui_menu_item 2 "新增智能体" "创建 Agent 与工作区"
       skpl_ui_menu_item_tone 3 "删除智能体" "移除 Agent 配置" "danger"
       skpl_ui_menu_item 4 "查看路由绑定" "查看当前绑定"
       skpl_ui_menu_item 5 "新增路由绑定" "绑定入口到 Agent"
       skpl_ui_menu_item 6 "移除路由绑定" "解除现有绑定"
-      skpl_ui_menu_item 7 "查看会话概况" "会话汇总与模型"
+      skpl_ui_menu_item 7 "查看会话缓存" "查看会话汇总与模型信息"
       skpl_ui_menu_item 8 "健康检查" "检查配置与工作区"
       skpl_ui_menu_item 9 "修改智能体身份" "名称 / Emoji / IDENTITY.md"
       skpl_ui_menu_item 10 "清理过期会话" "执行 sessions cleanup"
@@ -15298,19 +16503,16 @@ openclaw_backup_restore_menu() {
     send_stats "OpenClaw备份与还原"
     while true; do
       clear
-      skpl_ui_header "备份与还原" "统一压缩包优先，兼容旧版分项备份"
+      skpl_ui_header "备份与还原" "统一备份包优先；当前记忆方案已包含 AI 栈与混合记忆目录"
       openclaw_backup_render_file_list
       echo
-      echo "推荐流程：先使用【统一全量备份】导出单个压缩包；还原时把压缩包放入备份目录后再执行统一还原。"
+      echo "推荐流程：先使用【统一备份包导出】生成单个压缩包；还原时把压缩包放入备份目录后再执行统一导入。"
+      echo "旧版分项备份仍可用，但更适合兼容旧数据或局部迁移。"
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "统一全量备份" "记忆方案、记忆数据、EvoMap、混合记忆、项目配置统一打包"
-      skpl_ui_menu_item_tone 2 "统一全量还原" "把压缩包放入备份目录后执行自动校验与还原" "danger"
-      skpl_ui_menu_item 3 "备份记忆全量" "旧版兼容：支持多智能体"
-      skpl_ui_menu_item 4 "还原记忆全量" "旧版兼容：按包内容恢复"
-      skpl_ui_menu_item 5 "备份 OpenClaw 项目" "旧版兼容：默认安全模式"
-      skpl_ui_menu_item_tone 6 "还原 OpenClaw 项目" "旧版兼容：高级 / 高风险" "danger"
-      skpl_ui_menu_item_tone 7 "删除备份文件" "从备份目录移除归档" "danger"
+      skpl_ui_menu_item 1 "统一备份包导出" "记忆方案、AI 栈、混合记忆、EvoMap 和项目配置统一打包"
+      skpl_ui_menu_item_tone 2 "统一备份包导入" "把压缩包放入备份目录后执行自动校验与导入" "danger"
+      skpl_ui_menu_item 3 "旧版分项工具" "记忆单独导出/导入、项目单独导出/导入、删除备份文件"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e backup_choice
@@ -15318,11 +16520,36 @@ openclaw_backup_restore_menu() {
       case "$backup_choice" in
         1) openclaw_bundle_backup_export ;;
         2) openclaw_bundle_backup_import ;;
-        3) openclaw_memory_backup_export ;;
-        4) openclaw_memory_backup_import ;;
-        5) openclaw_project_backup_export ;;
-        6) openclaw_project_backup_import ;;
-        7) openclaw_backup_delete_file ;;
+        3) openclaw_backup_legacy_menu ;;
+        0) return 0 ;;
+        *)
+          echo "无效的选择，请重试。"
+          sleep 1
+          ;;
+      esac
+    done
+  }
+
+openclaw_backup_legacy_menu() {
+
+    while true; do
+      clear
+      skpl_ui_header "旧版分项备份" "用于兼容旧流程；当前记忆方案优先使用统一备份包"
+      skpl_ui_menu_item 1 "记忆单独导出" "仅导出多智能体记忆、混合记忆、AI 栈与相关目录"
+      skpl_ui_menu_item_tone 2 "记忆单独导入" "仅恢复记忆相关目录与 AI 栈" "danger"
+      skpl_ui_menu_item 3 "项目单独导出" "仅导出 OpenClaw 项目目录与配置"
+      skpl_ui_menu_item_tone 4 "项目单独导入" "仅恢复 OpenClaw 项目目录与配置" "danger"
+      skpl_ui_menu_item_tone 5 "删除备份文件" "从备份目录移除归档" "danger"
+      skpl_ui_menu_item 0 "返回上一级"
+      skpl_ui_footer_prompt "请输入你的选择: "
+      read -e legacy_choice
+
+      case "$legacy_choice" in
+        1) openclaw_memory_backup_export ;;
+        2) openclaw_memory_backup_import ;;
+        3) openclaw_project_backup_export ;;
+        4) openclaw_project_backup_import ;;
+        5) openclaw_backup_delete_file ;;
         0) return 0 ;;
         *)
           echo "无效的选择，请重试。"
@@ -15337,16 +16564,16 @@ openclaw_backup_restore_menu() {
   openclaw_evomap_menu() {
     while true; do
       clear
-      skpl_ui_header "EvoMap 管理" "安装、更新与混合记忆目录"
+      skpl_ui_header "EvoMap 管理" "安装、更新与目录状态"
       evomap_print_status
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "安装 EvoMap" "克隆、依赖、初始化融合栈"
+      skpl_ui_menu_item 1 "安装 EvoMap" "克隆代码、安装依赖并初始化目录"
       skpl_ui_menu_item_tone 2 "卸载 EvoMap" "保留备份后移除" "danger"
-      skpl_ui_menu_item 3 "更新 EvoMap" "拉取最新代码并同步更新融合栈"
-      skpl_ui_menu_item 4 "EvoMap 记忆管理" "查看目录、备份与融合状态"
-      skpl_ui_menu_item 5 "立即同步融合记忆" "处理事件并更新检索对象"
-      skpl_ui_menu_item 6 "融合栈状态" "查看插件、对象数与最近同步"
+      skpl_ui_menu_item 3 "更新 EvoMap" "拉取最新代码并同步更新目录与脚本"
+      skpl_ui_menu_item 4 "EvoMap 记忆管理" "查看目录、备份与同步日志"
+      skpl_ui_menu_item 5 "触发一次同步" "处理事件并刷新当前同步结果"
+      skpl_ui_menu_item 6 "同步状态" "查看对象数、插件信息与最近同步"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e evomap_choice
@@ -15589,7 +16816,7 @@ openclaw_webui_ensure_origins() {
   openclaw_show_webui_addr() {
     local local_ip token domains scheme port
 
-    skpl_ui_header "WebUI 访问设置" "本机访问优先，域名入口按需接入"
+    skpl_ui_header "WebUI 入口与待审批请求" "本机访问优先，可记录已有域名入口"
     local_ip="127.0.0.1"
     scheme=$(openclaw_webui_scheme)
     port=$(openclaw_gateway_port)
@@ -15621,7 +16848,7 @@ EOF
 
     echo
     skpl_ui_section "待处理设备授权"
-    echo "当前面板仅保留查看待处理请求。批准请在 root 终端手动执行官方命令。"
+    echo "当前面板提供待处理请求查看。批准请在 root 终端手动执行官方命令。"
   }
 
 
@@ -15750,7 +16977,7 @@ PY
       echo
       skpl_ui_section "操作"
       skpl_ui_menu_item 1 "重载访问 Token" "读取本地持久 token"
-      skpl_ui_menu_item 2 "记录域名入口" "保存已存在的 WebUI 域名地址"
+      skpl_ui_menu_item 2 "记录已有域名入口" "保存已存在的 WebUI 域名地址"
       skpl_ui_menu_item_tone 3 "移除域名入口" "删除已记录的域名地址" "danger"
       skpl_ui_menu_item 4 "查看待处理请求" "显示 devices list 原始输出"
       skpl_ui_menu_item 0 "返回上一级"
@@ -15827,8 +17054,6 @@ PY
         break_end
         ;;
       13) openclaw_webui_menu ;;
-      22) openclaw_network_diagnosis_menu ;;
-      23) openclaw_run_official_diagnostics ;;
       14) send_stats "TUI命令行对话"
         openclaw tui
         break_end
@@ -15839,7 +17064,6 @@ PY
       18) openclaw_backup_restore_menu ;;
       19) update_openclaw_panel ;;
       20) uninstall_openclaw_panel ;;
-      21) openclaw_evomap_menu ;;
       0) return 0 ;;
       *) echo "无效的选择，请重试。"; sleep 1 ;;
     esac
@@ -15983,7 +17207,7 @@ evomap_print_status() {
     skpl_ui_kv "状态" "未安装"
   fi
   skpl_ui_kv "记忆目录" "$EVOMAP_MEMORY_DIR"
-  skpl_ui_kv "融合栈" "$SKPL_HYBRID_MEMORY_ROOT"
+  skpl_ui_kv "同步根目录" "$SKPL_HYBRID_MEMORY_ROOT"
   hybrid_json=$(hybrid_memory_status_json 2>/dev/null || echo '{"objects":0}')
   skpl_ui_kv "知识对象" "$(python3 - <<'PY' "$hybrid_json"
 import json, sys
@@ -16148,14 +17372,14 @@ evomap_update() {
 evomap_memory_menu() {
   while true; do
     clear
-    skpl_ui_header "EvoMap 记忆管理" "查看学习目录、融合栈与备份归档"
+    skpl_ui_header "EvoMap 记忆管理" "查看学习目录、同步根目录与备份归档"
     evomap_print_status
     echo
     skpl_ui_section "操作"
     skpl_ui_menu_item 1 "立即备份 EvoMap"
     skpl_ui_menu_item 2 "查看记忆目录"
     skpl_ui_menu_item 3 "查看备份目录"
-    skpl_ui_menu_item 4 "查看融合根目录"
+      skpl_ui_menu_item 4 "查看同步根目录"
     skpl_ui_menu_item 5 "查看同步日志"
     skpl_ui_menu_item 0 "返回上一级"
     skpl_ui_footer_prompt "请输入你的选择: "
