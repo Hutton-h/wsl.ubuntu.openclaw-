@@ -2205,11 +2205,11 @@ import sys
 full_summary, tool_summary, accel_summary, plugin_summary, cloud_summary, syntax_status, acceptance_report = sys.argv[1:8]
 lines = [
     f'脚本语法: {syntax_status}',
-    '第2层: 专家切换/生命周期/资源回收/轻量兜底已接通',
-    f'第2层加速: {accel_summary or "未记录"}',
-    f'第4层工具: {tool_summary or "未记录"}',
-    f'第4层插件: {plugin_summary or "未记录"}',
-    f'第5层多云: {cloud_summary or "未记录"}',
+    'AI 栈状态: 路由、资源、记忆、工具和多云能力已接通',
+    f'加速状态: {accel_summary or "未记录"}',
+    f'工具状态: {tool_summary or "未记录"}',
+    f'插件状态: {plugin_summary or "未记录"}',
+    f'多云状态: {cloud_summary or "未记录"}',
 ]
 if full_summary.strip():
     lines.append('总览: 已生成')
@@ -2242,14 +2242,14 @@ import sys
 syntax_status, route_summary, resource_summary, accel_summary, tool_summary, plugin_summary, cloud_summary, evolve_summary, autotune_summary, context_summary, lifecycle_summary, memory_summary = sys.argv[1:13]
 lines = [
     'OpenClaw 落地验收报告',
-    f'- 前置层: 语法={syntax_status} | 资源={resource_summary}',
-    f'- 第0层缓存: 上下文={context_summary}',
-    f'- 第1层路由: {route_summary}',
-    f'- 第2层专家: 生命周期={lifecycle_summary} | 加速={accel_summary}',
-    f'- 第3层检索记忆: {memory_summary}',
-    f'- 第4层工具: {tool_summary} | 插件={plugin_summary}',
-    f'- 第5层多云: {cloud_summary}',
-    f'- 第6层自进化: {evolve_summary} | 自动调参={autotune_summary}',
+    f'- 基础检查: 语法={syntax_status} | 资源={resource_summary}',
+    f'- 上下文缓存: {context_summary}',
+    f'- 模型路由: {route_summary}',
+    f'- 生命周期与加速: 生命周期={lifecycle_summary} | 加速={accel_summary}',
+    f'- 检索与记忆: {memory_summary}',
+    f'- 工具与插件: {tool_summary} | 插件={plugin_summary}',
+    f'- 多云能力: {cloud_summary}',
+    f'- 自进化与调优: {evolve_summary} | 自动调参={autotune_summary}',
 ]
 print('\n'.join(lines))
 PY
@@ -6851,6 +6851,11 @@ ensure_root() {
 save_self_to_skpl() {
   init_skpl_runtime
   mkdir -p "${SKPL_HOME}"
+  if [ "${SKPL_SKIP_SELF_SAVE:-0}" = "1" ]; then
+    chmod +x "${SKPL_SCRIPT_PATH}" 2>/dev/null || true
+    hash -r 2>/dev/null || true
+    return 0
+  fi
   if [ "$(readlink -f "$0" 2>/dev/null)" != "$(readlink -f "${SKPL_SCRIPT_PATH}" 2>/dev/null)" ]; then
     cp -f "$0" "${SKPL_SCRIPT_PATH}"
   fi
@@ -6925,6 +6930,9 @@ skpl_sync_remote_panel() {
   fi
 
   install -m 755 "$tmp_file" "${SKPL_SCRIPT_PATH}"
+  if [ -n "$0" ] && [ -w "$0" ] && [ "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")" != "$(readlink -f "${SKPL_SCRIPT_PATH}" 2>/dev/null || printf '%s' "${SKPL_SCRIPT_PATH}")" ]; then
+    install -m 755 "$tmp_file" "$0"
+  fi
 
   cat > "${SKPL_CMD_PATH}" <<'EOF_SKPL_CMD'
 #!/bin/bash
@@ -11866,7 +11874,46 @@ PY
   openclaw_memory_config_set() {
     local key="$1"
     shift
-    openclaw config set "$key" "$@" >/dev/null 2>&1
+    local value="$1"
+    if timeout 15 openclaw config set "$key" "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+    python3 - "$(openclaw_get_config_file)" "$key" "$value" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+
+cur = cfg
+parts = key.split('.')
+for part in parts[:-1]:
+    node = cur.get(part)
+    if not isinstance(node, dict):
+        node = {}
+        cur[part] = node
+    cur = node
+
+if value == 'true':
+    parsed = True
+elif value == 'false':
+    parsed = False
+else:
+    parsed = value
+
+cur[parts[-1]] = parsed
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
   }
 
 openclaw_memory_config_unset() {
@@ -12364,18 +12411,18 @@ PY
     fi
   }
 
-  openclaw_memory_download_file() {
-    local url="$1"
-    local dest="$2"
-    mkdir -p "$(dirname "$dest")"
-    if command -v curl >/dev/null 2>&1; then
-      curl -L --fail --retry 2 -o "$dest" "$url"
+openclaw_memory_download_file() {
+  local url="$1"
+  local dest="$2"
+  mkdir -p "$(dirname "$dest")"
+  if command -v curl >/dev/null 2>&1; then
+      curl -L --fail --retry 2 --connect-timeout 10 --max-time 1800 -o "$dest" "$url"
       return $?
-    fi
-    if command -v wget >/dev/null 2>&1; then
-      wget -O "$dest" "$url"
+  fi
+  if command -v wget >/dev/null 2>&1; then
+      wget --timeout=10 -O "$dest" "$url"
       return $?
-    fi
+  fi
     echo "❌ 未检测到 curl 或 wget，无法下载。"
     return 1
   }
@@ -12570,7 +12617,7 @@ EOF
     echo "✅ QMD 自动部署完成"
   }
 
-  openclaw_memory_auto_setup_local() {
+openclaw_memory_auto_setup_local() {
     echo "🔍 检测 Local 环境"
     openclaw_memory_cleanup_legacy_keys
     openclaw_safe_enable_global_tools
@@ -12631,7 +12678,11 @@ EOF
       preh_agent_lines=$(openclaw_memory_list_agents)
       while IFS=$'\t' read -r preh_agent_id preh_workspace; do
         [ -z "$preh_agent_id" ] && continue
-        openclaw memory index --agent "$preh_agent_id" --force
+        echo "🧱 正在预热索引: $preh_agent_id"
+        timeout 600 openclaw memory index --agent "$preh_agent_id" --force || {
+          echo "⚠️ 索引预热超时或失败: $preh_agent_id"
+          return 1
+        }
       done <<EOF
 $preh_agent_lines
 EOF
@@ -12785,7 +12836,7 @@ EOF
     fi
   }
 
-  openclaw_memory_fix_index() {
+openclaw_memory_fix_index() {
     local backend include_dm
     backend=$(openclaw_memory_get_backend)
     if [ "$backend" = "qmd" ] && ! command -v qmd >/dev/null 2>&1; then
@@ -12826,6 +12877,59 @@ EOF
       fi
     fi
     break_end
+  }
+
+  openclaw_memory_legacy_compat_menu() {
+    local recommended_scheme recommended_reason qmd_ok model_path model_status hf_ok mirror_ok
+    while true; do
+      clear
+      openclaw_memory_detect_region
+      openclaw_memory_select_sources
+      openclaw_memory_recommend
+      recommended_scheme="${OPENCLAW_MEMORY_RECOMMEND:-local}"
+      qmd_ok=$(openclaw_memory_qmd_available)
+      model_path=$(openclaw_memory_get_local_model_path)
+      model_status=$(openclaw_memory_local_model_status "$model_path")
+      hf_ok="${OPENCLAW_MEMORY_HF_OK:-unknown}"
+      mirror_ok="${OPENCLAW_MEMORY_MIRROR_OK:-unknown}"
+      recommended_reason=$(printf '%s；' "${OPENCLAW_MEMORY_RECOMMEND_REASON[@]}")
+      recommended_reason="${recommended_reason%？}"
+      recommended_reason="${recommended_reason%;}"
+
+      skpl_ui_header "兼容增强工具" "保留旧记忆方案里的实用诊断与降级能力，不改变当前新方案默认运行链"
+      skpl_ui_kv "当前推荐" "$recommended_scheme"
+      skpl_ui_kv "QMD 可用" "$qmd_ok"
+      skpl_ui_kv "本地模型" "${model_path:-未配置}"
+      skpl_ui_kv "模型状态" "$model_status"
+      skpl_ui_kv "HF 可达" "$hf_ok"
+      skpl_ui_kv "镜像可达" "$mirror_ok"
+      echo "推荐依据: ${recommended_reason:-未生成}"
+      echo
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "自动选择兼容方案" "只在当前环境更适合时，调用旧方案的自动推荐与部署逻辑"
+      skpl_ui_menu_item 2 "QMD 轻量兼容" "低资源或下载受限时，启用 QMD 轻量索引链路"
+      skpl_ui_menu_item 3 "本地检索兼容" "调用旧方案的本地 embedding 自动部署逻辑"
+      skpl_ui_menu_item 4 "索引修复诊断" "修复 includeDefaultMemory 和旧索引状态"
+      skpl_ui_menu_item 5 "来源与网络诊断" "检查 HF 与镜像可达性，辅助判断下载路径"
+      skpl_ui_menu_item 0 "返回上一级"
+      skpl_ui_footer_prompt "请输入你的选择: "
+      read -e legacy_choice
+      case "$legacy_choice" in
+        1) OPENCLAW_MEMORY_CONFIG_ONLY="false" openclaw_memory_auto_setup_run "auto"; break_end ;;
+        2) OPENCLAW_MEMORY_CONFIG_ONLY="false" openclaw_memory_auto_setup_run "qmd"; break_end ;;
+        3) OPENCLAW_MEMORY_CONFIG_ONLY="false" OPENCLAW_MEMORY_PREHEAT="${OPENCLAW_MEMORY_PREHEAT:-false}" openclaw_memory_auto_setup_run "local"; break_end ;;
+        4) openclaw_memory_fix_index ;;
+        5)
+          echo "地区: ${OPENCLAW_MEMORY_COUNTRY:-unknown}"
+          echo "当前下载源: ${OPENCLAW_MEMORY_HF_BASE:-unknown}"
+          echo "huggingface.co: $hf_ok"
+          echo "hf-mirror.com: $mirror_ok"
+          break_end
+          ;;
+        0) return 0 ;;
+        *) echo "无效的选择，请重试。"; sleep 1 ;;
+      esac
+    done
   }
 
   # ==========================================
@@ -13026,36 +13130,14 @@ openclaw_memorysearch_loop_self_heal() {
     if [ -z "$primary_model" ]; then
       primary_model="ollama/deepseek-v4:7b-instruct-q4_K_M"
     fi
-    case "$primary_model" in
-      ollama/qwen2.5*|ollama/qwen2-5*|ollama/qwen2_5*)
-        primary_model="ollama/deepseek-v4:7b-instruct-q4_K_M"
-        openclaw_configure_local_ollama_provider "deepseek-v4:7b-instruct-q4_K_M" "text" >/dev/null 2>&1 || true
-        python3 - "$(openclaw_get_config_file)" "$primary_model" <<'PY'
-import json, sys
-from pathlib import Path
-path = Path(sys.argv[1])
-primary_model = sys.argv[2]
-cfg = {}
-if path.exists():
-    try:
-        cfg = json.loads(path.read_text(encoding='utf-8'))
-    except Exception:
-        cfg = {}
-agents = cfg.setdefault('agents', {})
-defaults = agents.setdefault('defaults', {})
-model_cfg = defaults.get('model')
-if not isinstance(model_cfg, dict):
-    model_cfg = {}
-    defaults['model'] = model_cfg
-model_cfg['primary'] = primary_model
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-PY
-        echo "✅ 已将主文本模型切换为 deepseek-v4:7b-instruct-q4_K_M"
-        ;;
-    esac
     memory_model="${primary_model#ollama/}"
     [ -z "$memory_model" ] && memory_model="deepseek-v4:7b-instruct-q4_K_M"
+    if [[ "$primary_model" == ollama/* ]]; then
+      openclaw_configure_local_ollama_provider "$memory_model" "text" >/dev/null 2>&1 || true
+      echo "✅ 已让记忆检索跟随当前主文本模型: $memory_model"
+    else
+      echo "ℹ️ 当前主文本模型不是本地 Ollama，记忆检索继续使用本地模型: $memory_model"
+    fi
     openclaw_memory_config_set "memorySearch.ollama.model" "$memory_model"
     python3 - "$(openclaw_get_config_file)" <<'PY'
 import json, sys
@@ -14096,7 +14178,7 @@ PY
 openclaw_memory_apply_current_scheme() {
   local config_file
   config_file=$(openclaw_get_config_file)
-  echo "正在应用当前全栈分层记忆方案..."
+  echo "正在应用当前记忆方案..."
   openclaw_runtime_self_heal || return 1
   openclaw_memory_prepare_workspace_all >/dev/null 2>&1 || true
   openclaw_apply_recommended_model_profile >/dev/null 2>&1 || true
@@ -14117,7 +14199,7 @@ if config_path.exists():
     except Exception:
         cfg = {}
 memory = cfg.setdefault('memory', {})
-memory.setdefault('backend', 'qmd')
+memory.setdefault('backend', 'builtin')
 qmd = memory.setdefault('qmd', {})
 qmd['includeDefaultMemory'] = True
 memory_search = cfg.setdefault('memorySearch', {})
@@ -14159,7 +14241,7 @@ PY
   memory_extension_prepare >/dev/null 2>&1 || true
   echo "正在安装并启用本地记忆检索..."
   OPENCLAW_MEMORY_CONFIG_ONLY="false"
-  OPENCLAW_MEMORY_PREHEAT="true"
+  OPENCLAW_MEMORY_PREHEAT="${OPENCLAW_MEMORY_PREHEAT:-false}"
   openclaw_memory_enable_local_retrieval || {
     echo "❌ 当前记忆方案写入成功，但本地 embedding 模型或检索索引落地失败"
     return 1
@@ -14173,7 +14255,7 @@ PY
   openclaw_validate_global_tools_runtime >/dev/null 2>&1 || true
   openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
   openclaw_postinstall_acceptance_check >/dev/null 2>&1 || true
-  echo "✅ 当前记忆方案已一键应用并完成本地记忆检索落地"
+  echo "✅ 当前记忆方案已应用，本地记忆检索已落地"
 }
 
 openclaw_memory_scheme_settings_menu() {
@@ -14423,6 +14505,7 @@ PY
 
 openclaw_memory_apply_quick_profile() {
   local profile_key="$1"
+  local preheat_mode="true"
   local config_file
   config_file=$(openclaw_get_config_file)
   openclaw_runtime_self_heal || return 1
@@ -14442,27 +14525,27 @@ ai_cfg = json.loads(ai_stack_path.read_text(encoding='utf-8')) if ai_stack_path.
 
 profiles = {
     'beginner-safe': {
-        'memory': {'maxContextPercent': 12, 'similarityThreshold': 0.6, 'autoUpdateMinutes': 60, 'cleanupDays': 15, 'cloudUploadMemory': False, 'localOnly': True},
+        'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 12, 'similarityThreshold': 0.6, 'autoUpdateMinutes': 60, 'cleanupDays': 15, 'cloudUploadMemory': False, 'localOnly': True},
         'routing': {'defaultTextModel': 'ollama/qwen3:0.5b', 'defaultCodeModel': 'ollama/qwen3:0.5b'},
         'cache': {'routeTtlSeconds': 1200, 'resultTtlSeconds': 2400, 'toolTtlSeconds': 1200},
     },
     'balanced-local': {
-        'memory': {'maxContextPercent': 15, 'similarityThreshold': 0.58, 'autoUpdateMinutes': 30, 'cleanupDays': 30, 'cloudUploadMemory': False, 'localOnly': True},
+        'memory': {'backend': 'builtin', 'preheat': True, 'maxContextPercent': 15, 'similarityThreshold': 0.58, 'autoUpdateMinutes': 30, 'cleanupDays': 30, 'cloudUploadMemory': False, 'localOnly': True},
         'routing': {'defaultTextModel': 'ollama/deepseek-v4:7b-instruct-q4_K_M', 'defaultCodeModel': 'ollama/qwen2.5-coder:7b'},
         'cache': {'routeTtlSeconds': 900, 'resultTtlSeconds': 1800, 'toolTtlSeconds': 900},
     },
     'privacy-first': {
-        'memory': {'maxContextPercent': 10, 'similarityThreshold': 0.62, 'autoUpdateMinutes': 45, 'cleanupDays': 14, 'cloudUploadMemory': False, 'localOnly': True},
+        'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 10, 'similarityThreshold': 0.62, 'autoUpdateMinutes': 45, 'cleanupDays': 14, 'cloudUploadMemory': False, 'localOnly': True},
         'routing': {'defaultTextModel': 'ollama/qwen3:1.8b', 'defaultCodeModel': 'ollama/qwen3:1.8b'},
         'cache': {'routeTtlSeconds': 1500, 'resultTtlSeconds': 2400, 'toolTtlSeconds': 1200},
     },
     'cloud-power': {
-        'memory': {'maxContextPercent': 20, 'similarityThreshold': 0.55, 'autoUpdateMinutes': 20, 'cleanupDays': 45, 'cloudUploadMemory': False, 'localOnly': True},
+        'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 20, 'similarityThreshold': 0.55, 'autoUpdateMinutes': 20, 'cleanupDays': 45, 'cloudUploadMemory': False, 'localOnly': True},
         'routing': {'defaultTextModel': 'google/gemini-2.5-flash', 'defaultCodeModel': 'google/gemini-2.5-flash', 'defaultVisionModel': 'google/gemini-2.5-pro'},
         'cache': {'routeTtlSeconds': 600, 'resultTtlSeconds': 1200, 'toolTtlSeconds': 900},
     },
     'low-resource': {
-        'memory': {'maxContextPercent': 8, 'similarityThreshold': 0.65, 'autoUpdateMinutes': 90, 'cleanupDays': 10, 'cloudUploadMemory': False, 'localOnly': True},
+        'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 8, 'similarityThreshold': 0.65, 'autoUpdateMinutes': 90, 'cleanupDays': 10, 'cloudUploadMemory': False, 'localOnly': True},
         'routing': {'defaultTextModel': 'ollama/qwen3:0.3b', 'defaultCodeModel': 'ollama/qwen3:0.5b'},
         'cache': {'routeTtlSeconds': 1800, 'resultTtlSeconds': 1800, 'toolTtlSeconds': 1200},
     },
@@ -14473,7 +14556,7 @@ if not profile:
     raise SystemExit(1)
 
 memory = cfg.setdefault('memory', {})
-memory.setdefault('backend', 'qmd')
+memory.setdefault('backend', profile['memory'].get('backend', 'builtin'))
 memory.setdefault('qmd', {})['includeDefaultMemory'] = True
 cfg.setdefault('memorySearch', {})['provider'] = 'ollama'
 cfg['memorySearch'].setdefault('ollama', {})['model'] = profile['routing']['defaultTextModel'].split('/', 1)[1] if '/' in profile['routing']['defaultTextModel'] else profile['routing']['defaultTextModel']
@@ -14509,7 +14592,24 @@ config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', enc
 memory_cfg_path.write_text(json.dumps(memory_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 ai_stack_path.write_text(json.dumps(ai_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 PY
-  openclaw_memory_apply_current_scheme || return 1
+  preheat_mode=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" "$profile_key" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+profile_key = sys.argv[2]
+profiles = {
+    'beginner-safe': False,
+    'balanced-local': True,
+    'privacy-first': False,
+    'cloud-power': False,
+    'low-resource': False,
+}
+print('true' if profiles.get(profile_key, False) else 'false')
+PY
+)
+  OPENCLAW_MEMORY_PREHEAT="$preheat_mode" openclaw_memory_apply_current_scheme || return 1
   echo "✅ 已应用快速方案: $profile_key"
 }
 
@@ -14788,8 +14888,9 @@ openclaw_memory_strategy_panel() {
           skpl_ui_menu_item 2 "本地检索与索引" "仅处理 embedding、SQLite/LanceDB 和索引"
           skpl_ui_menu_item 3 "同步与资源" "查看混合记忆同步、硬件分级、资源预算和运行提示"
           skpl_ui_menu_item 4 "完整本地 AI 栈" "安装 Ollama 运行时和本地文本、代码、视觉模型"
-          skpl_ui_menu_item 5 "EvoMap 管理" "安装、更新、同步与经验目录管理"
-          skpl_ui_menu_item 6 "记忆验收报告" "查看当前记忆方案是否已经落地生效"
+          skpl_ui_menu_item 5 "兼容增强工具" "调用旧记忆方案里的自动推荐、QMD 轻量兼容、源诊断和索引修复"
+          skpl_ui_menu_item 6 "EvoMap 管理" "安装、更新、同步与经验目录管理"
+          skpl_ui_menu_item 7 "记忆验收报告" "查看当前记忆方案是否已经落地生效"
           skpl_ui_menu_item 0 "返回上一级"
           skpl_ui_footer_prompt "请输入你的选择: "
           read -e memory_advanced_choice
@@ -14798,8 +14899,9 @@ openclaw_memory_strategy_panel() {
             2) openclaw_memory_local_retrieval_menu ;;
             3) openclaw_memory_sync_menu ;;
             4) openclaw_full_local_ai_stack_menu ;;
-            5) openclaw_evomap_menu ;;
-            6) openclaw_ai_stack_acceptance_report; break_end ;;
+            5) openclaw_memory_legacy_compat_menu ;;
+            6) openclaw_evomap_menu ;;
+            7) openclaw_ai_stack_acceptance_report; break_end ;;
             0) break ;;
             *) echo "无效的选择，请重试。"; sleep 1 ;;
           esac
@@ -17497,6 +17599,7 @@ skpl_update_panel() {
   fi
   echo
   echo "正在重新载入最新面板..."
+  export SKPL_SKIP_SELF_SAVE=1
   exec bash "${SKPL_SCRIPT_PATH}" panel
 }
 
@@ -17552,7 +17655,7 @@ skpl_main_panel() {
     skpl_ui_section "安装与维护"
     skpl_ui_menu_item 3 "重新执行完整安装流程" "重置状态后从头运行"
     skpl_ui_menu_item 7 "从中断点继续安装" "按当前步骤续跑"
-    skpl_ui_menu_item 4 "SKPL 面板更新" "从 GitHub 拉取最新脚本"
+    skpl_ui_menu_item 4 "SKPL 面板更新" "从 GitHub 拉取最新脚本，并同步刷新当前入口"
     skpl_ui_menu_item 6 "查看最近日志" "读取安装与运行日志"
     skpl_ui_menu_item 8 "WSL 代理同步并更新系统" "执行 wslwin 与系统更新"
     skpl_ui_menu_item 5 "SKPL 面板卸载" "仅移除 SKPL 入口"
