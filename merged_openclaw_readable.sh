@@ -2480,8 +2480,6 @@ openclaw_memory_smart_route() {
     # 核心路由逻辑：写入配置供 OpenClaw 动态加载
     case "$tier" in
         3) # 高配：本地模型可用，强云端可用
-            openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
-            openclaw config set agents.defaults.memorySearch.local.modelPath "$local_model" >/dev/null 2>&1 || true
             if [ "$intent" = "vision" ] || [ "$intent" = "complex" ]; then
                 openclaw config set agents.defaults.model.primary "$vision_model" >/dev/null 2>&1
                 echo "🌟 [高配路由] 视觉/复杂任务切换至: $vision_model"
@@ -2491,8 +2489,6 @@ openclaw_memory_smart_route() {
             fi
             ;;
         2) # 中配：限制本地模型权重，依赖云端推理
-            openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
-            openclaw config set agents.defaults.memorySearch.local.modelPath "$local_model" >/dev/null 2>&1 || true
             if [ "$intent" = "vision" ]; then
                 openclaw config set agents.defaults.model.primary "$vision_model" >/dev/null 2>&1
                 echo "🌟 [中配路由] 图像识别强制走云端: $vision_model"
@@ -2502,7 +2498,6 @@ openclaw_memory_smart_route() {
             fi
             ;;
         *) # 低配：彻底关闭本地大模型，纯极速云端
-            openclaw config set agents.defaults.memorySearch.provider openai >/dev/null 2>&1 || true # Fallback to fast cloud search if available
             openclaw config set agents.defaults.model.primary "$text_model" >/dev/null 2>&1
             echo "🌟 [低配路由] 节省资源模式：全量走云端极速模型: $text_model"
             ;;
@@ -5572,7 +5567,6 @@ PYTHON_EOF
       echo ""
       echo "🧠 记忆与 AI:"
       echo "  - [memory-core]   # 基础记忆 (文件检索)"
-      echo "  - [memory-lancedb]  # 增强记忆 (向量数据库)"
       echo "  - [copilot-proxy] # Copilot 接口转发"
       echo ""
       echo "⚙️ 功能扩展:"
@@ -7780,11 +7774,17 @@ PY
 
 openclaw_memory_refresh_status_cache() {
   local json_output
+  openclaw_memory_cli_supported || return 1
   json_output=$(timeout 8 openclaw memory status --json 2>/dev/null || true)
   if [ -z "$json_output" ]; then
     return 1
   fi
   printf '%s' "$json_output" > "$SKPL_MEMORY_STATUS_CACHE_FILE"
+}
+
+openclaw_memory_cli_supported() {
+  command -v openclaw >/dev/null 2>&1 || return 1
+  timeout 8 openclaw --help 2>/dev/null | grep -qE '(^|[[:space:]])memory([[:space:]]|$)'
 }
 
 openclaw_memory_refresh_runtime_state() {
@@ -7816,6 +7816,7 @@ openclaw_memory_list_agents() {
   openclaw_memory_status_value() {
     local key="$1"
     local agent_id="${2:-}"
+    openclaw_memory_cli_supported || return 1
     if [ -n "$agent_id" ]; then
       openclaw memory status --agent "$agent_id" 2>/dev/null | awk -F': ' -v k="$key" '$1==k {print $2; exit}'
     else
@@ -7840,6 +7841,10 @@ openclaw_memory_list_agents() {
   openclaw_memory_rebuild_index_single() {
     local agent_id="${1:-main}"
     local store_raw store_file ts backup_file
+    if ! openclaw_memory_cli_supported; then
+      echo "ℹ️ 当前 OpenClaw 版本未提供 memory CLI，跳过索引重建。"
+      return 0
+    fi
     store_raw=$(openclaw_memory_status_value "Store" "$agent_id")
     store_file=$(openclaw_memory_expand_path "$store_raw")
     if [ -z "$store_file" ] || [ ! -f "$store_file" ]; then
@@ -7919,11 +7924,14 @@ EOF
 openclaw_memory_render_basic_status() {
   local backend provider model_path model_status workspace
   backend=$(openclaw_memory_get_backend)
-  provider=$(openclaw_memory_config_get "agents.defaults.memorySearch.provider")
-  model_path=$(openclaw_memory_get_local_model_path)
+  provider="config-only"
+  model_path=$(openclaw_default_memory_model_path)
   model_status=$(openclaw_memory_local_model_status "$model_path")
   workspace="$HOME/.openclaw/workspace"
   echo "当前显示为基础配置视图（尚未刷新运行时状态）"
+  if ! openclaw_memory_cli_supported; then
+    echo "当前版本未提供 openclaw memory 子命令，已切换为配置态视图"
+  fi
   echo "Agent: main"
   echo "  底层方案: ${backend:--}"
   echo "  搜索提供方: ${provider:--}"
@@ -8014,7 +8022,7 @@ PY
   }
 
   openclaw_memory_get_local_model_path() {
-    openclaw_memory_config_get "agents.defaults.memorySearch.local.modelPath"
+    openclaw_default_memory_model_path
   }
 
   openclaw_memory_local_model_status() {
@@ -8366,7 +8374,7 @@ EOF
   openclaw_memory_auto_setup_local() {
     echo "🔍 检测 Local 环境"
     openclaw_memory_cleanup_legacy_keys
-    local backend provider
+    local backend
     backend=$(openclaw_memory_get_backend)
     if [ "$backend" = "builtin" ] || [ "$backend" = "local" ]; then
       echo "✅ memory.backend 已是 builtin"
@@ -8374,13 +8382,7 @@ EOF
       openclaw_memory_config_set "memory.backend" "builtin"
       echo "✅ 已设置 memory.backend=builtin"
     fi
-    provider=$(openclaw_memory_config_get "agents.defaults.memorySearch.provider")
-    if [ "$provider" = "local" ]; then
-      echo "✅ memorySearch.provider 已是 local"
-    else
-      openclaw_memory_config_set "agents.defaults.memorySearch.provider" "local"
-      echo "✅ 已设置 agents.defaults.memorySearch.provider=local"
-    fi
+    echo "ℹ️ 当前版本跳过 agents.defaults.memorySearch 写入"
 
     local model_path model_status
     model_path=$(openclaw_memory_get_local_model_path)
@@ -8407,8 +8409,7 @@ EOF
         fi
         OPENCLAW_MEMORY_MODEL_PATH="$model_dest"
       fi
-      openclaw_memory_config_set "agents.defaults.memorySearch.local.modelPath" "$model_dest"
-      echo "✅ 已写入模型路径"
+      echo "✅ 已发现默认模型文件: $model_dest"
     fi
     if [ "$OPENCLAW_MEMORY_PREHEAT" = "true" ]; then
       echo "🔥 预热索引（可能下载模型）"
@@ -8547,7 +8548,6 @@ EOF
           echo "❌ 写入配置失败"
           return 1
         fi
-        openclaw_memory_config_set "agents.defaults.memorySearch.provider" "local" >/dev/null 2>&1
         ;;
       *)
         echo "❌ 未知方案: $scheme"
@@ -8816,11 +8816,14 @@ qmd.setdefault('includeDefaultMemory', True)
 agents = cfg.setdefault('agents', {})
 defaults = agents.setdefault('defaults', {})
 defaults.setdefault('workspace', '~/.openclaw/workspace')
-defaults.setdefault('memorySearch', {})
-defaults.setdefault('experimental', {}).setdefault('localModelLean', True)
-defaults.setdefault('modelFallback', 'ollama/qwen2.5-coder:7b')
-defaults.setdefault('imageModelFallback', 'ollama/qwen2.5vl:7b')
-defaults.setdefault('skills', {})['autoLoadWorkspaceSkills'] = True
+models_obj = defaults.get('models')
+if not isinstance(models_obj, dict):
+    if isinstance(models_obj, list):
+        models_obj = {str(item): {} for item in models_obj if isinstance(item, str) and item.strip()}
+    else:
+        models_obj = {}
+    defaults['models'] = models_obj
+defaults.pop('skills', None)
 
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
@@ -8948,7 +8951,6 @@ cfg.setdefault('agents', {}).setdefault('defaults', {})
 defs = cfg['agents']['defaults']
 defs.setdefault('models', {})
 defs['models'].setdefault(full_model, {})
-defs.setdefault('experimental', {}).setdefault('localModelLean', True)
 if role == 'image':
     image_model_cfg = defs.get('imageModel')
     if not isinstance(image_model_cfg, dict):
@@ -9036,7 +9038,6 @@ if force_local_profile or not isinstance(defs.get('model'), dict) or not defs['m
 if force_local_profile or not isinstance(defs.get('imageModel'), dict) or not defs['imageModel'].get('primary'):
     defs['imageModel'] = {'primary': image_model}
 defs['models'][code_model].setdefault('agentRuntime', {'id': 'auto'})
-defs.setdefault('experimental', {}).setdefault('localModelLean', True)
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
@@ -9061,6 +9062,11 @@ openclaw_postinstall_acceptance_check() {
     fi
     openclaw_memory_local_retrieval_status
     if openclaw_has_command openclaw; then
+      if openclaw_memory_cli_supported; then
+        echo "✅ OpenClaw memory CLI 可用"
+      else
+        echo "ℹ️ 当前 OpenClaw 版本未提供 memory CLI，记忆面板已降级为配置态视图"
+      fi
       timeout 10 openclaw models status >/dev/null 2>&1 && echo "✅ OpenClaw 模型状态可读取" || echo "⚠️ OpenClaw 模型状态读取失败"
       timeout 10 openclaw models list --provider ollama >/dev/null 2>&1 && echo "✅ OpenClaw 可读取 Ollama 模型目录" || echo "⚠️ OpenClaw 无法读取 Ollama 模型目录"
       timeout 10 openclaw doctor >/dev/null 2>&1 && echo "✅ openclaw doctor 可执行" || echo "⚠️ openclaw doctor 返回异常"
@@ -9259,7 +9265,7 @@ openclaw_ollama_quick_setup_menu() {
   openclaw_memory_local_retrieval_status() {
     local provider model_path model_status backend
     backend=$(openclaw_memory_get_backend)
-    provider=$(openclaw_memory_config_get "agents.defaults.memorySearch.provider")
+    provider="config-only"
     model_path=$(openclaw_memory_expand_path "$(openclaw_memory_get_local_model_path)")
     model_status=$(openclaw_memory_local_model_status "$model_path")
     echo "记忆后端: ${backend:-unknown}"
@@ -9272,15 +9278,19 @@ openclaw_ollama_quick_setup_menu() {
     esac
   }
 
-  openclaw_memory_enable_local_retrieval() {
+openclaw_memory_enable_local_retrieval() {
     echo "🚀 正在启用本地高命中记忆检索..."
     OPENCLAW_MEMORY_CONFIG_ONLY="false"
     OPENCLAW_MEMORY_PREHEAT="true"
     openclaw_memory_auto_setup_local || return 1
-    echo "🧱 正在重建全部索引..."
-    openclaw_memory_rebuild_index_all || true
+    if openclaw_memory_cli_supported; then
+      echo "🧱 正在重建全部索引..."
+      openclaw_memory_rebuild_index_all || true
+    else
+      echo "ℹ️ 当前 OpenClaw 版本未提供 memory CLI，已跳过索引重建。"
+    fi
     echo "✅ 已启用本地向量检索与索引预热"
-  }
+}
 
   openclaw_memory_local_retrieval_menu() {
     while true; do
@@ -9566,7 +9576,12 @@ PY
 
   openclaw_memory_deep_status() {
     echo "正在探测嵌入模型就绪状态..."
-    openclaw memory status --deep
+    if openclaw_memory_cli_supported; then
+      openclaw memory status --deep
+    else
+      echo "ℹ️ 当前 OpenClaw 版本未提供 memory CLI，无法执行深度状态探测。"
+      openclaw_memory_render_basic_status
+    fi
   }
 
   openclaw_memory_menu() {
