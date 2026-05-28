@@ -6285,52 +6285,7 @@ PY
 
 # 6. 极致增强菜单面板
 openclaw_memory_model_enhancement_menu() {
-  local tier
-  tier=$(openclaw_detect_hardware_tier)
-  
-  while true; do
-    clear
-    skpl_ui_header "极致记忆与路由" "适配全机型的极速方案"
-    echo "当前硬件层级: $tier (Tier 1=低配, 2=中配, 3=高配)"
-    echo "✅ 已抛弃所有重型框架，改用 SQLite + 智能路由"
-    echo
-    skpl_ui_section "一键操作"
-    skpl_ui_menu_item 1 "执行智能路由" "根据当前场景自动切换最佳大模型"
-    skpl_ui_menu_item 2 "初始化极速核心" "重置轻量级本地记忆库 (SQLite)"
-    skpl_ui_menu_item 3 "EvoMap 沉淀" "将近期经验转化为记忆 (零延迟)"
-    skpl_ui_menu_item 4 "全量备份/恢复" "极致轻量化备份核心记忆"
-    skpl_ui_menu_item 0 "返回主菜单"
-    skpl_ui_footer_prompt "请选择: "
-    read -e choice
-    case "$choice" in
-      1)
-        read -e -p "输入场景意图 (text/vision/complex): " intent
-        [ -z "$intent" ] && intent="text"
-        openclaw_memory_smart_route "$intent"
-        openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
-        break_end
-        ;;
-      2)
-        openclaw_memory_fast_init
-        break_end
-        ;;
-      3)
-        openclaw_evomap_fast_ingest "手动操作" "用户通过面板触发了经验沉淀"
-        openclaw_evomap_fast_evolve_into_skill
-        break_end
-        ;;
-      4)
-        openclaw_backup_restore_menu
-        ;;
-      0)
-        return 0
-        ;;
-      *)
-        echo "无效的选择，请重试。"
-        sleep 1
-        ;;
-    esac
-  done
+  openclaw_memory_strategy_panel
 }
 
 openclaw_memory_prepare_prefetch() {
@@ -13690,6 +13645,99 @@ print(f"云端上传记忆: {'开启' if cfg.get('privacy', {}).get('cloudUpload
 PY
 }
 
+openclaw_memory_apply_current_scheme() {
+  local config_file
+  config_file=$(openclaw_get_config_file)
+  echo "正在应用当前全栈分层记忆方案..."
+  openclaw_memory_prepare_workspace_all >/dev/null 2>&1 || true
+  openclaw_apply_recommended_model_profile >/dev/null 2>&1 || true
+  openclaw_optimize_memory_and_skills >/dev/null 2>&1 || true
+  openclaw_inject_skills >/dev/null 2>&1 || true
+  openclaw_safe_enable_global_tools >/dev/null 2>&1 || true
+  python3 - "$config_file" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+memory_cfg_path = Path(sys.argv[2])
+cfg = {}
+if config_path.exists():
+    try:
+        cfg = json.loads(config_path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+memory = cfg.setdefault('memory', {})
+memory.setdefault('backend', 'qmd')
+qmd = memory.setdefault('qmd', {})
+qmd['includeDefaultMemory'] = True
+memory_search = cfg.setdefault('memorySearch', {})
+memory_search['provider'] = 'ollama'
+ollama_cfg = memory_search.setdefault('ollama', {})
+ollama_cfg['model'] = ollama_cfg.get('model') or 'deepseek-v4:7b-instruct-q4_K_M'
+tools = cfg.setdefault('tools', {})
+tools.setdefault('global', {})['enabled'] = True
+agents = cfg.setdefault('agents', {}).setdefault('defaults', {})
+agents.setdefault('workspace', '~/.openclaw/workspace')
+config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+memory_cfg = {}
+if memory_cfg_path.exists():
+    try:
+        memory_cfg = json.loads(memory_cfg_path.read_text(encoding='utf-8'))
+    except Exception:
+        memory_cfg = {}
+memory_cfg['enabled'] = True
+memory_cfg.setdefault('shortTerm', {})['enabled'] = True
+memory_cfg.setdefault('midTerm', {})['enabled'] = True
+memory_cfg.setdefault('longTerm', {})['enabled'] = True
+memory_cfg.setdefault('longTerm', {})['autoExtract'] = memory_cfg.get('longTerm', {}).get('autoExtract') or 'balanced'
+memory_cfg.setdefault('knowledgeBase', {})['enabled'] = True
+privacy = memory_cfg.setdefault('privacy', {})
+privacy['localOnly'] = True
+privacy['maskSensitive'] = True
+privacy.setdefault('blockedKeywords', [])
+privacy.setdefault('encryptAtRest', False)
+privacy['cloudUploadMemory'] = False
+injection = memory_cfg.setdefault('injection', {})
+injection['maxContextPercent'] = 15
+injection['similarityThreshold'] = 0.58
+maintenance = memory_cfg.setdefault('maintenance', {})
+maintenance['cleanupDays'] = int(maintenance.get('cleanupDays', 30) or 30)
+maintenance['autoUpdateMinutes'] = int(maintenance.get('autoUpdateMinutes', 30) or 30)
+memory_cfg_path.write_text(json.dumps(memory_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+  memory_extension_prepare >/dev/null 2>&1 || true
+  openclaw_validate_global_tools_runtime >/dev/null 2>&1 || true
+  openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
+  echo "✅ 当前记忆方案已一键应用"
+}
+
+openclaw_memory_strategy_panel() {
+  while true; do
+    clear
+    skpl_ui_header "记忆方案控制台" "一键应用当前分层记忆方案，并统一管理短中长期记忆"
+    openclaw_memory_extension_render_status
+    echo
+    skpl_ui_section "方案入口"
+    skpl_ui_menu_item 1 "一键应用当前方案" "按你当前的分层记忆方案重写配置、技能和长期记忆策略"
+    skpl_ui_menu_item 2 "长期记忆管理" "查看、搜索、编辑、导入导出长期记忆"
+    skpl_ui_menu_item 3 "本地混合检索" "查看本地检索、索引和融合检索状态"
+    skpl_ui_menu_item 4 "记忆验收报告" "输出当前记忆方案落地结果"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e memory_panel_choice
+    case "$memory_panel_choice" in
+      1) openclaw_memory_apply_current_scheme; break_end ;;
+      2) openclaw_memory_extension_menu ;;
+      3) openclaw_memory_local_retrieval_menu ;;
+      4) openclaw_ai_stack_acceptance_report; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
 openclaw_memory_extension_add_entry() {
   local category title content tags sensitive
   read -e -p "分类（identity/preference/knowledge/project）: " category
@@ -13808,13 +13856,12 @@ PY
   new_content="${new_content:-$content}"
   new_tags="${new_tags:-$tags}"
   new_sensitive="${new_sensitive:-$sensitive}"
-  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$entry_id" "$new_category" "$new_title" "$new_content" "$new_tags" "$new_sensitive" <<'PY'
+  memory_extension_upsert_entry "$new_category" "$new_title" "$new_content" "$new_tags" "$new_sensitive" || return 1
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$entry_id" <<'PY'
 import sqlite3
 import sys
-import time
-
 conn = sqlite3.connect(sys.argv[1])
-conn.execute('update memory_entries set category = ?, title = ?, content = ?, tags = ?, sensitive = ?, updated_at = ? where id = ?', (sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6], int(sys.argv[7]), int(time.time()), sys.argv[2]))
+conn.execute('update memory_entries set deleted = 1 where id = ?', (sys.argv[2],))
 conn.commit()
 conn.close()
 PY
@@ -14002,9 +14049,9 @@ cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
 print(','.join(cfg.get('privacy', {}).get('blockedKeywords', [])))
 PY
 )
-  echo "当前设置："
+  echo "当前记忆方案设置："
   echo "1. 总开关: $enabled"
-  echo "2. 本地专属: $local_only"
+  echo "2. 本地 only: $local_only"
   echo "3. 敏感脱敏: $mask_sensitive"
   echo "4. 注入上限: $max_percent"
   echo "5. 相似度阈值: $threshold"
@@ -14012,6 +14059,7 @@ PY
   echo "7. 自动更新频率(分钟): $auto_minutes"
   echo "8. 自动提取强度: $extract_strength"
   echo "9. 禁止关键词: ${blocked:-<空>}"
+  echo "10. 重置为当前方案默认值"
   read -e -p "输入要修改的编号(0 返回): " settings_choice
   case "$settings_choice" in
     1) read -e -p "输入 true/false: " v; memory_extension_update_config_field "enabled" "$v" bool ;;
@@ -14032,6 +14080,7 @@ from pathlib import Path
 print(Path('/tmp/openclaw-memory-blocked.json').read_text(encoding='utf-8').strip())
 PY
 )" json ;;
+    10) openclaw_memory_apply_current_scheme ;;
     0) return 0 ;;
   esac
   echo "✅ 设置已更新"
@@ -14072,32 +14121,43 @@ openclaw_memory_extension_import_json() {
   read -e -p "输入要导入的 JSON 文件路径: " import_file
   [ -f "$import_file" ] || { echo "❌ 文件不存在"; return 1; }
   memory_extension_prepare
-  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$import_file" <<'PY'
+  local rows_tsv imported=0
+  rows_tsv=$(python3 - "$import_file" <<'PY'
 import json
-import sqlite3
 import sys
-import time
-
-conn = sqlite3.connect(sys.argv[1])
-items = json.loads(open(sys.argv[2], 'r', encoding='utf-8').read())
-now = int(time.time())
+try:
+    items = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+except Exception:
+    raise SystemExit(2)
+if not isinstance(items, list):
+    raise SystemExit(3)
 for item in items:
-    category = str(item.get('category') or 'knowledge')
-    title = str(item.get('title') or '').strip()
-    content = str(item.get('content') or '').strip()
-    if not title or not content:
-        continue
+    category = str(item.get('category') or 'knowledge').strip()
+    title = str(item.get('title') or '').strip().replace('\t', ' ').replace('\n', ' ')
+    content = str(item.get('content') or '').strip().replace('\t', ' ').replace('\n', ' ')
     tags = json.dumps(item.get('tags') or [], ensure_ascii=False)
-    sensitive = 1 if item.get('sensitive') else 0
-    row = conn.execute('select id from memory_entries where deleted = 0 and category = ? and title = ? limit 1', (category, title)).fetchone()
-    if row:
-        conn.execute('update memory_entries set content = ?, tags = ?, sensitive = ?, updated_at = ? where id = ?', (content, tags, sensitive, now, row[0]))
-    else:
-        conn.execute('insert into memory_entries (category, title, content, tags, sensitive, deleted, created_at, updated_at) values (?, ?, ?, ?, ?, 0, ?, ?)', (category, title, content, tags, sensitive, now, now))
-conn.commit()
-conn.close()
+    sensitive = '1' if item.get('sensitive') else '0'
+    if title and content:
+        print('\t'.join([category, title, content, tags, sensitive]))
 PY
-  echo "✅ 已导入扩展记忆"
+)
+  local parse_rc=$?
+  if [ "$parse_rc" = "2" ]; then
+    echo "❌ 导入失败：JSON 解析失败"
+    return 1
+  fi
+  if [ "$parse_rc" = "3" ]; then
+    echo "❌ 导入失败：JSON 顶层必须是数组"
+    return 1
+  fi
+  while IFS=$'\t' read -r category title content tags sensitive; do
+    [ -n "$title" ] || continue
+    memory_extension_upsert_entry "$category" "$title" "$content" "$tags" "$sensitive" >/dev/null 2>&1 || true
+    imported=$((imported+1))
+  done <<EOF
+$rows_tsv
+EOF
+  echo "✅ 已导入扩展记忆: $imported 条"
 }
 
 openclaw_memory_extension_menu() {
@@ -14154,7 +14214,7 @@ openclaw_memory_extension_menu() {
     fi
   }
 
-  openclaw_memory_menu() {
+openclaw_memory_menu() {
     local config_file
     config_file=$(openclaw_get_config_file)
     if [ "$(openclaw_memory_config_get "memory.qmd.includeDefaultMemory")" = "false" ]; then
@@ -14163,7 +14223,7 @@ openclaw_memory_extension_menu() {
     send_stats "OpenClaw记忆管理"
     while true; do
       clear
-      skpl_ui_header "OpenClaw 智能大脑中心" "模型配置 / 技能注入 / 经验沉淀"
+      skpl_ui_header "OpenClaw 记忆方案中心" "一键应用当前分层记忆方案 / 混合检索 / 长期记忆治理"
       openclaw_memory_render_status
       echo
       python3 - "$config_file" <<'PY'
@@ -14176,37 +14236,36 @@ try:
 except: pass
 PY
       echo
-      skpl_ui_section "操作 (让 OpenClaw 真正变聪明、更省钱)"
-      skpl_ui_menu_item 1 "🤖 智能模型路由" "为文本、图片、代码分别配置不同模型 (省 Token/提速)"
-      skpl_ui_menu_item 2 "⚡ 注入大脑指令" "一键注入: 省 Token + 自动选模型 + 硬件感知 Skills"
-      skpl_ui_menu_item 3 "🧠 本地记忆检索" "启用本地 embedding + LanceDB + 全量重建索引"
-      skpl_ui_menu_item 4 "🧩 经验进化 EvoMap" "沉淀报错/操作经验, 下次遇到 OpenClaw 自动照着修"
-      skpl_ui_menu_item 5 "🗂️ 长期记忆扩展" "独立结构化记忆库 / 导入导出 / 管理面板"
-      skpl_ui_menu_item 6 "💾 极简备份/恢复" "核心数据与 Skills 的极速备份"
+      skpl_ui_section "操作 (按当前记忆方案工作)"
+      skpl_ui_menu_item 1 "一键应用当前方案" "统一应用短期/中期/长期记忆、隐私策略、默认模型和技能注入"
+      skpl_ui_menu_item 2 "记忆方案控制台" "进入当前方案专用面板"
+      skpl_ui_menu_item 3 "本地混合检索" "启用本地 embedding + SQLite/LanceDB + 融合检索"
+      skpl_ui_menu_item 4 "长期记忆治理" "结构化长期记忆、导入导出、编辑与高级设置"
+      skpl_ui_menu_item 5 "经验进化 EvoMap" "沉淀报错/操作经验, 下次遇到问题自动复用"
+      skpl_ui_menu_item 6 "备份/恢复" "记忆库、方案配置与核心数据备份"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e memory_choice
       case "$memory_choice" in
         1)
-          openclaw_model_manager
+          openclaw_memory_apply_current_scheme
           ;;
         2)
-          openclaw_inject_skills
-          read -n 1 -s -r -p "完成！按任意键返回..."
+          openclaw_memory_strategy_panel
           ;;
         3)
           openclaw_memory_local_retrieval_menu
           ;;
         4)
+          openclaw_memory_extension_menu
+          ;;
+        5)
           echo "开始进化经验沉淀..."
           read -e -p "标题 (如: 代理配置失败): " title
           [ -z "$title" ] && title="日常经验"
           read -e -p "经验内容/解法: " content
           openclaw_evomap_real_ingest "$title" "$content"
           read -n 1 -s -r -p "经验已存入大脑！按任意键返回..."
-          ;;
-        5)
-          openclaw_memory_extension_menu
           ;;
         6)
           openclaw_backup_restore_menu
