@@ -1336,10 +1336,38 @@ print(','.join(hosts))
 PY
 }
 
-if [ -f /root/.skpl/proxy-env.sh ]; then
-  # shellcheck disable=SC1091
-  source /root/.skpl/proxy-env.sh "$PROXY_PORT"
-fi
+# 修复版代理检测 - 添加3秒整体超时防止卡住
+_skpl_detect_proxy() {
+  local SKPL_PROXY_PORT_VALUE="${1:-10808}"
+  local ACTIVE_PROXY=""
+  local candidate
+  
+  _check_port() {
+    local ip_port="$1" ip port
+    ip=$(echo "$ip_port" | cut -d: -f1)
+    port=$(echo "$ip_port" | cut -d: -f2)
+    timeout -s KILL 0.5 bash -c "echo >/dev/tcp/$ip/$port" 2>/dev/null
+  }
+  
+  {
+    while IFS= read -r candidate; do
+      [ -z "$candidate" ] && continue
+      if _check_port "$candidate"; then
+        ACTIVE_PROXY="$candidate"
+        break
+      fi
+    done < <(printf '%s\n' "127.0.0.1:${SKPL_PROXY_PORT_VALUE}" "10.255.255.254:${SKPL_PROXY_PORT_VALUE}" "$(getent ahostsv4 host.docker.internal 2>/dev/null | awk 'NR==1{print $1}'):${SKPL_PROXY_PORT_VALUE}" "$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf 2>/dev/null):${SKPL_PROXY_PORT_VALUE}" "$(ip route 2>/dev/null | awk '/^default /{print $3; exit}'):${SKPL_PROXY_PORT_VALUE}" | awk '!seen[$0]++')
+  } &
+  local _check_pid=$!
+  wait $_check_pid 2>/dev/null || ACTIVE_PROXY=""
+  
+  if [ -n "$ACTIVE_PROXY" ]; then
+    local PROXY_URL="http://$ACTIVE_PROXY"
+    export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL" HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
+    export no_proxy="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.modelscope.cn,.deepseek.com"
+  fi
+}
+_skpl_detect_proxy "$PROXY_PORT"
 
 CONFIG_FILE="${HOME}/.openclaw/openclaw.json"
 DYNAMIC_NO_PROXY="$(collect_domestic_hosts_from_config "$CONFIG_FILE" 2>/dev/null || true)"
@@ -2543,8 +2571,8 @@ PY
 # Get model context size from openclaw config
 openclaw_get_model_context_size() {
   local model_id context_size
-  model_id=$(openclaw config get agents.defaults.model.primary 2>/dev/null || echo "")
-  [ -z "$model_id" ] && model_id=$(openclaw config get agents.defaults.models 2>/dev/null | head -1 | cut -d'"' -f2 || echo "")
+  model_id=$(timeout 5 openclaw config get agents.defaults.model.primary 2>/dev/null || echo "")
+  [ -z "$model_id" ] && model_id=$(timeout 5 openclaw config get agents.defaults.models 2>/dev/null | head -1 | cut -d'"' -f2 || echo "")
   # Default context sizes for common models
   case "$model_id" in
     *qwen3:0.3b*|*0.3b*) context_size=32768 ;;
@@ -12981,7 +13009,7 @@ PY
     local key="$1"
     local default_value="${2:-}"
     local value
-    value=$(openclaw config get "$key" 2>/dev/null | head -n 1 | sed -e 's/^"//' -e 's/"$//')
+    value=$(timeout 5 openclaw config get "$key" 2>/dev/null | head -n 1 | sed -e 's/^"//' -e 's/"$//')
     if [ -z "$value" ] || [ "$value" = "null" ] || [ "$value" = "undefined" ]; then
       echo "$default_value"
       return 0
@@ -13963,7 +13991,7 @@ openclaw_memory_fix_index() {
       echo "⚠️ 检测到当前方案为 QMD，但未安装 qmd 命令。"
       echo "   可切换 Local，或安装 bun + qmd 后再试。"
     fi
-    include_dm=$(openclaw config get memory.qmd.includeDefaultMemory 2>/dev/null)
+    include_dm=$(timeout 5 openclaw config get memory.qmd.includeDefaultMemory 2>/dev/null)
     skpl_ui_header "索引修复诊断" "检查 includeDefaultMemory 与索引重建路径"
     skpl_ui_kv "includeDefaultMemory" "${include_dm:-未设置}"
     echo ""
@@ -17612,7 +17640,7 @@ PY
 
     if openclaw_has_command openclaw; then
       local value
-      value=$(openclaw config get "$path" 2>&1 | head -n 1)
+      value=$(timeout 5 openclaw config get "$path" 2>&1 | head -n 1)
       if [ -n "$value" ]; then
         if echo "$value" | grep -qi "config path not found"; then
           echo "(unset)"
@@ -17676,7 +17704,7 @@ PY
     if openclaw config unset "$key" >/dev/null 2>&1; then
       return 0
     fi
-    probe=$(openclaw config get "$key" 2>&1 | head -n 1)
+    probe=$(timeout 5 openclaw config get "$key" 2>&1 | head -n 1)
     if [ -z "$probe" ] || [ "$probe" = "null" ] || [ "$probe" = "(unset)" ] || echo "$probe" | grep -qi "config path not found"; then
       return 0
     fi
@@ -17767,10 +17795,10 @@ print(json.dumps(data, indent=2))
     skpl_ui_kv "宿主机审批" "~/.openclaw/exec-approvals.json"
     skpl_ui_rule "$gl_hui" "─" 60
     local current_profile current_sec current_ask current_elevated
-    current_profile=$(openclaw config get tools.profile 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
-    current_sec=$(openclaw config get tools.exec.security 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
-    current_ask=$(openclaw config get tools.exec.ask 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
-    current_elevated=$(openclaw config get tools.elevated.enabled 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+    current_profile=$(timeout 5 openclaw config get tools.profile 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+    current_sec=$(timeout 5 openclaw config get tools.exec.security 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+    current_ask=$(timeout 5 openclaw config get tools.exec.ask 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+    current_elevated=$(timeout 5 openclaw config get tools.elevated.enabled 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
     # 清理空值
     [ -z "$current_profile" ] || echo "$current_profile" | grep -qi "config path not found" && current_profile=""
     [ -z "$current_sec" ] || echo "$current_sec" | grep -qi "config path not found" && current_sec=""
@@ -18093,7 +18121,7 @@ PY
       return 0
     fi
     local value
-    value=$(openclaw config get agents.defaults.agent 2>&1 | head -n 1)
+    value=$(timeout 5 openclaw config get agents.defaults.agent 2>&1 | head -n 1)
     if [ -z "$value" ] || echo "$value" | grep -qi "config path not found"; then
       value=$(openclaw agents list --json 2>/dev/null | python3 -c 'import json,sys
 try:
