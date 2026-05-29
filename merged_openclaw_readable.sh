@@ -6234,18 +6234,29 @@ def network_info():
     latency_ms = None
     online = False
     quality = 'offline'
+    # 修复：使用 socket 直接检测，避免 bash -lc 加载慢的问题
     try:
-        out = subprocess.check_output(['bash', '-lc', 'timeout 3 curl -I -s https://www.baidu.com >/dev/null && printf ok'], text=True, timeout=5).strip()
-        if out == 'ok':
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex(('223.5.5.5', 53))  # 阿里云 DNS
+        if result == 0:
             online = True
+        sock.close()
     except Exception:
         online = False
-    try:
-        ping = subprocess.check_output(['bash', '-lc', 'ping -c 1 -W 1 1.1.1.1 | awk -F"time=" "/time=/{print $2}" | awk "{print $1}"'], text=True, timeout=3).strip()
-        if ping:
-            latency_ms = float(ping)
-    except Exception:
-        latency_ms = None
+    # 延迟检测 - 使用更轻量的方式
+    if online:
+        try:
+            import time
+            start = time.time()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            sock.connect(('223.5.5.5', 53))
+            sock.close()
+            latency_ms = (time.time() - start) * 1000
+        except Exception:
+            latency_ms = None
     if online and latency_ms is not None:
         if latency_ms <= 80:
             quality = 'excellent'
@@ -14773,8 +14784,9 @@ openclaw_full_local_stack_setup() {
 
 openclaw_memory_prepare_layered_local_models() {
     local profile_json tier text_model code_model vision_model want_vision
-    profile_json=$(openclaw_detect_hardware_profile_json)
-    tier=$(python3 - "$profile_json" <<'PY'
+    echo "   正在检测硬件配置..."
+    profile_json=$(openclaw_detect_hardware_profile_json 2>/dev/null) || profile_json='{"tier":"entry-cpu"}'
+    tier=$(python3 - "$profile_json" <<'PY' 2>/dev/null || echo 'entry-cpu'
 import json, sys
 print((json.loads(sys.argv[1]) or {}).get('tier', 'entry-cpu'))
 PY
@@ -14947,7 +14959,8 @@ openclaw_install_ollama_runtime() {
     fi
     openclaw_ensure_ollama_install_tools || return 1
     echo "⬇️ 正在安装 ollama 本地模型运行时..."
-    if curl -fsSL https://ollama.com/install.sh | sh; then
+    echo "   下载安装脚本（最多60秒）..."
+    if curl -fsSL --max-time 60 https://ollama.com/install.sh | sh; then
       echo "✅ ollama 安装完成"
       openclaw_ensure_ollama_running || true
     else
@@ -15187,12 +15200,13 @@ openclaw_ollama_pull_first_available() {
         continue
       fi
       echo "⬇️ 尝试拉取本地$model_role模型: $model_name"
+      echo "   模型下载可能需要几分钟，请耐心等待..."
       if ! skpl_confirm_model_download "$model_name" "$model_role"; then
         echo "⏭️ 用户取消下载: $model_name"
         openclaw_ollama_cache_status_set "$model_role" "$model_name" "skipped" "用户取消"
         continue
       fi
-      if ollama pull "$model_name"; then
+      if timeout 600 ollama pull "$model_name"; then
         OPENCLAW_LAST_PULLED_MODEL="$model_name"
         openclaw_ollama_cache_status_set "$model_role" "$model_name" "ok" "拉取成功"
         openclaw_configure_local_ollama_provider "$model_name" "$model_role" || true
