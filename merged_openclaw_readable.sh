@@ -1346,7 +1346,7 @@ _skpl_detect_proxy() {
     local ip_port="$1" ip port
     ip=$(echo "$ip_port" | cut -d: -f1)
     port=$(echo "$ip_port" | cut -d: -f2)
-    timeout -s KILL 0.5 bash -c "echo >/dev/tcp/$ip/$port" 2>/dev/null
+    timeout 0.5 bash -c "echo >/dev/tcp/$ip/$port" 2>/dev/null
   }
   
   {
@@ -1359,7 +1359,10 @@ _skpl_detect_proxy() {
     done < <(printf '%s\n' "127.0.0.1:${SKPL_PROXY_PORT_VALUE}" "10.255.255.254:${SKPL_PROXY_PORT_VALUE}" "$(getent ahostsv4 host.docker.internal 2>/dev/null | awk 'NR==1{print $1}'):${SKPL_PROXY_PORT_VALUE}" "$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf 2>/dev/null):${SKPL_PROXY_PORT_VALUE}" "$(ip route 2>/dev/null | awk '/^default /{print $3; exit}'):${SKPL_PROXY_PORT_VALUE}" | awk '!seen[$0]++')
   } &
   local _check_pid=$!
-  wait $_check_pid 2>/dev/null || ACTIVE_PROXY=""
+  # 使用timeout确保wait不会无限等待
+  timeout 3 bash -c "wait $_check_pid" 2>/dev/null || ACTIVE_PROXY=""
+  # 如果还在运行，强制终止
+  kill $_check_pid 2>/dev/null || true
   
   if [ -n "$ACTIVE_PROXY" ]; then
     local PROXY_URL="http://$ACTIVE_PROXY"
@@ -6198,7 +6201,9 @@ openclaw_detect_hardware_profile_json() {
   if skpl_cached_hardware_profile 2>/dev/null; then
     return 0
   fi
-  python3 - <<'PY' 2>/dev/null
+  # 使用子shell和timeout确保不会卡住
+  (
+    timeout 10 python3 - <<'PY'
 import json
 import os
 import re
@@ -6372,6 +6377,11 @@ print(json.dumps({
     'budget': budget,
 }, ensure_ascii=False))
 PY
+  ) || {
+    # 超时或失败时使用默认值
+    echo '{"tier":"unknown","memoryMb":8192,"cpuThreads":4,"cpuInstructionSet":[],"gpu":{"present":false,"name":"","vramMb":0,"freeVramMb":0},"storage":{"totalGb":0,"freeGb":0,"type":"unknown"},"network":{"online":false,"latencyMs":null,"quality":"offline"},"battery":{"present":false,"percent":null},"budget":{"reserveGpuMb":100,"reserveMemoryMb":512,"usableMemoryMb":7680,"usableGpuMb":0}}'
+    return 0
+  }
   skpl_cache_hardware_profile
 }
 
