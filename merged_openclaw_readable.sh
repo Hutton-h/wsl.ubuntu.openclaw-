@@ -6170,7 +6170,7 @@ openclaw_detect_hardware_profile_json() {
   if skpl_cached_hardware_profile 2>/dev/null; then
     return 0
   fi
-  python3 - <<'PY'
+  python3 - <<'PY' 2>/dev/null
 import json
 import os
 import re
@@ -16533,8 +16533,11 @@ openclaw_memory_recommend_quick_profile() {
   local privacy_choice="$3"
   local network_choice="$4"
   local profile_json
-  profile_json=$(openclaw_detect_hardware_profile_json)
-  python3 - "$profile_json" "$device_choice" "$usecase_choice" "$privacy_choice" "$network_choice" <<'PY'
+  profile_json=$(openclaw_detect_hardware_profile_json 2>/dev/null) || true
+  if [ -z "$profile_json" ]; then
+    profile_json='{"tier":"unknown","memoryMb":8192,"cpuThreads":4,"gpu":{"present":false},"network":{"quality":"offline"},"battery":{"present":false}}'
+  fi
+  python3 - "$profile_json" "$device_choice" "$usecase_choice" "$privacy_choice" "$network_choice" <<'PY' 2>/dev/null || true
 import json
 import sys
 
@@ -16675,7 +16678,14 @@ openclaw_memory_quick_profile_wizard() {
     esac
   done
 
-  recommendation=$(openclaw_memory_recommend_quick_profile "$device_choice" "$usecase_choice" "$privacy_choice" "$network_choice") || return 1
+  echo -e "\n🔍 正在检测硬件配置，请稍候..."
+  recommendation=$(openclaw_memory_recommend_quick_profile "$device_choice" "$usecase_choice" "$privacy_choice" "$network_choice") || {
+    echo "⚠️ 推荐引擎异常，使用默认方案" >&2
+    recommendation="beginner-safe
+unknown
+offline
+推荐引擎异常，使用默认新手方案"
+  }
   {
     IFS= read -r profile_key
     IFS= read -r detected_tier
