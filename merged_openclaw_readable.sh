@@ -4617,7 +4617,7 @@ openclaw_ai_stack_plugin_policy_json() {
   config_file=$(openclaw_get_config_file)
   approvals_json='{}'
   if openclaw_has_command openclaw; then
-    approvals_json=$(openclaw approvals get --json 2>/dev/null || printf '%s' '{}')
+    approvals_json=$(timeout 5 openclaw approvals get --json 2>/dev/null || printf '%s' '{}')
   fi
   if [ -z "$approvals_json" ] || [ "$approvals_json" = "null" ]; then
     approvals_json=$(python3 - "$HOME/.openclaw/exec-approvals.json" <<'PY'
@@ -13021,7 +13021,7 @@ PY
     local key="$1"
     shift
     local value="$1"
-    if timeout 15 openclaw config set "$key" "$@" >/dev/null 2>&1; then
+    if timeout 5 openclaw config set "$key" "$@" >/dev/null 2>&1; then
       return 0
     fi
     python3 - "$(openclaw_get_config_file)" "$key" "$value" <<'PY'
@@ -13194,9 +13194,9 @@ openclaw_memory_list_agents() {
     local agent_id="${2:-}"
     openclaw_memory_cli_supported || return 1
     if [ -n "$agent_id" ]; then
-      openclaw memory status --agent "$agent_id" 2>/dev/null | awk -F': ' -v k="$key" '$1==k {print $2; exit}'
+      timeout 5 openclaw memory status --agent "$agent_id" 2>/dev/null | awk -F': ' -v k="$key" '$1==k {print $2; exit}'
     else
-      openclaw memory status 2>/dev/null | awk -F': ' -v k="$key" '$1==k {print $2; exit}'
+      timeout 5 openclaw memory status 2>/dev/null | awk -F': ' -v k="$key" '$1==k {print $2; exit}'
     fi
   }
 
@@ -13236,7 +13236,7 @@ openclaw_memory_list_agents() {
         echo "⚠️ [$agent_id] 索引备份失败，继续重建。"
       fi
     fi
-    openclaw memory index --agent "$agent_id" --force
+    timeout 120 openclaw memory index --agent "$agent_id" --force
   }
 
   openclaw_memory_rebuild_index_safe() {
@@ -13753,7 +13753,7 @@ openclaw_memory_download_file() {
       preh_agent_lines=$(openclaw_memory_list_agents)
       while IFS=$'\t' read -r preh_agent_id preh_workspace; do
         [ -z "$preh_agent_id" ] && continue
-        openclaw memory index --agent "$preh_agent_id" --force
+        timeout 120 openclaw memory index --agent "$preh_agent_id" --force
       done <<EOF
 $preh_agent_lines
 EOF
@@ -13776,10 +13776,12 @@ openclaw_memory_auto_setup_local() {
       openclaw_memory_config_set "memory.backend" "builtin"
       echo "✅ 已设置 memory.backend=builtin"
     fi
+    echo "   正在检查记忆搜索配置..."
     if openclaw_memorysearch_config_supported; then
       openclaw_memory_config_set "memorySearch.provider" "ollama"
       echo "✅ 已设置 memorySearch.provider=ollama"
     fi
+    echo "   正在读取记忆模型配置..."
     local memory_ollama_model
     memory_ollama_model=$(openclaw_memory_config_get "memorySearch.ollama.model")
     if [ -z "$memory_ollama_model" ]; then
@@ -14609,7 +14611,7 @@ openclaw_memorysearch_config_supported() {
     if ! openclaw_has_command openclaw; then
       return 0
     fi
-    timeout 10 openclaw doctor >/tmp/openclaw-doctor-memorysearch.log 2>&1 || true
+    timeout 5 openclaw doctor >/tmp/openclaw-doctor-memorysearch.log 2>&1 || true
     if grep -q 'memorySearch' /tmp/openclaw-doctor-memorysearch.log 2>/dev/null; then
       return 0
     fi
@@ -15599,7 +15601,7 @@ openclaw_memory_search_test() {
     return 1
     fi
   echo "正在搜索记忆..."
-  openclaw memory search "$query" --max-results 5
+  timeout 30 openclaw memory search "$query" --max-results 5
 }
 
 # Unified memory search - combines official OpenClaw memory and SKPL extension memory
@@ -17507,7 +17509,7 @@ openclaw_memory_extension_menu() {
   openclaw_memory_deep_status() {
     echo "正在探测嵌入模型就绪状态..."
     if openclaw_memory_cli_supported; then
-      openclaw memory status --deep
+      timeout 15 openclaw memory status --deep
     else
       echo "ℹ️ 当前 OpenClaw 版本未提供 memory CLI，无法执行深度状态探测。"
       openclaw_memory_render_basic_status
@@ -17782,7 +17784,7 @@ data["defaults"]["autoAllowSkills"] = True
 print(json.dumps(data, indent=2))
 ' "$approvals_file" "$sec" "$ask" "$fallback")
 
-    if openclaw_has_command openclaw && echo "$json_payload" | openclaw approvals set --stdin >/dev/null 2>&1; then
+    if openclaw_has_command openclaw && echo "$json_payload" | timeout 5 openclaw approvals set --stdin >/dev/null 2>&1; then
       return 0
     fi
     # 回退：直接写文件
@@ -17826,7 +17828,7 @@ print(json.dumps(data, indent=2))
     echo -e "\n${gl_huang}[底层 Exec Approvals 状态]${gl_bai}"
     if openclaw_has_command openclaw; then
       local approvals_json
-      approvals_json=$(openclaw approvals get --json 2>/dev/null)
+      approvals_json=$(timeout 5 openclaw approvals get --json 2>/dev/null)
       if [ -n "$approvals_json" ]; then
         python3 -c '
 import json, sys
@@ -17939,7 +17941,7 @@ except Exception:
 
     echo "清理宿主机拦截配置..."
     # 优先通过 CLI 清空审批配置，回退直接删文件
-    if echo '{"version":1,"defaults":{}}' | openclaw approvals set --stdin >/dev/null 2>&1; then
+    if echo '{"version":1,"defaults":{}}' | timeout 5 openclaw approvals set --stdin >/dev/null 2>&1; then
       true
     else
       rm -f "$HOME/.openclaw/exec-approvals.json"
@@ -17970,7 +17972,7 @@ except Exception:
       skpl_ui_header "Exec 命令白名单" "管理 allowlist 放行规则"
       skpl_ui_section "当前白名单"
       local allowlist_json
-      allowlist_json=$(openclaw approvals get --json 2>/dev/null)
+      allowlist_json=$(timeout 5 openclaw approvals get --json 2>/dev/null)
       if [ -n "$allowlist_json" ]; then
         python3 -c '
 import json, sys
@@ -18007,13 +18009,13 @@ except Exception as e:
           [ -z "$pattern" ] && { echo "不能为空"; break_end; continue; }
           read -e -p "指定智能体ID (留空=所有智能体 *): " agent_id
           agent_id="${agent_id:-*}"
-          openclaw approvals allowlist add --agent "$agent_id" "$pattern"
+          timeout 5 openclaw approvals allowlist add --agent "$agent_id" "$pattern"
           break_end
           ;;
         2)
           read -e -p "输入要移除的命令路径: " pattern
           [ -z "$pattern" ] && { echo "不能为空"; break_end; continue; }
-          openclaw approvals allowlist remove "$pattern"
+          timeout 5 openclaw approvals allowlist remove "$pattern"
           break_end
           ;;
         0) return 0 ;;
