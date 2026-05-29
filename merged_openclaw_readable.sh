@@ -13771,6 +13771,7 @@ openclaw_memory_auto_setup_local() {
           echo "✅ 已发现默认模型文件: $model_dest"
         else
           echo "⬇️ 下载模型: $model_url"
+          echo "   模型大小约 300MB，根据网络情况可能需要几分钟..."
           openclaw_memory_download_file "$model_url" "$model_dest" || return 1
           echo "✅ 模型已下载: $model_dest"
         fi
@@ -13780,12 +13781,13 @@ openclaw_memory_auto_setup_local() {
     fi
     if [ "$OPENCLAW_MEMORY_PREHEAT" = "true" ]; then
       echo "🔥 预热索引（可能下载模型）"
+      echo "   此步骤可能需要几分钟，请耐心等待..."
       openclaw_memory_prepare_workspace_all
       local preh_agent_lines preh_agent_id preh_workspace
       preh_agent_lines=$(openclaw_memory_list_agents)
       while IFS=$'\t' read -r preh_agent_id preh_workspace; do
         [ -z "$preh_agent_id" ] && continue
-        echo "🧱 正在预热索引: $preh_agent_id"
+        echo "🧱 正在预热索引: $preh_agent_id (最多10分钟)..."
         timeout 600 openclaw memory index --agent "$preh_agent_id" --force || {
           echo "⚠️ 索引预热超时或失败: $preh_agent_id"
           return 1
