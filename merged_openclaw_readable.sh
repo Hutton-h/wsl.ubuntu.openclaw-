@@ -5236,6 +5236,7 @@ mapping = {'general': 'defaultTextModel', 'code': 'defaultCodeModel', 'vision': 
 target_field = mapping.get(kind)
 if target_field:
     routing[target_field] = model
+path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 print(json.dumps({'tier': tier, 'kind': kind, 'model': model}, ensure_ascii=False))
 PY
@@ -15138,10 +15139,6 @@ PY
       esac
 
       lower=$(echo "$model_id" | tr '[:upper:]' '[:lower:]')
-      compat="{}"
-      if echo "$lower" | grep -qi "qwen" >/dev/null; then
-        compat='{"requiresStringContent": true, "supportsTools": true, "toolCallFormat": "openai"}'
-      fi
       models_array+=$(cat <<EOF
 {
   "id": "$model_id",
@@ -15154,8 +15151,7 @@ PY
     "output": $output_cost,
     "cacheRead": 0,
     "cacheWrite": 0
-  },
-  "compat": $compat
+  }
 }
 EOF
 )
@@ -15380,7 +15376,7 @@ EOF
       # 自动修复旧版 config 格式迁移 (memorySearch→agents.defaults 等)
       if openclaw_has_command openclaw; then
         echo "🔧 自动修复配置格式兼容性..."
-        openclaw doctor --fix 2>/dev/null || true
+        timeout 15 openclaw doctor --fix 2>/dev/null || true
       fi
       start_gateway
       echo "$finish_msg"
@@ -19118,8 +19114,13 @@ PY
   openclaw_memory_config_get() {
     local key="$1"
     local default_value="${2:-}"
+    # OpenClaw 2026.6+: memorySearch under agents.defaults
+    local mapped_key="$key"
+    case "$mapped_key" in
+      memorySearch.*) mapped_key="agents.defaults.${mapped_key}" ;;
+    esac
     local value
-    value=$(timeout 5 openclaw config get "$key" 2>/dev/null | head -n 1 | sed -e 's/^"//' -e 's/"$//')
+    value=$(timeout 5 openclaw config get "$mapped_key" 2>/dev/null | head -n 1 | sed -e 's/^"//' -e 's/"$//')
     if [ -z "$value" ] || [ "$value" = "null" ] || [ "$value" = "undefined" ]; then
       echo "$default_value"
       return 0
@@ -19131,11 +19132,10 @@ PY
     local key="$1"
     shift
     local value="$1"
-    # OpenClaw 2026.6+ requires memorySearch under agents.defaults
+    # OpenClaw 2026.6+: memorySearch under agents.defaults, tools at root level
     local mapped_key="$key"
     case "$mapped_key" in
       memorySearch.*) mapped_key="agents.defaults.${mapped_key}" ;;
-      tools.*) mapped_key="agents.defaults.${mapped_key}" ;;
     esac
     if timeout 5 openclaw config set "$mapped_key" "$@" >/dev/null 2>&1; then
       return 0
@@ -19156,9 +19156,8 @@ if path.exists():
     except Exception:
         cfg = {}
 
-# OpenClaw 2026.6+ requires memorySearch/tools under agents.defaults
-# Map old root-level keys to agents.defaults for backward compat
-if key.startswith('memorySearch.') or key.startswith('tools.'):
+# memorySearch goes under agents.defaults, tools stays at root
+if key.startswith('memorySearch.'):
     cfg.setdefault('agents', {}).setdefault('defaults', {})
     cur = cfg['agents']['defaults']
 else:
@@ -19180,11 +19179,9 @@ else:
     parsed = value
 
 cur[parts[-1]] = parsed
-# Clean up old root-level keys if present
+# Clean up old root-level memorySearch if present
 if key.startswith('memorySearch.') and 'memorySearch' in cfg:
     del cfg['memorySearch']
-if key.startswith('tools.') and 'tools' in cfg:
-    del cfg['tools']
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 PY
@@ -19515,6 +19512,8 @@ for entry in data:
     vec = s.get("vector", {})
     if isinstance(vec, dict) and vec.get("enabled"):
         vec_str = "就绪" if vec.get("available") else "已启用(不可用)"
+        if not vec.get("available") and files == 0 and chunks == 0:
+            vec_str += "（首次安装正常，写入记忆文件后自动激活）"
     else:
         vec_str = "未启用"
     print("  向量库: %s" % vec_str)
@@ -19913,19 +19912,17 @@ openclaw_memory_auto_setup_local() {
       echo "✅ 已设置 memory.backend=builtin"
     fi
     echo "   正在检查记忆搜索配置..."
-    if openclaw_memorysearch_config_supported; then
-      openclaw_memory_config_set "memorySearch.provider" "ollama"
-      echo "✅ 已设置 memorySearch.provider=ollama"
-    fi
+    openclaw_memory_config_set "memorySearch.provider" "ollama"
+    echo "✅ 已设置 memorySearch.provider=ollama"
     echo "   正在读取记忆模型配置..."
     local memory_ollama_model
-    memory_ollama_model=$(openclaw_memory_config_get "memorySearch.ollama.model")
+    memory_ollama_model=$(openclaw_memory_config_get "memorySearch.model")
     if [ -z "$memory_ollama_model" ]; then
       memory_ollama_model="qwen2.5:7b"
-      openclaw_memory_config_set "memorySearch.ollama.model" "$memory_ollama_model"
-      echo "✅ 已设置 memorySearch.ollama.model=$memory_ollama_model"
+      openclaw_memory_config_set "memorySearch.model" "$memory_ollama_model"
+      echo "✅ 已设置 memorySearch.model=$memory_ollama_model"
     else
-      echo "✅ memorySearch.ollama.model 已存在: $memory_ollama_model"
+      echo "✅ memorySearch.model 已存在: $memory_ollama_model"
     fi
 
     local model_path model_status
@@ -20373,6 +20370,7 @@ elif cfg_type == 'image':
 elif cfg_type == 'custom':
     cfg['agents']['defaults']['models'][model].setdefault('alias', 'custom')
 
+path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 print(f"✅ 已将 {cfg_type} 模型设为: {model}")
 PY
@@ -20424,7 +20422,7 @@ openclaw_memorysearch_loop_self_heal() {
     else
       echo "ℹ️ 当前主文本模型不是本地 Ollama，记忆检索继续使用本地模型: $memory_model"
     fi
-    openclaw_memory_config_set "memorySearch.ollama.model" "$memory_model"
+    openclaw_memory_config_set "memorySearch.model" "$memory_model"
     python3 - "$(openclaw_get_config_file)" <<'PY'
 import json, sys
 from pathlib import Path
@@ -20435,21 +20433,16 @@ if path.exists():
         cfg = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
-# OpenClaw 2026.6+ requires tools under agents.defaults.tools
-cfg.setdefault('agents', {}).setdefault('defaults', {})
-defs = cfg['agents']['defaults']
-tools_cfg = defs.get('tools')
+# OpenClaw 2026.6+ requires tools at root level
+tools_cfg = cfg.get('tools')
 if not isinstance(tools_cfg, dict):
     tools_cfg = {}
-    defs['tools'] = tools_cfg
+    cfg['tools'] = tools_cfg
 global_tools = tools_cfg.get('global')
 if not isinstance(global_tools, dict):
     global_tools = {}
     tools_cfg['global'] = global_tools
 global_tools['enabled'] = False
-# Clean up old root-level tools
-if 'tools' in cfg and cfg['tools'] is not tools_cfg:
-    del cfg['tools']
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
@@ -20465,19 +20458,15 @@ if path.exists():
         cfg = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
-cfg.setdefault('agents', {}).setdefault('defaults', {})
-defs = cfg['agents']['defaults']
-tools_cfg = defs.get('tools')
+tools_cfg = cfg.get('tools')
 if not isinstance(tools_cfg, dict):
     tools_cfg = {}
-    defs['tools'] = tools_cfg
+    cfg['tools'] = tools_cfg
 global_tools = tools_cfg.get('global')
 if not isinstance(global_tools, dict):
     global_tools = {}
     tools_cfg['global'] = global_tools
 global_tools['enabled'] = True
-if 'tools' in cfg and cfg['tools'] is not tools_cfg:
-    del cfg['tools']
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
@@ -20668,12 +20657,6 @@ def build_entry(model_id: str, role_name: str):
             params['main_gpu'] = 0
             if is_image:
                 params['num_batch'] = max(int(params.get('num_batch', 0) or 0), 64)
-    if any(token in lower for token in ('qwen2.5', 'qwen2-5', 'qwen2_5')):
-        entry['compat'] = {
-            'requiresStringContent': True,
-            'supportsTools': True,
-            'toolCallFormat': 'openai',
-        }
     entry['params'] = params
     return entry
 
@@ -20713,32 +20696,26 @@ cfg.setdefault('agents', {}).setdefault('defaults', {})
 defs = cfg['agents']['defaults']
 defs.setdefault('models', {})
 defs['models'].setdefault(full_model, {})
-# OpenClaw 2026.6+ requires tools under agents.defaults.tools, not root
-tools_cfg = defs.get('tools')
-if not isinstance(tools_cfg, dict):
-    tools_cfg = {}
-    defs['tools'] = tools_cfg
-global_tools = tools_cfg.get('global')
-if not isinstance(global_tools, dict):
-    global_tools = {}
-    tools_cfg['global'] = global_tools
-global_tools.setdefault('enabled', True)
-# 迁移旧版 root-level tools 到 agents.defaults.tools
-if 'tools' in cfg and cfg['tools'] is not tools_cfg:
-    del cfg['tools']
-# memorySearch 必须在 agents.defaults 内，OpenClaw 2026.6+ 不支持根级别
+# memorySearch 必须在 agents.defaults 内
 memory_search = defs.get('memorySearch')
 if not isinstance(memory_search, dict):
     memory_search = {}
     defs['memorySearch'] = memory_search
-ollama_memory = memory_search.get('ollama')
-if not isinstance(ollama_memory, dict):
-    ollama_memory = {}
-    memory_search['ollama'] = ollama_memory
 memory_search['provider'] = 'ollama'
+memory_search['model'] = raw_model if '/' not in raw_model else raw_model.split('/', 1)[1]
 # 迁移旧版 root-level memorySearch
 if 'memorySearch' in cfg and cfg['memorySearch'] is not memory_search:
     del cfg['memorySearch']
+# tools 必须在根级别
+tools_cfg = cfg.get('tools')
+if not isinstance(tools_cfg, dict):
+    tools_cfg = {}
+    cfg['tools'] = tools_cfg
+global_tools = tools_cfg.get('global')
+if not isinstance(global_tools, dict):
+    global_tools = {}
+    tools_cfg['global'] = global_tools
+global_tools['enabled'] = True
 if role == 'image':
     image_model_cfg = defs.get('imageModel')
     if not isinstance(image_model_cfg, dict):
@@ -20763,13 +20740,7 @@ PY
 }
 
 openclaw_memorysearch_config_supported() {
-    if ! openclaw_has_command openclaw; then
-      return 0
-    fi
-    timeout 5 openclaw doctor >/tmp/openclaw-doctor-memorysearch.log 2>&1 || true
-    if grep -q 'memorySearch' /tmp/openclaw-doctor-memorysearch.log 2>/dev/null; then
-      return 0
-    fi
+    # 快速检查，不再调用 openclaw doctor 避免卡住
     return 0
 }
 
@@ -20786,21 +20757,16 @@ if path.exists():
         cfg = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
-# OpenClaw 2026.6+ requires tools under agents.defaults.tools
-cfg.setdefault('agents', {}).setdefault('defaults', {})
-defs = cfg['agents']['defaults']
-tools_cfg = defs.get('tools')
+# OpenClaw 2026.6+ requires tools at root level
+tools_cfg = cfg.get('tools')
 if not isinstance(tools_cfg, dict):
     tools_cfg = {}
-    defs['tools'] = tools_cfg
+    cfg['tools'] = tools_cfg
 global_tools = tools_cfg.get('global')
 if not isinstance(global_tools, dict):
     global_tools = {}
     tools_cfg['global'] = global_tools
 global_tools['enabled'] = True
-# 迁移旧版 root-level tools
-if 'tools' in cfg and cfg['tools'] is not tools_cfg:
-    del cfg['tools']
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
@@ -20853,20 +20819,6 @@ def ensure_model_entry(provider_models, entry):
             return
     provider_models.append(entry)
 
-def with_qwen_compat(entry):
-    model_id = str(entry.get('id', '')).lower()
-    if any(token in model_id for token in ('qwen2.5', 'qwen2-5', 'qwen2_5')):
-        compat = entry.get('compat')
-        if not isinstance(compat, dict):
-            compat = {}
-        compat.update({
-            'requiresStringContent': True,
-            'supportsTools': True,
-            'toolCallFormat': 'openai',
-        })
-        entry['compat'] = compat
-    return entry
-
 provider = cfg['models']['providers'].setdefault('ollama', {})
 provider['baseUrl'] = provider.get('baseUrl') or 'http://127.0.0.1:11434'
 provider['apiKey'] = provider.get('apiKey') or 'ollama-local'
@@ -20885,44 +20837,38 @@ provider_models = provider.setdefault('models', [])
 if not isinstance(provider_models, list):
     provider_models = []
     provider['models'] = provider_models
-ensure_model_entry(provider_models, with_qwen_compat({'id': 'qwen2.5:7b', 'name': 'qwen2.5:7b', 'input': ['text'], 'params': {'keep_alive': '15m', 'num_ctx': 8192}}))
-ensure_model_entry(provider_models, with_qwen_compat({'id': 'gemma3:4b', 'name': 'gemma3:4b', 'input': ['text', 'image'], 'params': {'keep_alive': '15m', 'num_ctx': 4096, 'thinking': False}}))
-ensure_model_entry(provider_models, with_qwen_compat({'id': 'qwen2.5-coder:1.5b', 'name': 'qwen2.5-coder:1.5b', 'input': ['text'], 'reasoning': True, 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}}))
+ensure_model_entry(provider_models, {'id': 'qwen2.5:7b', 'name': 'qwen2.5:7b', 'input': ['text'], 'params': {'keep_alive': '15m', 'num_ctx': 8192}})
+ensure_model_entry(provider_models, {'id': 'gemma3:4b', 'name': 'gemma3:4b', 'input': ['text', 'image'], 'params': {'keep_alive': '15m', 'num_ctx': 4096, 'thinking': False}})
+ensure_model_entry(provider_models, {'id': 'qwen2.5-coder:1.5b', 'name': 'qwen2.5-coder:1.5b', 'input': ['text'], 'reasoning': True, 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}})
 
 cfg.setdefault('agents', {}).setdefault('defaults', {})
 defs = cfg['agents']['defaults']
 defs.setdefault('models', {})
 for model in (text_model, image_model, code_model):
     defs['models'].setdefault(model, {})
-# OpenClaw 2026.6+ requires tools under agents.defaults.tools
-tools_cfg = defs.get('tools')
+# tools 必须在根级别
+tools_cfg = cfg.get('tools')
 if not isinstance(tools_cfg, dict):
     tools_cfg = {}
-    defs['tools'] = tools_cfg
+    cfg['tools'] = tools_cfg
 global_tools = tools_cfg.get('global')
 if not isinstance(global_tools, dict):
     global_tools = {}
     tools_cfg['global'] = global_tools
 global_tools.setdefault('enabled', True)
-if 'tools' in cfg and cfg['tools'] is not tools_cfg:
-    del cfg['tools']
 if force_local_profile or not isinstance(defs.get('model'), dict) or not defs['model'].get('primary'):
     defs.setdefault('model', {})['primary'] = text_model
 if force_local_profile or not isinstance(defs.get('imageModel'), dict) or not defs['imageModel'].get('primary'):
     defs['imageModel'] = {'primary': image_model}
 defs['models'][code_model].setdefault('agentRuntime', {'id': 'auto'})
 
-# OpenClaw 2026.6+ requires memorySearch under agents.defaults
+# memorySearch 在 agents.defaults 下
 memory_search = defs.get('memorySearch')
 if not isinstance(memory_search, dict):
     memory_search = {}
     defs['memorySearch'] = memory_search
-ollama_memory = memory_search.get('ollama')
-if not isinstance(ollama_memory, dict):
-    ollama_memory = {}
-    memory_search['ollama'] = ollama_memory
 memory_search['provider'] = 'ollama'
-ollama_memory['model'] = text_model.split('/', 1)[1] if '/' in text_model else text_model
+memory_search['model'] = text_model.split('/', 1)[1] if '/' in text_model else text_model
 if 'memorySearch' in cfg and cfg['memorySearch'] is not memory_search:
     del cfg['memorySearch']
 
@@ -22100,13 +22046,13 @@ memory = cfg.setdefault('memory', {})
 memory.setdefault('backend', 'builtin')
 qmd = memory.setdefault('qmd', {})
 qmd['includeDefaultMemory'] = True
-memory_search = cfg.setdefault('memorySearch', {})
+# OpenClaw 2026.6+: memorySearch under agents.defaults, tools at root level
+agents = cfg.setdefault('agents', {}).setdefault('defaults', {})
+memory_search = agents.setdefault('memorySearch', {})
 memory_search['provider'] = 'ollama'
-ollama_cfg = memory_search.setdefault('ollama', {})
-ollama_cfg['model'] = ollama_cfg.get('model') or 'qwen2.5:7b'
+memory_search['model'] = memory_search.get('model') or 'qwen2.5:7b'
 tools = cfg.setdefault('tools', {})
 tools.setdefault('global', {})['enabled'] = True
-agents = cfg.setdefault('agents', {}).setdefault('defaults', {})
 agents.setdefault('workspace', '~/.openclaw/workspace')
 config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
@@ -22185,10 +22131,7 @@ PY
     return 1
   }
   if openclaw_has_command ollama; then
-    openclaw_ensure_ollama_running >/dev/null 2>&1 || true
-  else
-    echo "ℹ️ 未检测到 ollama，本次已完成记忆 embedding 模型和本地检索落地。"
-    echo "ℹ️ 如需继续安装本地文本/代码/视觉模型，可进入【完整本地 AI 栈】或相关模型设置菜单。"
+    timeout 3 ollama list >/dev/null 2>&1 || true
   fi
   openclaw_validate_global_tools_runtime >/dev/null 2>&1 || true
   openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
@@ -25402,7 +25345,7 @@ PY
         break_end
         ;;
       12) send_stats "健康检测与修复"
-        openclaw doctor --fix
+        timeout 15 openclaw doctor --fix 2>/dev/null || true
         send_stats "OpenClaw API同步触发"
         if sync_openclaw_api_models; then
           openclaw_ensure_gateway_ready || start_gateway
