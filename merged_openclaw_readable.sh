@@ -15137,6 +15137,11 @@ PY
           ;;
       esac
 
+      lower=$(echo "$model_id" | tr '[:upper:]' '[:lower:]')
+      compat="{}"
+      if echo "$lower" | grep -qi "qwen" >/dev/null; then
+        compat='{"requiresStringContent": true, "supportsTools": true, "toolCallFormat": "openai"}'
+      fi
       models_array+=$(cat <<EOF
 {
   "id": "$model_id",
@@ -15149,7 +15154,8 @@ PY
     "output": $output_cost,
     "cacheRead": 0,
     "cacheWrite": 0
-  }
+  },
+  "compat": $compat
 }
 EOF
 )
@@ -15371,6 +15377,11 @@ EOF
       echo "🔄 设置默认模型并重启网关..."
       openclaw models set "$provider_name/$default_model"
       openclaw_sync_sessions_model "$provider_name/$default_model"
+      # 自动修复旧版 config 格式迁移 (memorySearch→agents.defaults 等)
+      if openclaw_has_command openclaw; then
+        echo "🔧 自动修复配置格式兼容性..."
+        openclaw doctor --fix 2>/dev/null || true
+      fi
       start_gateway
       echo "$finish_msg"
       echo "✅ 当前 API 协议类型: $DETECTED_API"
@@ -18213,7 +18224,7 @@ PY
       skpl_ui_section "操作"
       skpl_ui_menu_item 1 "Telegram 对接" "自动写入代理并手动批准连接码"
       skpl_ui_menu_item 2 "飞书对接" "安装 Lark 集成"
-      skpl_ui_menu_item 3 "WhatsApp 对接" "自动写入代理并执行官方登录"
+      skpl_ui_menu_item 3 "WhatsApp 对接" "进入 WhatsApp 设置、修复与登录流程"
       skpl_ui_menu_item 4 "Discord 对接" "自动写入代理并启用渠道"
       skpl_ui_menu_item 5 "Slack 对接" "自动写入代理并启用渠道"
       skpl_ui_menu_item 6 "QQ 官方入口" "显示官方接入地址"
@@ -19120,7 +19131,13 @@ PY
     local key="$1"
     shift
     local value="$1"
-    if timeout 5 openclaw config set "$key" "$@" >/dev/null 2>&1; then
+    # OpenClaw 2026.6+ requires memorySearch under agents.defaults
+    local mapped_key="$key"
+    case "$mapped_key" in
+      memorySearch.*) mapped_key="agents.defaults.${mapped_key}" ;;
+      tools.*) mapped_key="agents.defaults.${mapped_key}" ;;
+    esac
+    if timeout 5 openclaw config set "$mapped_key" "$@" >/dev/null 2>&1; then
       return 0
     fi
     python3 - "$(openclaw_get_config_file)" "$key" "$value" <<'PY'
@@ -19139,7 +19156,14 @@ if path.exists():
     except Exception:
         cfg = {}
 
-cur = cfg
+# OpenClaw 2026.6+ requires memorySearch/tools under agents.defaults
+# Map old root-level keys to agents.defaults for backward compat
+if key.startswith('memorySearch.') or key.startswith('tools.'):
+    cfg.setdefault('agents', {}).setdefault('defaults', {})
+    cur = cfg['agents']['defaults']
+else:
+    cur = cfg
+
 parts = key.split('.')
 for part in parts[:-1]:
     node = cur.get(part)
@@ -19156,6 +19180,11 @@ else:
     parsed = value
 
 cur[parts[-1]] = parsed
+# Clean up old root-level keys if present
+if key.startswith('memorySearch.') and 'memorySearch' in cfg:
+    del cfg['memorySearch']
+if key.startswith('tools.') and 'tools' in cfg:
+    del cfg['tools']
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 PY
@@ -19661,11 +19690,19 @@ openclaw_memory_download_file() {
   local dest="$2"
   mkdir -p "$(dirname "$dest")"
   if command -v curl >/dev/null 2>&1; then
-      curl -L --fail --retry 2 --connect-timeout 10 --max-time 1800 -o "$dest" "$url"
+      local curl_proxy_opts=""
+      [ -n "${HTTPS_PROXY:-${https_proxy:-}}" ] && curl_proxy_opts="--proxy ${HTTPS_PROXY:-${https_proxy:-}}"
+      [ -z "$curl_proxy_opts" ] && [ -n "${HTTP_PROXY:-${http_proxy:-}}" ] && curl_proxy_opts="--proxy ${HTTP_PROXY:-${http_proxy:-}}"
+      [ -z "$curl_proxy_opts" ] && [ -n "${ALL_PROXY:-${all_proxy:-}}" ] && curl_proxy_opts="--proxy ${ALL_PROXY:-${all_proxy:-}}"
+      curl -L --fail --retry 2 --connect-timeout 15 --max-time 1800 $curl_proxy_opts -o "$dest" "$url"
       return $?
   fi
   if command -v wget >/dev/null 2>&1; then
-      wget --timeout=10 -O "$dest" "$url"
+      local wget_proxy_opts=""
+      [ -n "${HTTPS_PROXY:-${https_proxy:-}}" ] && wget_proxy_opts="-e use_proxy=yes -e https_proxy=${HTTPS_PROXY:-${https_proxy:-}}"
+      [ -z "$wget_proxy_opts" ] && [ -n "${HTTP_PROXY:-${http_proxy:-}}" ] && wget_proxy_opts="-e use_proxy=yes -e http_proxy=${HTTP_PROXY:-${http_proxy:-}}"
+      [ -z "$wget_proxy_opts" ] && [ -n "${ALL_PROXY:-${all_proxy:-}}" ] && wget_proxy_opts="-e use_proxy=yes -e https_proxy=${ALL_PROXY:-${all_proxy:-}}"
+      wget --timeout=15 $wget_proxy_opts -O "$dest" "$url"
       return $?
   fi
     echo "❌ 未检测到 curl 或 wget，无法下载。"
@@ -20398,15 +20435,21 @@ if path.exists():
         cfg = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
-tools_cfg = cfg.get('tools')
+# OpenClaw 2026.6+ requires tools under agents.defaults.tools
+cfg.setdefault('agents', {}).setdefault('defaults', {})
+defs = cfg['agents']['defaults']
+tools_cfg = defs.get('tools')
 if not isinstance(tools_cfg, dict):
     tools_cfg = {}
-    cfg['tools'] = tools_cfg
+    defs['tools'] = tools_cfg
 global_tools = tools_cfg.get('global')
 if not isinstance(global_tools, dict):
     global_tools = {}
     tools_cfg['global'] = global_tools
 global_tools['enabled'] = False
+# Clean up old root-level tools
+if 'tools' in cfg and cfg['tools'] is not tools_cfg:
+    del cfg['tools']
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
@@ -20422,18 +20465,23 @@ if path.exists():
         cfg = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
-tools_cfg = cfg.get('tools')
+cfg.setdefault('agents', {}).setdefault('defaults', {})
+defs = cfg['agents']['defaults']
+tools_cfg = defs.get('tools')
 if not isinstance(tools_cfg, dict):
     tools_cfg = {}
-    cfg['tools'] = tools_cfg
+    defs['tools'] = tools_cfg
 global_tools = tools_cfg.get('global')
 if not isinstance(global_tools, dict):
     global_tools = {}
     tools_cfg['global'] = global_tools
 global_tools['enabled'] = True
+if 'tools' in cfg and cfg['tools'] is not tools_cfg:
+    del cfg['tools']
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
+    echo "✅ 已恢复 tools.global.enabled=true"
     echo "✅ 已恢复 tools.global.enabled=true"
     openclaw_validate_global_tools_runtime
 }
@@ -20665,24 +20713,32 @@ cfg.setdefault('agents', {}).setdefault('defaults', {})
 defs = cfg['agents']['defaults']
 defs.setdefault('models', {})
 defs['models'].setdefault(full_model, {})
-tools_cfg = cfg.get('tools')
+# OpenClaw 2026.6+ requires tools under agents.defaults.tools, not root
+tools_cfg = defs.get('tools')
 if not isinstance(tools_cfg, dict):
     tools_cfg = {}
-    cfg['tools'] = tools_cfg
+    defs['tools'] = tools_cfg
 global_tools = tools_cfg.get('global')
 if not isinstance(global_tools, dict):
     global_tools = {}
     tools_cfg['global'] = global_tools
 global_tools.setdefault('enabled', True)
-memory_search = cfg.get('memorySearch')
+# 迁移旧版 root-level tools 到 agents.defaults.tools
+if 'tools' in cfg and cfg['tools'] is not tools_cfg:
+    del cfg['tools']
+# memorySearch 必须在 agents.defaults 内，OpenClaw 2026.6+ 不支持根级别
+memory_search = defs.get('memorySearch')
 if not isinstance(memory_search, dict):
     memory_search = {}
-    cfg['memorySearch'] = memory_search
+    defs['memorySearch'] = memory_search
 ollama_memory = memory_search.get('ollama')
 if not isinstance(ollama_memory, dict):
     ollama_memory = {}
     memory_search['ollama'] = ollama_memory
 memory_search['provider'] = 'ollama'
+# 迁移旧版 root-level memorySearch
+if 'memorySearch' in cfg and cfg['memorySearch'] is not memory_search:
+    del cfg['memorySearch']
 if role == 'image':
     image_model_cfg = defs.get('imageModel')
     if not isinstance(image_model_cfg, dict):
@@ -20730,15 +20786,21 @@ if path.exists():
         cfg = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
-tools_cfg = cfg.get('tools')
+# OpenClaw 2026.6+ requires tools under agents.defaults.tools
+cfg.setdefault('agents', {}).setdefault('defaults', {})
+defs = cfg['agents']['defaults']
+tools_cfg = defs.get('tools')
 if not isinstance(tools_cfg, dict):
     tools_cfg = {}
-    cfg['tools'] = tools_cfg
+    defs['tools'] = tools_cfg
 global_tools = tools_cfg.get('global')
 if not isinstance(global_tools, dict):
     global_tools = {}
     tools_cfg['global'] = global_tools
 global_tools['enabled'] = True
+# 迁移旧版 root-level tools
+if 'tools' in cfg and cfg['tools'] is not tools_cfg:
+    del cfg['tools']
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
@@ -20832,31 +20894,37 @@ defs = cfg['agents']['defaults']
 defs.setdefault('models', {})
 for model in (text_model, image_model, code_model):
     defs['models'].setdefault(model, {})
-tools_cfg = cfg.get('tools')
+# OpenClaw 2026.6+ requires tools under agents.defaults.tools
+tools_cfg = defs.get('tools')
 if not isinstance(tools_cfg, dict):
     tools_cfg = {}
-    cfg['tools'] = tools_cfg
+    defs['tools'] = tools_cfg
 global_tools = tools_cfg.get('global')
 if not isinstance(global_tools, dict):
     global_tools = {}
     tools_cfg['global'] = global_tools
 global_tools.setdefault('enabled', True)
+if 'tools' in cfg and cfg['tools'] is not tools_cfg:
+    del cfg['tools']
 if force_local_profile or not isinstance(defs.get('model'), dict) or not defs['model'].get('primary'):
     defs.setdefault('model', {})['primary'] = text_model
 if force_local_profile or not isinstance(defs.get('imageModel'), dict) or not defs['imageModel'].get('primary'):
     defs['imageModel'] = {'primary': image_model}
 defs['models'][code_model].setdefault('agentRuntime', {'id': 'auto'})
 
-memory_search = cfg.get('memorySearch')
+# OpenClaw 2026.6+ requires memorySearch under agents.defaults
+memory_search = defs.get('memorySearch')
 if not isinstance(memory_search, dict):
     memory_search = {}
-    cfg['memorySearch'] = memory_search
+    defs['memorySearch'] = memory_search
 ollama_memory = memory_search.get('ollama')
 if not isinstance(ollama_memory, dict):
     ollama_memory = {}
     memory_search['ollama'] = ollama_memory
 memory_search['provider'] = 'ollama'
 ollama_memory['model'] = text_model.split('/', 1)[1] if '/' in text_model else text_model
+if 'memorySearch' in cfg and cfg['memorySearch'] is not memory_search:
+    del cfg['memorySearch']
 
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
@@ -20913,6 +20981,31 @@ openclaw_full_local_stack_setup() {
 
 openclaw_memory_prepare_layered_local_models() {
     local profile_json tier text_model code_model vision_model want_vision is_wsl=false
+    # 清除过期的拉取失败缓存，确保本次运行会重新尝试下载
+    if [ -f "$SKPL_OLLAMA_PULL_CACHE_FILE" ]; then
+      local cache_age
+      cache_age=$(python3 - "$SKPL_OLLAMA_PULL_CACHE_FILE" <<'PY' 2>/dev/null || echo "99999"
+import json, sys, time
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+    newest = 0
+    for role_data in (data.values() if isinstance(data, dict) else []):
+        if isinstance(role_data, dict):
+            for item in role_data.values():
+                if isinstance(item, dict):
+                    newest = max(newest, int(item.get('updatedAt',0) or 0))
+    age = int(time.time()) - newest if newest > 0 else 99999
+    print(age)
+except Exception:
+    print(99999)
+PY
+)
+      if [ "${cache_age:-0}" -gt 300 ]; then
+        echo "   🧹 模型拉取缓存已过期，清除后重新尝试..."
+        rm -f "$SKPL_OLLAMA_PULL_CACHE_FILE"
+      fi
+    fi
     echo "   正在检测硬件配置..."
     # WSL环境快速通路：避免GPU检测卡顿
     if grep -qi "microsoft\|WSL" /proc/sys/kernel/osrelease 2>/dev/null || [ -n "$WSL_DISTRO_NAME" ]; then
@@ -21064,6 +21157,20 @@ openclaw_ollama_endpoint_ready() {
     curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:11434/api/tags >/dev/null 2>&1
 }
 
+openclaw_detect_proxy_env() {
+    # 检测系统代理配置，返回适合传递给子进程的代理环境变量
+    # 优先级：HTTPS_PROXY > https_proxy > HTTP_PROXY > http_proxy > socks5_proxy > all_proxy
+    local proxy_vars=""
+    for var in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy SOCKS5_PROXY socks5_proxy ALL_PROXY all_proxy; do
+      if [ -n "${!var:-}" ]; then
+        # 如果有代理但OLLAMA_PROXY未设置的话，确保不传给ollama本地调用
+        # 但传给外网下载命令
+        proxy_vars="${proxy_vars}export ${var}=${!var}; "
+      fi
+    done
+    printf '%s' "$proxy_vars"
+}
+
 openclaw_resolve_ollama_bin() {
     if command -v ollama >/dev/null 2>&1; then
       command -v ollama
@@ -21111,7 +21218,7 @@ openclaw_ensure_ollama_running() {
       fi
     fi
 
-    nohup "$ollama_bin" serve >/tmp/ollama-serve.log 2>&1 &
+    nohup env HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" ALL_PROXY="${ALL_PROXY:-${all_proxy:-}}" "$ollama_bin" serve >/tmp/ollama-serve.log 2>&1 &
     disown 2>/dev/null || true
     sleep 3
     if openclaw_ollama_endpoint_ready; then
@@ -21132,7 +21239,7 @@ openclaw_install_ollama_runtime() {
     openclaw_ensure_ollama_install_tools || return 1
     echo "⬇️ 正在安装 ollama 本地模型运行时..."
     echo "   下载安装脚本（最多60秒）..."
-    if curl -fsSL --max-time 60 https://ollama.com/install.sh | sh; then
+    if env HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" curl -fsSL --max-time 60 https://ollama.com/install.sh | sh; then
       echo "✅ ollama 安装完成"
       openclaw_ensure_ollama_running || true
     else
@@ -21378,7 +21485,7 @@ openclaw_ollama_pull_first_available() {
         echo "✅ 已复用本地$model_role模型: $model_name"
         return 0
       fi
-      cache_line=$(openclaw_ollama_cache_status_get "$model_role" "$model_name" 21600 2>/dev/null || true)
+      cache_line=$(openclaw_ollama_cache_status_get "$model_role" "$model_name" 300 2>/dev/null || true)
       cached_status=$(printf '%s' "$cache_line" | awk -F '\t' '{print $1}')
       cached_note=$(printf '%s' "$cache_line" | awk -F '\t' '{print $2}')
       if [ "$cached_status" = "failed" ]; then
@@ -21392,7 +21499,7 @@ openclaw_ollama_pull_first_available() {
         openclaw_ollama_cache_status_set "$model_role" "$model_name" "skipped" "用户取消"
         continue
       fi
-      if timeout "$pull_timeout" ollama pull "$model_name"; then
+      if timeout "$pull_timeout" env HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" ALL_PROXY="${ALL_PROXY:-${all_proxy:-}}" ollama pull "$model_name"; then
         OPENCLAW_LAST_PULLED_MODEL="$model_name"
         openclaw_ollama_cache_status_set "$model_role" "$model_name" "ok" "拉取成功"
         openclaw_configure_local_ollama_provider "$model_name" "$model_role" || true
@@ -21563,7 +21670,7 @@ openclaw_memory_enable_local_retrieval() {
       skpl_ui_menu_item 2 "重建全部索引" "提升召回率与命中率"
       skpl_ui_menu_item 3 "查看预热日志" "查看 embedding 模型准备与索引预热日志"
       skpl_ui_menu_item 4 "查看运行时说明" "说明 embedding 检索与 Ollama 大模型的职责边界"
-      skpl_ui_menu_item 5 "一键完整本地落地" "跳转完整本地 AI 栈：安装 Ollama、拉模型、启用检索、验收"
+      skpl_ui_menu_item 5 "进入完整本地 AI 栈" "跳转完整本地 AI 栈：安装 Ollama、拉模型、启用检索、验收"
       skpl_ui_menu_item 6 "自动部署菜单" "进入现有高级记忆部署入口"
       skpl_ui_menu_item 7 "结构化数据检索" "搜索 JSON、键值对等结构化记忆"
       skpl_ui_menu_item 8 "代码语义检索" "搜索代码片段与代码记忆"
@@ -22440,8 +22547,8 @@ openclaw_ai_stack_expert_layer_menu() {
     skpl_ui_kv "专家层状态" "$(openclaw_ai_stack_expert_status_summary 2>/dev/null || printf '%s' '未记录')"
     skpl_ui_kv "生命周期" "$(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || printf '%s' '未记录')"
     echo
-    skpl_ui_menu_item 1 "基础角色组" "查看通用、文档、工具、压缩、路由辅助、记忆整合角色"
-    skpl_ui_menu_item 2 "通用专家角色组" "查看当前硬件档位下的默认和可选通用模型"
+    skpl_ui_menu_item 1 "基础角色与通用模型" "查看基础角色列表与当前档位下的通用模型默认和可选配置"
+    skpl_ui_menu_item 2 "通用模型状态摘要" "查看当前专家层状态和生命周期摘要"
     skpl_ui_menu_item 3 "代码专家角色组" "查看当前硬件档位下的默认和可选代码模型"
     skpl_ui_menu_item 4 "多模态专家角色组" "查看当前硬件档位下的默认和可选视觉模型"
     skpl_ui_menu_item 5 "模型管理子系统" "下载、更新、导入和兼容性测试入口"
@@ -22450,7 +22557,7 @@ openclaw_ai_stack_expert_layer_menu() {
     read -e choice
     case "$choice" in
       1) openclaw_ai_stack_expert_roles_menu general; break_end ;;
-      2) openclaw_ai_stack_expert_roles_menu general; break_end ;;
+      2) clear; skpl_ui_header "通用模型状态" "$(openclaw_ai_stack_expert_status_summary 2>/dev/null || echo '未记录') | $(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || echo '未记录')"; echo; echo "当前活跃专家: $(openclaw_ai_stack_expert_status_summary 2>/dev/null || echo '未记录')"; echo "生命周期状态: $(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || echo '未记录')"; break_end ;;
       3) openclaw_ai_stack_expert_roles_menu code; break_end ;;
       4) openclaw_ai_stack_expert_roles_menu vision; break_end ;;
       5) openclaw_ai_stack_model_management_menu ;;
@@ -22982,9 +23089,9 @@ openclaw_memory_strategy_panel() {
     openclaw_memory_extension_render_status
     echo
     skpl_ui_section "主入口"
-    skpl_ui_menu_item 1 "记忆总开关" "一键开启或关闭整个记忆系统"
+    skpl_ui_menu_item 1 "记忆总开关" "进入开关设置页面选择开启或关闭"
     skpl_ui_menu_item 2 "记忆类型设置" "短期、中期、长期和知识库记忆参数"
-    skpl_ui_menu_item 3 "记忆查看与管理" "查看、筛选、编辑、删除、批量删除和清空记忆"
+    skpl_ui_menu_item 3 "长期记忆管理" "查看、筛选、编辑、删除、批量删除和清空长期记忆条目"
     skpl_ui_menu_item 4 "记忆导入导出" "JSON 导入导出，以及完整备份恢复"
     skpl_ui_menu_item 5 "隐私与安全设置" "本地 only、自动脱敏、加密和禁止关键词"
     skpl_ui_menu_item 6 "高级设置" "推荐方案、本地检索、同步资源、完整本地 AI 栈和验收报告"
@@ -23001,7 +23108,7 @@ openclaw_memory_strategy_panel() {
         while true; do
           clear
           skpl_ui_header "高级设置" "这里放完整能力，平时可以不用进入"
-          skpl_ui_menu_item 1 "一键启用推荐记忆" "系统自动推荐并落地记忆方案，适合大多数用户"
+          skpl_ui_menu_item 1 "选择推荐方案" "系统自动推荐并落地记忆方案，适合大多数用户"
           skpl_ui_menu_item 2 "重新应用当前记忆方案" "按当前配置重新落地记忆、检索和相关策略"
           skpl_ui_menu_item 3 "本地检索与索引" "仅处理 embedding、SQLite/LanceDB 和索引"
           skpl_ui_menu_item 4 "同步与资源" "查看混合记忆同步、硬件分级、资源预算和运行提示"
@@ -23013,7 +23120,7 @@ openclaw_memory_strategy_panel() {
           skpl_ui_menu_item 10 "完整本地 AI 栈" "安装 Ollama 运行时和本地文本、代码、视觉模型"
           skpl_ui_menu_item 11 "兼容增强工具" "调用旧记忆方案里的自动推荐、QMD 轻量兼容、源诊断和索引修复"
           skpl_ui_menu_item 12 "EvoMap 管理" "安装、更新、同步与经验目录管理"
-          skpl_ui_menu_item 13 "记忆验收报告" "查看当前记忆方案是否已经落地生效"
+          skpl_ui_menu_item 13 "完整 AI 栈验收报告" "查看包括记忆方案在内的整体 AI 栈验收状态"
           skpl_ui_menu_item 14 "用户行为反馈" "查看隐式反馈统计与行为分析"
           skpl_ui_menu_item 15 "主动学习与知识补全" "检测知识缺口、生成学习建议"
           skpl_ui_menu_item 0 "返回上一级"
@@ -23967,10 +24074,10 @@ print(json.dumps(data, indent=2))
     skpl_ui_kv "宿主机审批" "~/.openclaw/exec-approvals.json"
     skpl_ui_rule "$gl_hui" "─" 60
     local current_profile current_sec current_ask current_elevated
-    current_profile=$(timeout 5 openclaw config get tools.profile 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
-    current_sec=$(timeout 5 openclaw config get tools.exec.security 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
-    current_ask=$(timeout 5 openclaw config get tools.exec.ask 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
-    current_elevated=$(timeout 5 openclaw config get tools.elevated.enabled 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+    current_profile=$(timeout 5 openclaw config get tools.profile 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//' || true)
+    current_sec=$(timeout 5 openclaw config get tools.exec.security 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//' || true)
+    current_ask=$(timeout 5 openclaw config get tools.exec.ask 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//' || true)
+    current_elevated=$(timeout 5 openclaw config get tools.elevated.enabled 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//' || true)
     # 清理空值
     [ -z "$current_profile" ] || echo "$current_profile" | grep -qi "config path not found" && current_profile=""
     [ -z "$current_sec" ] || echo "$current_sec" | grep -qi "config path not found" && current_sec=""
@@ -23998,7 +24105,7 @@ print(json.dumps(data, indent=2))
     echo -e "\n${gl_huang}[底层 Exec Approvals 状态]${gl_bai}"
     if openclaw_has_command openclaw; then
       local approvals_json
-      approvals_json=$(timeout 5 openclaw approvals get --json 2>/dev/null)
+      approvals_json=$(timeout 5 openclaw approvals get --json 2>/dev/null || true)
       if [ -n "$approvals_json" ]; then
         python3 -c '
 import json, sys
@@ -24199,7 +24306,7 @@ except Exception as e:
     while true; do
       clear
       skpl_ui_header "权限管理" "策略、审批与白名单"
-      openclaw_permission_render_status
+      openclaw_permission_render_status || true
       echo
       skpl_ui_section "模式切换"
       skpl_ui_menu_item_tone 1 "标准安全模式" "日常推荐，弹卡片审批" "ok"
