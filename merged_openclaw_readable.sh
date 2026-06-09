@@ -2990,8 +2990,8 @@ default_config = {
         'defaultSearchModel': 'google/gemini-2.5-flash',
         'defaultCodeModel': 'ollama/deepseek-coder-v2:16b',
         'fallbackModels': {
-            'emergency': 'ollama/qwen3:0.3b',
-            'entry': 'ollama/qwen3:0.5b',
+            'emergency': 'ollama/qwen3:0.6b',
+            'entry': 'ollama/qwen3:0.6b',
             'advanced': 'ollama/qwen3:1.8b',
             'cpuVision': 'local-ocr',
             'cpuCode': 'ollama/qwen3:1.8b'
@@ -3005,12 +3005,12 @@ default_config = {
         'baseRoles': ['general', 'document', 'tool', 'compression', 'routing-assistant', 'memory-integration'],
         'byTier': {
             'emergency-cpu': {
-                'general': {'default': 'ollama/qwen3:0.3b', 'alternatives': ['ollama/qwen3:0.5b']},
-                'code': {'default': 'cloud/code-proxy', 'alternatives': ['ollama/qwen3:0.3b']},
+                'general': {'default': 'ollama/qwen3:0.6b', 'alternatives': ['ollama/qwen3:0.6b']},
+                'code': {'default': 'cloud/code-proxy', 'alternatives': ['ollama/qwen3:0.6b']},
                 'vision': {'default': 'cloud/vision-proxy', 'alternatives': ['local-ocr']},
             },
             'entry-cpu': {
-                'general': {'default': 'ollama/qwen3:0.5b', 'alternatives': ['ollama/llama3.2:1b']},
+                'general': {'default': 'ollama/qwen3:0.6b', 'alternatives': ['ollama/llama3.2:1b']},
                 'code': {'default': 'cloud/code-proxy', 'alternatives': ['ollama/qwen2.5-coder:1.5b']},
                 'vision': {'default': 'cloud/vision-proxy', 'alternatives': ['local-ocr']},
             },
@@ -3636,8 +3636,8 @@ openclaw_get_model_context_size() {
   [ -z "$model_id" ] && model_id=$(timeout 5 openclaw config get agents.defaults.models 2>/dev/null | head -1 | cut -d'"' -f2 || echo "")
   # Default context sizes for common models
   case "$model_id" in
-    *qwen3:0.3b*|*0.3b*) context_size=32768 ;;
-    *qwen3:0.5b*|*0.5b*) context_size=32768 ;;
+    *qwen3:0.6b*|*0.3b*) context_size=32768 ;;
+    *qwen3:0.6b*|*0.5b*) context_size=32768 ;;
     *qwen3:1.8b*|*1.8b*) context_size=32768 ;;
     *qwen2.5:7b*|*7b*|*llama3.2*) context_size=128000 ;;
     *qwen2.5:14b*|*14b*) context_size=128000 ;;
@@ -6182,7 +6182,7 @@ if resource_guard['secondPassReady']:
         route['model'] = routing_cfg.get('defaultVisionModel', route.get('model') or 'google/gemini-2.5-pro')
         route['execution'] = 'cloud' if str(route.get('model') or '').startswith(('google/', 'openrouter/', 'deepseek/', 'siliconflow/')) else 'local'
     elif route_name == 'code':
-        route['model'] = routing_cfg.get('defaultCodeModel', route.get('model') or 'ollama/qwen3-coder')
+        route['model'] = routing_cfg.get('defaultCodeModel', route.get('model') or 'ollama/qwen2.5-coder:1.5b')
         route['execution'] = 'local'
     elif route_name in ('text', 'local'):
         route['model'] = routing_cfg.get('defaultTextModel', route.get('model') or 'ollama/qwen2.5:7b')
@@ -6190,9 +6190,9 @@ if resource_guard['secondPassReady']:
     route['reason'] = 'resource-guard-second-pass-ready'
 else:
     if tier == 'emergency-cpu':
-        fallback_model = fallback_cfg.get('emergency', 'ollama/qwen3:0.3b')
+        fallback_model = fallback_cfg.get('emergency', 'ollama/qwen3:0.6b')
     elif tier == 'entry-cpu':
-        fallback_model = fallback_cfg.get('entry', 'ollama/qwen3:0.5b')
+        fallback_model = fallback_cfg.get('entry', 'ollama/qwen3:0.6b')
     else:
         fallback_model = fallback_cfg.get('advanced', 'ollama/qwen3:1.8b')
     if route_name == 'vision':
@@ -7253,9 +7253,9 @@ fallback_map = (cfg.get('routing') or {}).get('fallbackModels') or {}
 tier = profile.get('tier') or 'entry-cpu'
 fallback_model = fallback_map.get('advanced', 'ollama/qwen3:1.8b')
 if tier == 'emergency-cpu':
-    fallback_model = fallback_map.get('emergency', 'ollama/qwen3:0.3b')
+    fallback_model = fallback_map.get('emergency', 'ollama/qwen3:0.6b')
 elif tier == 'entry-cpu':
-    fallback_model = fallback_map.get('entry', 'ollama/qwen3:0.5b')
+    fallback_model = fallback_map.get('entry', 'ollama/qwen3:0.6b')
 elif route_name == 'vision':
     fallback_model = fallback_map.get('cpuVision', 'local-ocr')
 elif route_name == 'code':
@@ -12269,6 +12269,11 @@ openclaw_detect_hardware_profile_json() {
     return 0
   fi
   # 使用子shell和timeout确保不会卡住
+  # WSL检测：在WSL环境中跳过nvidia-smi避免挂起
+  if grep -qi "microsoft\|WSL" /proc/sys/kernel/osrelease 2>/dev/null || [ -n "$WSL_DISTRO_NAME" ]; then
+    echo '{"tier":"entry-cpu","memoryMb":8192,"cpuThreads":4,"cpuInstructionSet":[],"gpu":{"present":false,"name":"WSL-skipped","vramMb":0,"freeVramMb":0},"storage":{"totalGb":256,"freeGb":128,"type":"ssd"},"network":{"online":true,"latencyMs":50,"quality":"online"},"battery":{"present":false,"percent":null},"budget":{"reserveGpuMb":0,"reserveMemoryMb":512,"usableMemoryMb":7680,"usableGpuMb":0}}'
+    return 0
+  fi
   (
     timeout 10 python3 - <<'PY'
 import json
@@ -13493,7 +13498,7 @@ if not bool(network.get('online')):
         route['route'] = 'local'
     if execution == 'cloud':
         execution = 'local'
-        model = routing_cfg.get('defaultCodeModel', 'ollama/qwen3-coder')
+        model = routing_cfg.get('defaultCodeModel', 'ollama/qwen2.5-coder:1.5b')
         reason = 'offline-forced-local'
 
 if free_gpu < int(budget_cfg.get('minFreeGpuMbForLocalExpert', 7200)) or free_mem < int(budget_cfg.get('minFreeMemoryMbForLocalExpert', 6144)):
@@ -13512,7 +13517,7 @@ if isinstance(resource, dict) and not bool(resource.get('enough', True)):
         route_name = 'local'
         route['route'] = 'local'
         execution = 'local'
-        model = routing_cfg.get('defaultCodeModel', 'ollama/qwen3-coder')
+        model = routing_cfg.get('defaultCodeModel', 'ollama/qwen2.5-coder:1.5b')
         reason = 'resource-guard-local-fallback'
     else:
         route_name = 'text'
@@ -13523,7 +13528,7 @@ if isinstance(resource, dict) and not bool(resource.get('enough', True)):
 
 if not bool(network.get('online')) and execution == 'cloud':
     execution = 'local'
-    model = routing_cfg.get('defaultCodeModel', 'ollama/qwen3-coder')
+    model = routing_cfg.get('defaultCodeModel', 'ollama/qwen2.5-coder:1.5b')
     reason = 'offline-cloud-disabled'
 
 if isinstance(battery, int) and battery > 0 and battery <= int(budget_cfg.get('lowBatteryPercent', 25)):
@@ -20489,7 +20494,7 @@ openclaw_inject_skills() {
 - Use `agents.defaults.model.primary` for daily text turns.
 - Prefer `ollama/qwen2.5:7b` for daily text turns.
 - Use `agents.defaults.imageModel.primary` for image understanding.
-- Use `ollama/qwen3-coder` for code-heavy tasks.
+- Use `ollama/qwen2.5-coder:1.5b` for code-heavy tasks.
 - Prefer concise responses to reduce token usage.
 - Respect hardware budget before escalating to larger experts.
 - Keep memory injection under the configured context percentage limit.
@@ -20756,7 +20761,7 @@ openclaw_validate_global_tools_runtime() {
 openclaw_apply_recommended_model_profile() {
     local text_model="${OPENCLAW_TEXT_MODEL_RESOLVED:-ollama/qwen2.5:7b}"
     local image_model="${OPENCLAW_IMAGE_MODEL_RESOLVED:-ollama/gemma3:4b}"
-    local code_model="${OPENCLAW_CODE_MODEL_RESOLVED:-ollama/qwen3-coder}"
+    local code_model="${OPENCLAW_CODE_MODEL_RESOLVED:-ollama/qwen2.5-coder:1.5b}"
     local config_file
     config_file=$(openclaw_get_config_file)
     python3 - "$config_file" "$text_model" "$image_model" "$code_model" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" "${OPENCLAW_FORCE_LOCAL_PROFILE:-0}" <<'PY'
@@ -20820,7 +20825,7 @@ if not isinstance(provider_models, list):
     provider['models'] = provider_models
 ensure_model_entry(provider_models, with_qwen_compat({'id': 'qwen2.5:7b', 'name': 'qwen2.5:7b', 'input': ['text'], 'params': {'keep_alive': '15m', 'num_ctx': 8192}}))
 ensure_model_entry(provider_models, with_qwen_compat({'id': 'gemma3:4b', 'name': 'gemma3:4b', 'input': ['text', 'image'], 'params': {'keep_alive': '15m', 'num_ctx': 4096, 'thinking': False}}))
-ensure_model_entry(provider_models, with_qwen_compat({'id': 'qwen3-coder', 'name': 'qwen3-coder', 'input': ['text'], 'reasoning': True, 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}}))
+ensure_model_entry(provider_models, with_qwen_compat({'id': 'qwen2.5-coder:1.5b', 'name': 'qwen2.5-coder:1.5b', 'input': ['text'], 'reasoning': True, 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}}))
 
 cfg.setdefault('agents', {}).setdefault('defaults', {})
 defs = cfg['agents']['defaults']
@@ -20892,9 +20897,9 @@ openclaw_full_local_stack_setup() {
     echo "🚀 开始执行一键完整本地落地..."
     openclaw_runtime_self_heal || return 1
     openclaw_install_ollama_runtime || return 1
-    openclaw_ollama_pull_recommended_model "text" || return 1
-    openclaw_ollama_pull_recommended_model "image" || return 1
-    openclaw_ollama_pull_recommended_model "code" || return 1
+    openclaw_ollama_pull_recommended_model "text" || echo "⚠️ 文本模型安装跳过"
+    openclaw_ollama_pull_recommended_model "image" || echo "⚠️ 视觉模型安装跳过"
+    openclaw_ollama_pull_recommended_model "code" || echo "⚠️ 代码模型安装跳过"
     OPENCLAW_FORCE_LOCAL_PROFILE=1
     openclaw_apply_recommended_model_profile || return 1
     openclaw_memorysearch_loop_self_heal || return 1
@@ -20907,9 +20912,16 @@ openclaw_full_local_stack_setup() {
 }
 
 openclaw_memory_prepare_layered_local_models() {
-    local profile_json tier text_model code_model vision_model want_vision
+    local profile_json tier text_model code_model vision_model want_vision is_wsl=false
     echo "   正在检测硬件配置..."
-    profile_json=$(openclaw_detect_hardware_profile_json 2>/dev/null) || profile_json='{"tier":"entry-cpu"}'
+    # WSL环境快速通路：避免GPU检测卡顿
+    if grep -qi "microsoft\|WSL" /proc/sys/kernel/osrelease 2>/dev/null || [ -n "$WSL_DISTRO_NAME" ]; then
+      is_wsl=true
+      echo "   ⚡ WSL环境检测: 使用快速CPU配置"
+      profile_json='{"tier":"entry-cpu"}'
+    else
+      profile_json=$(openclaw_detect_hardware_profile_json 2>/dev/null) || profile_json='{"tier":"entry-cpu"}'
+    fi
     tier=$(python3 - "$profile_json" <<'PY' 2>/dev/null || echo 'entry-cpu'
 import json, sys
 print((json.loads(sys.argv[1]) or {}).get('tier', 'entry-cpu'))
@@ -20920,7 +20932,7 @@ PY
     case "$tier" in
       server|workstation|flagship-gpu|golden-gpu)
         text_model="qwen2.5:7b"
-        code_model="qwen3-coder"
+        code_model="qwen2.5-coder:1.5b"
         vision_model="gemma3:4b"
         ;;
       advanced-gpu|advanced-cpu-plus|advanced-cpu)
@@ -20929,16 +20941,23 @@ PY
         vision_model="gemma3:4b"
         ;;
       entry-gpu|entry-cpu)
-        text_model="qwen3:0.5b"
+        text_model="qwen3:0.6b"
         code_model="qwen2.5-coder:1.5b"
         vision_model="gemma3:4b"
         ;;
       *)
-        text_model="qwen3:0.3b"
+        text_model="qwen3:0.6b"
         code_model="qwen2.5-coder:1.5b"
         vision_model="gemma3:4b"
         ;;
     esac
+
+    # WSL低配环境：跳过大型视觉模型以加快启动，避免网络超时
+    if $is_wsl; then
+      echo "ℹ️ WSL环境: 跳过视觉模型下载以加快启动速度"
+      echo "   (视觉模型可通过菜单手动下载: 模型管理 → 拉取推荐模型 → image)"
+      want_vision=false
+    fi
 
     echo "🧠 正在按硬件分级准备本地专家模型..."
     echo "   分级: $tier"
@@ -20947,17 +20966,46 @@ PY
     [ "$want_vision" = "true" ] && echo "   视觉模型: $vision_model"
 
     openclaw_install_ollama_runtime || return 1
-    openclaw_ollama_pull_first_available "text" "$text_model" "qwen2.5:7b" "qwen3:4b" "llama3.2:3b" || return 1
-    text_model="${OPENCLAW_LAST_PULLED_MODEL:-$text_model}"
-    if [ "$code_model" != "$text_model" ]; then
-      openclaw_ollama_pull_first_available "code" "$code_model" "qwen2.5-coder:7b" "deepseek-coder:6.7b" || return 1
-      code_model="${OPENCLAW_LAST_PULLED_MODEL:-$code_model}"
+    # 根据硬件分级构建回退链：WSL/低配用更小模型，高配用更大模型
+    local text_fallbacks code_fallbacks
+    case "$tier" in
+      server|workstation|flagship-gpu|golden-gpu)
+        text_fallbacks=("qwen3:4b" "qwen2.5:3b" "llama3.2:3b")
+        code_fallbacks=("qwen2.5-coder:7b" "qwen2.5-coder:3b" "deepseek-coder:6.7b")
+        ;;
+      advanced-gpu|advanced-cpu-plus|advanced-cpu)
+        text_fallbacks=("qwen3:4b" "qwen2.5:1.5b" "llama3.2:3b")
+        code_fallbacks=("qwen2.5-coder:3b" "qwen2.5-coder:1.5b" "deepseek-coder:1.3b")
+        ;;
+      entry-gpu|entry-cpu|*)
+        text_fallbacks=("qwen2.5:1.5b" "llama3.2:1b" "qwen2.5:0.5b")
+        code_fallbacks=("qwen2.5-coder:0.5b" "qwen2.5-coder:1.5b" "deepseek-coder:1.3b")
+        ;;
+    esac
+    if openclaw_ollama_pull_first_available "text" "$text_model" "${text_fallbacks[@]}"; then
+      text_model="${OPENCLAW_LAST_PULLED_MODEL:-$text_model}"
+    else
+      echo "⚠️ 文本模型拉取失败，将以无本地模型模式继续"
+      $is_wsl && echo "   WSL环境请确保: ollama serve 已运行，网络可访问 registry.ollama.ai"
+      text_model=""
+    fi
+    if [ "$code_model" != "$text_model" ] && [ -n "$code_model" ]; then
+      if openclaw_ollama_pull_first_available "code" "$code_model" "${code_fallbacks[@]}"; then
+        code_model="${OPENCLAW_LAST_PULLED_MODEL:-$code_model}"
+      else
+        echo "⚠️ 代码模型拉取失败，将以文本模型替代"
+        code_model="$text_model"
+      fi
     else
       code_model="$text_model"
     fi
     if [ "$want_vision" = "true" ]; then
-      openclaw_ollama_pull_first_available "image" "$vision_model" "llava:7b" "minicpm-v" || return 1
-      vision_model="${OPENCLAW_LAST_PULLED_MODEL:-$vision_model}"
+      if openclaw_ollama_pull_first_available "image" "$vision_model" "llava:7b" "minicpm-v"; then
+        vision_model="${OPENCLAW_LAST_PULLED_MODEL:-$vision_model}"
+      else
+        echo "⚠️ 视觉模型不可用，视觉功能将被禁用"
+        vision_model=""
+      fi
     fi
 
     python3 - "$(openclaw_get_config_file)" "$text_model" "$code_model" "$vision_model" "$want_vision" <<'PY'
@@ -21306,13 +21354,23 @@ openclaw_ollama_runtime_hint() {
 openclaw_ollama_pull_first_available() {
     local model_role="$1"
     shift
-    local model_name="" cached_status cached_note cache_line
+    local model_name="" cached_status cached_note cache_line pull_timeout=600 max_attempts=3 attempts=0
     OPENCLAW_LAST_PULLED_MODEL=""
+    # WSL环境：延长超时适应国内网络，增加可尝试的备选模型数
+    if grep -qi "microsoft\|WSL" /proc/sys/kernel/osrelease 2>/dev/null || [ -n "$WSL_DISTRO_NAME" ]; then
+      pull_timeout=900
+      max_attempts=5
+    fi
     openclaw_install_ollama_runtime || return 1
     openclaw_ensure_ollama_running || return 1
     openclaw_ollama_runtime_hint || true
     for model_name in "$@"; do
       [ -z "$model_name" ] && continue
+      attempts=$((attempts + 1))
+      if [ "$attempts" -gt "$max_attempts" ]; then
+        echo "⚠️ 已达到最大尝试次数($max_attempts)，跳过剩余备选模型"
+        break
+      fi
       if openclaw_ollama_model_exists_local "$model_name"; then
         OPENCLAW_LAST_PULLED_MODEL="$model_name"
         openclaw_ollama_cache_status_set "$model_role" "$model_name" "local" "模型已存在于本地"
@@ -21334,7 +21392,7 @@ openclaw_ollama_pull_first_available() {
         openclaw_ollama_cache_status_set "$model_role" "$model_name" "skipped" "用户取消"
         continue
       fi
-      if timeout 600 ollama pull "$model_name"; then
+      if timeout "$pull_timeout" ollama pull "$model_name"; then
         OPENCLAW_LAST_PULLED_MODEL="$model_name"
         openclaw_ollama_cache_status_set "$model_role" "$model_name" "ok" "拉取成功"
         openclaw_configure_local_ollama_provider "$model_name" "$model_role" || true
@@ -21367,10 +21425,10 @@ PY
             openclaw_ollama_pull_first_available "text" "qwen2.5:3b" "qwen3:4b" "llama3.2:3b"
             ;;
           entry-gpu|entry-cpu)
-            openclaw_ollama_pull_first_available "text" "qwen3:0.5b" "qwen2.5:1.5b" "llama3.2:1b"
+            openclaw_ollama_pull_first_available "text" "qwen3:0.6b" "qwen2.5:1.5b" "llama3.2:1b"
             ;;
           *)
-            openclaw_ollama_pull_first_available "text" "qwen3:0.5b" "llama3.2:1b"
+            openclaw_ollama_pull_first_available "text" "qwen3:0.6b" "llama3.2:1b"
             ;;
         esac
         selected_model="$OPENCLAW_LAST_PULLED_MODEL"
@@ -21379,10 +21437,10 @@ PY
       code)
         case "$tier" in
           server|workstation)
-            openclaw_ollama_pull_first_available "code" "qwen3-coder" "deepseek-coder-v2:16b" "qwen2.5-coder:7b"
+            openclaw_ollama_pull_first_available "code" "qwen2.5-coder:1.5b" "deepseek-coder-v2:16b" "qwen2.5-coder:7b"
             ;;
           flagship-gpu)
-            openclaw_ollama_pull_first_available "code" "qwen3-coder" "qwen2.5-coder:7b" "deepseek-coder:6.7b"
+            openclaw_ollama_pull_first_available "code" "qwen2.5-coder:1.5b" "qwen2.5-coder:7b" "deepseek-coder:6.7b"
             ;;
           golden-gpu)
             openclaw_ollama_pull_first_available "code" "qwen2.5-coder:7b" "deepseek-coder:6.7b" "qwen2.5-coder:1.5b"
@@ -21417,7 +21475,7 @@ openclaw_ollama_quick_setup_menu() {
       echo
       skpl_ui_section "推荐模型"
       skpl_ui_menu_item 1 "qwen2.5:7b" "稳妥的本地通用文本模型，适合大多数设备"
-      skpl_ui_menu_item 2 "qwen3-coder" "本地代码模型，优先用于开发辅助"
+      skpl_ui_menu_item 2 "qwen2.5-coder:1.5b" "本地代码模型，优先用于开发辅助"
       skpl_ui_menu_item 3 "qwen2.5-coder:7b" "备用代码模型，适合兼容旧配置"
       skpl_ui_menu_item 4 "mistral:7b" "通用备选模型"
       skpl_ui_menu_item 5 "自定义模型" "手动输入任意 ollama 模型名"
@@ -22571,17 +22629,17 @@ ai_cfg = json.loads(ai_stack_path.read_text(encoding='utf-8')) if ai_stack_path.
 profiles = {
     'beginner-safe': {
         'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 12, 'similarityThreshold': 0.6, 'autoUpdateMinutes': 60, 'cleanupDays': 15, 'cloudUploadMemory': False, 'localOnly': True, 'localExperts': True, 'localVision': False},
-        'routing': {'defaultTextModel': 'ollama/qwen3:0.5b', 'defaultCodeModel': 'ollama/qwen3:0.5b'},
+        'routing': {'defaultTextModel': 'ollama/qwen3:0.6b', 'defaultCodeModel': 'ollama/qwen3:0.6b'},
         'cache': {'routeTtlSeconds': 1200, 'resultTtlSeconds': 2400, 'toolTtlSeconds': 1200},
     },
     'balanced-local': {
         'memory': {'backend': 'builtin', 'preheat': True, 'maxContextPercent': 15, 'similarityThreshold': 0.58, 'autoUpdateMinutes': 30, 'cleanupDays': 30, 'cloudUploadMemory': False, 'localOnly': True, 'localExperts': True, 'localVision': False},
-        'routing': {'defaultTextModel': 'ollama/qwen2.5:7b', 'defaultCodeModel': 'ollama/qwen3-coder'},
+        'routing': {'defaultTextModel': 'ollama/qwen2.5:7b', 'defaultCodeModel': 'ollama/qwen2.5-coder:1.5b'},
         'cache': {'routeTtlSeconds': 900, 'resultTtlSeconds': 1800, 'toolTtlSeconds': 900},
     },
     'privacy-first': {
         'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 10, 'similarityThreshold': 0.62, 'autoUpdateMinutes': 45, 'cleanupDays': 14, 'cloudUploadMemory': False, 'localOnly': True, 'localExperts': True, 'localVision': False},
-        'routing': {'defaultTextModel': 'ollama/qwen2.5:3b', 'defaultCodeModel': 'ollama/qwen3-coder'},
+        'routing': {'defaultTextModel': 'ollama/qwen2.5:3b', 'defaultCodeModel': 'ollama/qwen2.5-coder:1.5b'},
         'cache': {'routeTtlSeconds': 1500, 'resultTtlSeconds': 2400, 'toolTtlSeconds': 1200},
     },
     'cloud-power': {
@@ -22591,7 +22649,7 @@ profiles = {
     },
     'low-resource': {
         'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 8, 'similarityThreshold': 0.65, 'autoUpdateMinutes': 90, 'cleanupDays': 10, 'cloudUploadMemory': False, 'localOnly': True, 'localExperts': True, 'localVision': False},
-        'routing': {'defaultTextModel': 'ollama/qwen3:0.5b', 'defaultCodeModel': 'ollama/qwen2.5-coder:1.5b'},
+        'routing': {'defaultTextModel': 'ollama/qwen3:0.6b', 'defaultCodeModel': 'ollama/qwen2.5-coder:1.5b'},
         'cache': {'routeTtlSeconds': 1800, 'resultTtlSeconds': 1800, 'toolTtlSeconds': 1200},
     },
 }
@@ -22895,7 +22953,7 @@ openclaw_full_local_ai_stack_menu() {
     skpl_ui_section "操作"
     skpl_ui_menu_item 1 "安装 Ollama 运行时" "仅安装运行时，systemd 或 ollama serve 会自动尝试拉起"
     skpl_ui_menu_item 2 "拉取文本模型" "qwen2.5:7b，适合通用对话与工具调用"
-    skpl_ui_menu_item 3 "拉取代码模型" "qwen3-coder，适合开发辅助"
+    skpl_ui_menu_item 3 "拉取代码模型" "qwen2.5-coder:1.5b，适合开发辅助"
     skpl_ui_menu_item 4 "拉取视觉模型" "gemma3:4b，适合多模态任务"
     skpl_ui_menu_item 5 "应用推荐本地模型配置" "把文本、代码、视觉默认模型写入 OpenClaw 配置"
     skpl_ui_menu_item 6 "一键完整本地落地" "安装运行时、拉取推荐模型、启用本地检索并执行验收"
@@ -26121,7 +26179,7 @@ PY
     echo
     skpl_ui_section "操作"
     skpl_ui_menu_item 1 "设置默认文本模型" "如 ollama/qwen2.5:7b"
-    skpl_ui_menu_item 2 "设置默认代码模型" "如 ollama/qwen3-coder"
+    skpl_ui_menu_item 2 "设置默认代码模型" "如 ollama/qwen2.5-coder:1.5b"
     skpl_ui_menu_item 3 "设置默认视觉模型" "如 google/gemini-2.5-pro"
     skpl_ui_menu_item 4 "设置首选云提供商" "如 google, openai, anthropic"
     skpl_ui_menu_item 5 "设置成本优先级" "cost-first / balanced / quality-first"
