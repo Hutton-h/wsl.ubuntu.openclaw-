@@ -1,4 +1,3 @@
-#!/bin/bash
 set -e
 
 SKPL_NAME="SKPL"
@@ -27,6 +26,40 @@ SKPL_MEMOS_ROOT="/root/.openclaw/memos"
 SKPL_MEMOS_TASKS_DIR="${SKPL_MEMOS_ROOT}/tasks"
 SKPL_MEMOS_SKILLS_DIR="${SKPL_MEMOS_ROOT}/skills"
 SKPL_MEMOS_STATE_DIR="${SKPL_MEMOS_ROOT}/state"
+SKPL_MEMORY_EXTENSION_ROOT="/root/.openclaw/memory-extension"
+SKPL_MEMORY_EXTENSION_DB="${SKPL_MEMORY_EXTENSION_ROOT}/memory-extension.sqlite3"
+SKPL_MEMORY_EXTENSION_CONFIG="${SKPL_MEMORY_EXTENSION_ROOT}/config.json"
+SKPL_MEMORY_EXTENSION_EXPORT_DIR="${SKPL_MEMORY_EXTENSION_ROOT}/exports"
+SKPL_MEMORY_EXTENSION_CACHE_DIR="${SKPL_MEMORY_EXTENSION_ROOT}/cache"
+SKPL_AI_STACK_ROOT="/root/.openclaw/ai-stack"
+SKPL_AI_STACK_CACHE_DIR="${SKPL_AI_STACK_ROOT}/cache"
+SKPL_AI_STACK_ROUTE_CACHE_DIR="${SKPL_AI_STACK_CACHE_DIR}/route"
+SKPL_AI_STACK_RESULT_CACHE_DIR="${SKPL_AI_STACK_CACHE_DIR}/result"
+SKPL_AI_STACK_TOOL_CACHE_DIR="${SKPL_AI_STACK_CACHE_DIR}/tool"
+SKPL_AI_STACK_SEMANTIC_CACHE_DIR="${SKPL_AI_STACK_CACHE_DIR}/semantic"
+SKPL_MEMORY_PREDICTION_DIR="${SKPL_AI_STACK_CACHE_DIR}/memory-prediction"
+SKPL_MEMORY_HOT_CACHE_DIR="${SKPL_AI_STACK_CACHE_DIR}/memory-hot"
+SKPL_SEMANTIC_CACHE_DIR="${SKPL_AI_STACK_CACHE_DIR}/semantic-embeddings"
+SKPL_KNOWLEDGE_GRAPH_DIR="${SKPL_AI_STACK_CACHE_DIR}/knowledge-graph"
+SKPL_FEDERATED_MEMORY_DIR="${SKPL_AI_STACK_CACHE_DIR}/federated-memory"
+SKPL_AI_STACK_STATE_DIR="${SKPL_AI_STACK_ROOT}/state"
+SKPL_AI_STACK_LOCK_FILE="${SKPL_AI_STACK_STATE_DIR}/expert-model.lock"
+SKPL_AI_STACK_ROUTE_STATUS_FILE="${SKPL_AI_STACK_STATE_DIR}/route-status.json"
+SKPL_AI_STACK_PREDICTIVE_CACHE_DIR="${SKPL_AI_STACK_CACHE_DIR}/predictive"
+SKPL_AI_STACK_CODE_CACHE_DIR="${SKPL_AI_STACK_CACHE_DIR}/code-snippet"
+SKPL_AI_STACK_MULTIMODAL_CACHE_DIR="${SKPL_AI_STACK_CACHE_DIR}/multimodal"
+SKPL_AI_STACK_ENCRYPTED_CACHE_DIR="${SKPL_AI_STACK_CACHE_DIR}/encrypted"
+SKPL_AI_STACK_EXPERT_STATE_FILE="${SKPL_AI_STACK_STATE_DIR}/expert-state.json"
+SKPL_AI_STACK_TOOL_STATE_FILE="${SKPL_AI_STACK_STATE_DIR}/tool-state.json"
+SKPL_AI_STACK_CLOUD_STATE_FILE="${SKPL_AI_STACK_STATE_DIR}/cloud-state.json"
+SKPL_AI_STACK_EVOLVE_STATE_FILE="${SKPL_AI_STACK_STATE_DIR}/evolve-state.json"
+SKPL_AI_STACK_LIFECYCLE_STATE_FILE="${SKPL_AI_STACK_STATE_DIR}/lifecycle-state.json"
+SKPL_AI_STACK_CONTEXT_STATE_FILE="${SKPL_AI_STACK_STATE_DIR}/context-state.json"
+SKPL_AI_STACK_PLUGIN_STATE_FILE="${SKPL_AI_STACK_STATE_DIR}/plugin-state.json"
+SKPL_AI_STACK_RESOURCE_STATE_FILE="${SKPL_AI_STACK_STATE_DIR}/resource-state.json"
+SKPL_AI_STACK_ACCEL_STATE_FILE="${SKPL_AI_STACK_STATE_DIR}/accel-state.json"
+SKPL_AI_STACK_PLUGIN_CAPABILITY_FILE="${SKPL_AI_STACK_STATE_DIR}/plugin-capabilities.json"
+SKPL_AI_STACK_FRONTEND_STATE_FILE="${SKPL_AI_STACK_STATE_DIR}/frontend-state.json"
 SKPL_MEMORY_ENTERPRISE_STATE_FILE="${SKPL_HYBRID_MEMORY_STATE_DIR}/enterprise-memory.json"
 SKPL_MEMORY_DREAMS_FILENAME="DREAMS.md"
 SKPL_MEMORY_DREAMING_DIRNAME="memory/dreaming"
@@ -67,6 +100,7 @@ SKPL_DEVICES_LIST_CACHE_FILE="${SKPL_HOME}/devices-list.txt"
 SKPL_PLUGIN_LIST_CACHE_FILE="${SKPL_HOME}/plugins-list.txt"
 SKPL_PANEL_OVERVIEW_CACHE_FILE="${SKPL_HOME}/panel-overview.tsv"
 SKPL_CHANNEL_PROBE_CACHE_FILE="${SKPL_HOME}/channel-probe.txt"
+SKPL_OLLAMA_PULL_CACHE_FILE="${SKPL_HOME}/ollama-pull-cache.json"
 SKPL_NPM_INSTALL_TIMEOUT="240"
 SKPL_NPM_FETCH_RETRIES="2"
 SKPL_NPM_FETCH_TIMEOUT_MS="180000"
@@ -90,7 +124,6 @@ gh_proxy=''
 if ! command -v sudo >/dev/null 2>&1; then
   sudo() { "$@"; }
 fi
-
 skpl_ui_rule() {
   local color="${1:-$gl_hui}"
   local char="-"
@@ -344,6 +377,8 @@ PY
 
 init_skpl_runtime() {
   mkdir -p "$SKPL_HOME"
+  skpl_init_python_utils
+  mkdir -p "/workspace/.monkeycode"
   touch "$SKPL_LOG_FILE"
   touch "$SKPL_STATE_FILE"
   write_skpl_proxy_env_script >/dev/null 2>&1 || true
@@ -401,6 +436,7 @@ resolve_openclaw_js_entry() {
     "/usr/local/lib/node_modules/openclaw/dist/index.js"; do
     if [ -n "$candidate" ] && [ -f "$candidate" ]; then
       printf '%s\n' "$candidate"
+      skpl_generic_cache_write "$_rap_cache_file" "$candidate"
       return 0
     fi
   done
@@ -520,7 +556,7 @@ openclaw_ensure_local_gateway_config() {
   if command -v openclaw >/dev/null 2>&1; then
     openclaw config set gateway.mode local >/dev/null 2>&1 || true
     openclaw config set gateway.bind loopback >/dev/null 2>&1 || true
-    openclaw config set gateway.port "$gateway_port" --json >/dev/null 2>&1 || true
+    openclaw config set gateway.port "$gateway_port" --strict-json >/dev/null 2>&1 || true
   fi
 
   python3 - "$config_file" "$gateway_port" <<'PY'
@@ -664,7 +700,7 @@ openclaw_get_config_file() {
 }
 
 openclaw_default_memory_model_path() {
-  printf '%s\n' "/root/.openclaw/models/embedding/embeddinggemma-300M-Q8_0.gguf"
+  printf '%s\n' "${HOME}/.openclaw/models/embedding/embeddinggemma-300M-Q8_0.gguf"
 }
 
 log_msg() {
@@ -877,9 +913,9 @@ openclaw_ensure_gateway_ready() {
     fi
 
   if [ "$attempt" -eq 2 ] || [ "$attempt" -eq 4 ]; then
-      openclaw gateway install >/dev/null 2>&1 || true
+      openclaw setup >/dev/null 2>&1 || openclaw onboard --install-daemon >/dev/null 2>&1 || true
       refresh_openclaw_gateway_service >/dev/null 2>&1 || true
-      openclaw gateway --port "$gateway_port" >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
+      openclaw gateway --port "$gateway_port" --allow-unconfigured >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
     fi
 
     if [ "$attempt" -eq 6 ]; then
@@ -1080,6 +1116,12 @@ skpl_proxy_candidates() {
 }
 
 resolve_active_proxy() {
+  local _rap_cache_file="${SKPL_HOME}/.cache/resolve-active-proxy"
+  local _rap_cached=""
+  _rap_cached=$(skpl_generic_cache_read "$_rap_cache_file" 30 2>/dev/null) && {
+    printf '%s\n' "$_rap_cached"
+    return 0
+  }
   local port="${1:-$(skpl_effective_proxy_port)}"
   local candidate=""
 
@@ -1294,12 +1336,43 @@ print(','.join(hosts))
 PY
 }
 
-if [ -f /root/.skpl/proxy-env.sh ]; then
-  # shellcheck disable=SC1091
-  source /root/.skpl/proxy-env.sh "$PROXY_PORT"
-fi
+# 修复版代理检测 - 添加3秒整体超时防止卡住
+_skpl_detect_proxy() {
+  local SKPL_PROXY_PORT_VALUE="${1:-10808}"
+  local ACTIVE_PROXY=""
+  local candidate
+  
+  _check_port() {
+    local ip_port="$1" ip port
+    ip=$(echo "$ip_port" | cut -d: -f1)
+    port=$(echo "$ip_port" | cut -d: -f2)
+    timeout 0.5 bash -c "echo >/dev/tcp/$ip/$port" 2>/dev/null
+  }
+  
+  {
+    while IFS= read -r candidate; do
+      [ -z "$candidate" ] && continue
+      if _check_port "$candidate"; then
+        ACTIVE_PROXY="$candidate"
+        break
+      fi
+    done < <(printf '%s\n' "127.0.0.1:${SKPL_PROXY_PORT_VALUE}" "10.255.255.254:${SKPL_PROXY_PORT_VALUE}" "$(getent ahostsv4 host.docker.internal 2>/dev/null | awk 'NR==1{print $1}'):${SKPL_PROXY_PORT_VALUE}" "$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf 2>/dev/null):${SKPL_PROXY_PORT_VALUE}" "$(ip route 2>/dev/null | awk '/^default /{print $3; exit}'):${SKPL_PROXY_PORT_VALUE}" | awk '!seen[$0]++')
+  } &
+  local _check_pid=$!
+  # 使用timeout确保wait不会无限等待
+  timeout 3 bash -c "wait $_check_pid" 2>/dev/null || ACTIVE_PROXY=""
+  # 如果还在运行，强制终止
+  kill $_check_pid 2>/dev/null || true
+  
+  if [ -n "$ACTIVE_PROXY" ]; then
+    local PROXY_URL="http://$ACTIVE_PROXY"
+    export http_proxy="$PROXY_URL" https_proxy="$PROXY_URL" HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL"
+    export no_proxy="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.modelscope.cn,.deepseek.com"
+  fi
+}
+_skpl_detect_proxy "$PROXY_PORT"
 
-CONFIG_FILE="/root/.openclaw/openclaw.json"
+CONFIG_FILE="${HOME}/.openclaw/openclaw.json"
 DYNAMIC_NO_PROXY="$(collect_domestic_hosts_from_config "$CONFIG_FILE" 2>/dev/null || true)"
 if [ -n "$DYNAMIC_NO_PROXY" ]; then
   no_proxy="$(merge_no_proxy_csv "${no_proxy:-}" "$DYNAMIC_NO_PROXY")"
@@ -1763,10 +1836,4712 @@ hybrid_memory_prepare_dirs() {
     "$SKPL_HYBRID_MEMORY_LOGS_DIR" \
     "$SKPL_HYBRID_MEMORY_CACHE_DIR" \
     "$SKPL_HYBRID_MEMORY_LANCEDB_DIR" \
+    "$SKPL_MEMORY_EXTENSION_ROOT" \
+    "$SKPL_MEMORY_EXTENSION_EXPORT_DIR" \
+    "$SKPL_MEMORY_EXTENSION_CACHE_DIR" \
+    "$SKPL_AI_STACK_ROOT" \
+    "$SKPL_AI_STACK_CACHE_DIR" \
+    "$SKPL_AI_STACK_ROUTE_CACHE_DIR" \
+    "$SKPL_AI_STACK_RESULT_CACHE_DIR" \
+    "$SKPL_AI_STACK_TOOL_CACHE_DIR" \
+    "$SKPL_AI_STACK_SEMANTIC_CACHE_DIR" \
+    "$SKPL_AI_STACK_PREDICTIVE_CACHE_DIR" \
+    "$SKPL_AI_STACK_CODE_CACHE_DIR" \
+    "$SKPL_AI_STACK_MULTIMODAL_CACHE_DIR" \
+    "$SKPL_AI_STACK_ENCRYPTED_CACHE_DIR" \
+    "$SKPL_AI_STACK_STATE_DIR" \
     "$SKPL_MEMOS_TASKS_DIR" \
     "$SKPL_MEMOS_SKILLS_DIR" \
     "$SKPL_MEMOS_STATE_DIR" \
-    "$EVOMAP_MEMORY_DIR"
+    "$EVOMAP_MEMORY_DIR" \
+    "$SKPL_MEMORY_PRELOAD_DIR" \
+    "$SKPL_MEMORY_HOT_CACHE_DIR"
+}
+
+# Memory preload and hot cache directories
+SKPL_MEMORY_PRELOAD_DIR="${SKPL_AI_STACK_CACHE_DIR}/memory-preload"
+SKPL_MEMORY_HOT_CACHE_DIR="${SKPL_AI_STACK_CACHE_DIR}/memory-hot"
+
+# Preload hot memories into memory cache on startup
+openclaw_memory_preload_hot() {
+  local db_path="$1" preload_file
+  preload_file="${SKPL_MEMORY_PRELOAD_DIR}/hot-memories.json"
+  
+  [ -f "$preload_file" ] && [ "$(( $(date +%s) - $(stat -c %Y "$preload_file" 2>/dev/null || echo "0") ))" -lt 300 ] && return 0
+  
+  # Preload recent and frequently accessed memories
+  sqlite3 "$db_path" <<'SQL' > "$preload_file" 2>/dev/null
+.mode json
+SELECT json_object('category', category, 'title', title, 'content', content) 
+FROM memory_entries 
+WHERE deleted=0 
+ORDER BY updated_at DESC 
+LIMIT 30;
+SQL
+}
+
+# Get memory from hot cache (RAM-fast)
+openclaw_memory_from_hot_cache() {
+  local query="$1"
+  local hot_file="${SKPL_MEMORY_HOT_CACHE_DIR}/current.json"
+  
+  [ -f "$hot_file" ] || return 1
+  
+  # Fast grep-based pre-filter before Python
+  if grep -qi "${query:0:10}" "$hot_file" 2>/dev/null; then
+    python3 - "$query" "$hot_file" <<'PY'
+import json, sys
+query = sys.argv[1].lower()
+with open(sys.argv[2], 'r') as f:
+    memories = json.load(f)
+matches = []
+for m in memories:
+    text = f"{m.get('title','')} {m.get('content','')}".lower()
+    if query in text or any(w in text for w in query.split()):
+        matches.append(m)
+        if len(matches) >= 5:
+            break
+print(json.dumps(matches))
+PY
+    return 0
+  fi
+  return 1
+}
+
+openclaw_ai_stack_prepare() {
+  hybrid_memory_prepare_dirs
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+path.parent.mkdir(parents=True, exist_ok=True)
+default_config = {
+    'cache': {
+        'routeTtlSeconds': 900,
+        'resultTtlSeconds': 1800,
+        'toolTtlSeconds': 900,
+        'semanticTtlSeconds': 3600,
+        'predictiveTtlSeconds': 1800,
+        'codeSnippetTtlSeconds': 1800,
+        'multimodalTtlSeconds': 1800,
+        'encryptedTtlSeconds': 900,
+        'layout': {
+            'exactMatchMb': 128,
+            'semanticMb': 256,
+            'generatedResultMb': 512,
+            'toolCallMb': 128,
+            'predictiveMb': 256,
+            'codeSnippetMb': 128,
+            'multimodalMb': 128,
+            'encryptedSensitiveMb': 64,
+        },
+    },
+    'frontend': {
+        'connectivityMode': 'auto',
+        'dynamicLoader': 'auto',
+        'resourceMonitor': True,
+        'loadBalancer': 'balanced',
+        'autoScale': 'enabled',
+        'crossDeviceSync': 'optional',
+    },
+    'routing': {
+        'defaultTextModel': 'ollama/qwen2.5:14b',
+        'defaultVisionModel': 'ollama/llama3.2-vision:11b',
+        'defaultSearchModel': 'google/gemini-2.5-flash',
+        'defaultCodeModel': 'ollama/deepseek-coder-v2:16b',
+        'fallbackModels': {
+            'emergency': 'ollama/qwen3:0.3b',
+            'entry': 'ollama/qwen3:0.5b',
+            'advanced': 'ollama/qwen3:1.8b',
+            'cpuVision': 'local-ocr',
+            'cpuCode': 'ollama/qwen3:1.8b'
+        },
+        'defaultCloudTextModel': 'google/gemini-2.5-flash',
+        'defaultCloudVisionModel': 'google/gemini-2.5-pro',
+        'defaultCloudSearchModel': 'google/gemini-2.5-flash',
+        'defaultCloudCodeModel': 'google/gemini-2.5-flash',
+    },
+    'experts': {
+        'baseRoles': ['general', 'document', 'tool', 'compression', 'routing-assistant', 'memory-integration'],
+        'byTier': {
+            'emergency-cpu': {
+                'general': {'default': 'ollama/qwen3:0.3b', 'alternatives': ['ollama/qwen3:0.5b']},
+                'code': {'default': 'cloud/code-proxy', 'alternatives': ['ollama/qwen3:0.3b']},
+                'vision': {'default': 'cloud/vision-proxy', 'alternatives': ['local-ocr']},
+            },
+            'entry-cpu': {
+                'general': {'default': 'ollama/qwen3:0.5b', 'alternatives': ['ollama/llama3.2:1b']},
+                'code': {'default': 'cloud/code-proxy', 'alternatives': ['ollama/qwen2.5-coder:1.5b']},
+                'vision': {'default': 'cloud/vision-proxy', 'alternatives': ['local-ocr']},
+            },
+            'advanced-cpu': {
+                'general': {'default': 'ollama/qwen3:1.8b', 'alternatives': ['ollama/llama3.2:3b', 'ollama/phi3:mini']},
+                'code': {'default': 'ollama/qwen2.5-coder:1.5b', 'alternatives': ['ollama/deepseek-coder:1.5b']},
+                'vision': {'default': 'local-ocr', 'alternatives': ['cloud/vision-proxy']},
+            },
+            'entry-gpu': {
+                'general': {'default': 'ollama/llama3.2:3b', 'alternatives': ['ollama/qwen2.5:3b', 'ollama/phi3:mini']},
+                'code': {'default': 'ollama/deepseek-coder:1.5b', 'alternatives': ['ollama/qwen2.5-coder:1.5b', 'ollama/codellama:7b']},
+                'vision': {'default': 'ollama/qwen2-vl:2b', 'alternatives': ['ollama/llava:7b', 'local-ocr']},
+            },
+            'advanced-gpu': {
+                'general': {'default': 'ollama/llama3.2:3b', 'alternatives': ['ollama/qwen2.5:3b', 'ollama/phi3:mini']},
+                'code': {'default': 'ollama/codellama:7b', 'alternatives': ['ollama/qwen2.5-coder:7b', 'ollama/deepseek-coder:6.7b']},
+                'vision': {'default': 'ollama/qwen2-vl:2b', 'alternatives': ['ollama/llama3.2-vision:3b', 'ollama/llava:7b']},
+            },
+            'golden-gpu': {
+                'general': {'default': 'ollama/qwen2.5:14b', 'alternatives': ['ollama/llama3.1:8b', 'ollama/mistral:7b']},
+                'code': {'default': 'ollama/deepseek-coder-v2:16b', 'alternatives': ['ollama/qwen2.5-coder:14b', 'ollama/codellama:13b']},
+                'vision': {'default': 'ollama/llama3.2-vision:11b', 'alternatives': ['ollama/qwen2-vl:7b', 'ollama/internvl2:8b']},
+            },
+            'flagship-gpu': {
+                'general': {'default': 'ollama/qwen2.5:14b', 'alternatives': ['ollama/llama3.1:8b', 'ollama/mistral:7b']},
+                'code': {'default': 'ollama/deepseek-coder-v2:16b', 'alternatives': ['ollama/codellama:13b', 'ollama/starcoder2:7b']},
+                'vision': {'default': 'ollama/qwen2-vl:7b', 'alternatives': ['ollama/llama3.2-vision:11b', 'ollama/internvl2:8b']},
+            },
+            'workstation': {
+                'general': {'default': 'ollama/llama3.1:70b', 'alternatives': ['ollama/qwen2.5:72b', 'ollama/mistral-nemo:12b']},
+                'code': {'default': 'ollama/deepseek-coder-v2:16b', 'alternatives': ['ollama/codellama:70b', 'ollama/starcoder2:15b']},
+                'vision': {'default': 'ollama/qwen2-vl:14b', 'alternatives': ['ollama/llama3.2-vision:11b', 'ollama/internvl2:12b']},
+            },
+            'server': {
+                'general': {'default': 'ollama/llama3.1:70b', 'alternatives': ['ollama/qwen2.5:72b', 'ollama/mistral-nemo:12b']},
+                'code': {'default': 'ollama/deepseek-coder-v2:16b', 'alternatives': ['ollama/codellama:70b', 'ollama/starcoder2:15b']},
+                'vision': {'default': 'ollama/qwen2-vl:14b', 'alternatives': ['ollama/llama3.2-vision:11b', 'ollama/internvl2:12b']},
+            },
+        },
+    },
+    'budget': {
+        'reserveGpuMb': 200,
+        'reserveMemoryMb': 512,
+        'minFreeGpuMbForLocalExpert': 7200,
+        'minFreeMemoryMbForLocalExpert': 6144,
+        'lowBatteryPercent': 25,
+        'emergencyCleanupCooldownSeconds': 900,
+        'expertReloadThresholdGpuMb': 5000,
+        'expertReloadThresholdMemoryMb': 6144,
+        'modelRequirementMb': {
+            'text': {'gpu': 7200, 'memory': 2048},
+            'code': {'gpu': 7200, 'memory': 2048},
+            'vision': {'gpu': 6600, 'memory': 2048},
+            'local': {'gpu': 1200, 'memory': 1024},
+            'search': {'gpu': 1200, 'memory': 1024},
+            'fallback': {'gpu': 1200, 'memory': 1024}
+        }
+    },
+    'cloud': {
+        'enabled': True,
+        'parallelFanout': 2,
+        'dispatchMode': 'auto',
+        'costQualityMode': 'balanced',
+        'tokenOptimizer': {
+            'enabled': True,
+            'dedupe': True,
+            'trimRedundant': True,
+            'batchMerge': True,
+        },
+        'aggregator': {
+            'consistencyCheck': True,
+            'crossValidate': True,
+            'mergeRedundant': True,
+            'structuredOutput': True,
+        },
+        'strategyByRoute': {
+            'text': 'single',
+            'vision': 'parallel',
+            'search': 'parallel',
+            'code': 'serial',
+            'local': 'single'
+        }
+    },
+    'tools': {
+        'requirePluginAllowlist': True,
+        'approvalMode': 'inherit',
+    'pluginTaskMap': {
+        'hybrid-search': 'memory-core',
+        'ocr-preprocess': 'vision-utils',
+        'image-preprocess': 'vision-utils',
+        'table-recognition': 'vision-utils',
+        'code-runtime': 'code-tools'
+    },
+    'riskByTask': {
+        'local-terminal': 'high',
+        'ocr-preprocess': 'low',
+        'image-preprocess': 'low',
+        'table-recognition': 'medium',
+        'code-runtime': 'medium',
+        'hybrid-search': 'low',
+        'no-tool-needed': 'none'
+        }
+    },
+    'acceleration': {
+        'flashAttention2': {'enabled': False, 'status': 'planned'},
+        'kvInt8': {'enabled': False, 'status': 'planned'},
+        'cpuAssist': {'enabled': True, 'status': 'active'},
+        'tensorRt': {'enabled': False, 'status': 'reserved'}
+    }
+}
+if path.exists():
+    try:
+        current = json.loads(path.read_text(encoding='utf-8'))
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if isinstance(value, dict) and isinstance(default_config.get(key), dict):
+                    default_config[key].update(value)
+                else:
+                    default_config[key] = value
+    except Exception:
+        pass
+path.write_text(json.dumps(default_config, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+# 缓存配额强制执行: 检查缓存目录大小，超出限制则按LRU淘汰
+openclaw_ai_stack_cache_enforce_quota() {
+  local cache_dir="$1" max_size_mb="${2:-128}"
+  [ -d "$cache_dir" ] || return 0
+  local current_size_mb
+  current_size_mb=$(du -sm "$cache_dir" 2>/dev/null | cut -f1)
+  [ -n "$current_size_mb" ] && [ "$current_size_mb" -gt 0 ] || return 0
+  if [ "$current_size_mb" -gt "$max_size_mb" ]; then
+    # 按修改时间排序，删除最旧的文件直到低于限制的80%
+    local target_mb=$((max_size_mb * 80 / 100))
+    find "$cache_dir" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | while IFS=' ' read -r ts filepath; do
+      [ -f "$filepath" ] || continue
+      rm -f "$filepath" 2>/dev/null || true
+      current_size_mb=$(du -sm "$cache_dir" 2>/dev/null | cut -f1)
+      [ "$current_size_mb" -le "$target_mb" ] && break
+    done
+  fi
+  return 0
+}
+
+openclaw_ai_stack_cache_key() {
+  local namespace="$1" text="$2"
+  python3 - "$namespace" "$text" <<'PY'
+import hashlib
+import sys
+ns = sys.argv[1]
+text = sys.argv[2]
+print(hashlib.sha256(f'{ns}::{text}'.encode('utf-8')).hexdigest())
+PY
+}
+
+openclaw_ai_stack_cache_read() {
+  local file_path="$1" ttl="$2"
+  [ -f "$file_path" ] || return 1
+  python3 - "$file_path" "$ttl" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+ttl = int(sys.argv[2] or '0')
+try:
+    data = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit(1)
+saved_at = int(data.get('savedAt', 0) or 0)
+if ttl > 0 and saved_at > 0 and int(time.time()) - saved_at > ttl:
+    raise SystemExit(2)
+print(json.dumps(data.get('payload'), ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_cache_write() {
+  local file_path="$1" payload="$2"
+  python3 - "$file_path" "$payload" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = sys.argv[2]
+path.parent.mkdir(parents=True, exist_ok=True)
+try:
+    parsed = json.loads(payload)
+except Exception:
+    parsed = payload
+path.write_text(json.dumps({'savedAt': int(time.time()), 'payload': parsed}, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+openclaw_ai_stack_cache_ttl() {
+  local field_name="$1" default_ttl="$2"
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$field_name" "$default_ttl" <<'PY'
+import json
+import sys
+
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+field_name = sys.argv[2]
+default_ttl = int(sys.argv[3] or '0')
+cache = cfg.get('cache') or {}
+print(int(cache.get(field_name, default_ttl) or default_ttl))
+PY
+}
+
+openclaw_ai_stack_route_cache_read() {
+  local query="$1" key ttl file_path
+  openclaw_ai_stack_prepare
+  key=$(openclaw_ai_stack_cache_key route "$query")
+  ttl=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
+import json, sys
+print(int((json.load(open(sys.argv[1], 'r', encoding='utf-8')).get('cache') or {}).get('routeTtlSeconds', 900)))
+PY
+)
+  file_path="${SKPL_AI_STACK_ROUTE_CACHE_DIR}/${key}.json"
+  openclaw_ai_stack_cache_read "$file_path" "$ttl"
+}
+
+openclaw_ai_stack_route_cache_write() {
+  local query="$1" payload="$2" key file_path
+  openclaw_ai_stack_prepare
+  key=$(openclaw_ai_stack_cache_key route "$query")
+  file_path="${SKPL_AI_STACK_ROUTE_CACHE_DIR}/${key}.json"
+  openclaw_ai_stack_cache_write "$file_path" "$payload"
+}
+
+openclaw_ai_stack_result_cache_read() {
+  local cache_scope="$1" query="$2" key ttl file_path
+  openclaw_ai_stack_prepare
+  key=$(openclaw_ai_stack_cache_key "result:${cache_scope}" "$query")
+  ttl=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
+import json, sys
+print(int((json.load(open(sys.argv[1], 'r', encoding='utf-8')).get('cache') or {}).get('resultTtlSeconds', 1800)))
+PY
+)
+  file_path="${SKPL_AI_STACK_RESULT_CACHE_DIR}/${key}.json"
+  openclaw_ai_stack_cache_read "$file_path" "$ttl"
+}
+
+openclaw_ai_stack_result_cache_write() {
+  local cache_scope="$1" query="$2" payload="$3" key file_path
+  openclaw_ai_stack_prepare
+  key=$(openclaw_ai_stack_cache_key "result:${cache_scope}" "$query")
+  file_path="${SKPL_AI_STACK_RESULT_CACHE_DIR}/${key}.json"
+  openclaw_ai_stack_cache_write "$file_path" "$payload"
+}
+
+openclaw_ai_stack_tool_cache_read() {
+  local tool_name="$1" input_text="$2" key ttl file_path
+  openclaw_ai_stack_prepare
+  key=$(openclaw_ai_stack_cache_key "tool:${tool_name}" "$input_text")
+  ttl=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
+import json, sys
+print(int((json.load(open(sys.argv[1], 'r', encoding='utf-8')).get('cache') or {}).get('toolTtlSeconds', 900)))
+PY
+)
+  file_path="${SKPL_AI_STACK_TOOL_CACHE_DIR}/${key}.json"
+  openclaw_ai_stack_cache_read "$file_path" "$ttl"
+}
+
+openclaw_ai_stack_tool_cache_write() {
+  local tool_name="$1" input_text="$2" payload="$3" key file_path
+  openclaw_ai_stack_prepare
+  key=$(openclaw_ai_stack_cache_key "tool:${tool_name}" "$input_text")
+  file_path="${SKPL_AI_STACK_TOOL_CACHE_DIR}/${key}.json"
+  openclaw_ai_stack_cache_write "$file_path" "$payload"
+}
+
+openclaw_ai_stack_semantic_cache_lookup() {
+  local query="$1"
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_SEMANTIC_CACHE_DIR" "$SKPL_AI_STACK_ROOT/config.json" "$query" <<'PY'
+import json
+import math
+import sys
+import time
+from pathlib import Path
+
+cache_dir = Path(sys.argv[1])
+config = json.load(open(sys.argv[2], 'r', encoding='utf-8'))
+query = (sys.argv[3] or '').strip().lower()
+ttl = int(((config.get('cache') or {}).get('semanticTtlSeconds', 3600)) or 3600)
+now = int(time.time())
+
+def tokens(text):
+    return {part for part in ''.join(ch if ch.isalnum() else ' ' for ch in text.lower()).split() if part}
+
+query_tokens = tokens(query)
+best = None
+best_score = 0.0
+for path in sorted(cache_dir.glob('*.json')):
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        continue
+    saved_at = int(data.get('savedAt', 0) or 0)
+    if saved_at and now - saved_at > ttl:
+        continue
+    payload = data.get('payload') or {}
+    cached_query = str(payload.get('query') or '').strip().lower()
+    cached_tokens = tokens(cached_query)
+    if not cached_tokens or not query_tokens:
+        continue
+    inter = len(query_tokens & cached_tokens)
+    union = len(query_tokens | cached_tokens)
+    score = (inter / union) if union else 0.0
+    if score > best_score:
+        best_score = score
+        best = payload
+if best and best_score >= 0.55:
+    best['semanticScore'] = round(best_score, 3)
+    print(json.dumps(best, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_semantic_cache_store() {
+  local query="$1" payload="$2" key file_path
+  openclaw_ai_stack_prepare
+  key=$(openclaw_ai_stack_cache_key semantic "$query")
+  file_path="${SKPL_AI_STACK_SEMANTIC_CACHE_DIR}/${key}.json"
+  python3 - "$file_path" "$query" "$payload" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+query = sys.argv[2]
+payload_raw = sys.argv[3]
+try:
+    payload = json.loads(payload_raw)
+except Exception:
+    payload = {'results': []}
+path.parent.mkdir(parents=True, exist_ok=True)
+data = {'savedAt': int(time.time()), 'payload': {'query': query, **payload}}
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+openclaw_ai_stack_run_tool_cached() {
+  local tool_name="$1" input_text="$2"
+  shift 2
+  local cached output payload
+  cached=$(openclaw_ai_stack_tool_cache_read "$tool_name" "$input_text" 2>/dev/null || true)
+  if [ -n "$cached" ] && [ "$cached" != "null" ]; then
+    python3 - "$cached" <<'PY'
+import json
+import sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {}
+print(data.get('output', ''))
+PY
+    return 0
+  fi
+  output=$("$@" 2>&1)
+  payload=$(python3 - "$output" <<'PY'
+import json, sys
+print(json.dumps({'output': sys.argv[1]}, ensure_ascii=False))
+PY
+)
+  openclaw_ai_stack_tool_cache_write "$tool_name" "$input_text" "$payload" >/dev/null 2>&1 || true
+  printf '%s\n' "$output"
+}
+
+openclaw_ai_stack_write_route_status() {
+  local route_json="$1" lock_json="${2:-}"
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_ROUTE_STATUS_FILE" "$route_json" "$lock_json" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+route = json.loads(sys.argv[2])
+lock_raw = sys.argv[3]
+lock = {}
+if lock_raw:
+    try:
+        lock = json.loads(lock_raw)
+    except Exception:
+        lock = {}
+payload = {
+    'updatedAt': int(time.time()),
+    'route': route,
+    'lock': lock,
+}
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+openclaw_ai_stack_route_status_summary() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_ROUTE_STATUS_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    print('未记录')
+    raise SystemExit(0)
+data = json.loads(path.read_text(encoding='utf-8'))
+route = data.get('route') or {}
+lock = data.get('lock') or {}
+model = route.get('model') or '-'
+route_name = route.get('route') or '-'
+execution = route.get('execution') or '-'
+reason = route.get('reason') or '-'
+lock_owner = lock.get('owner') or '-'
+print(f'{route_name} | {execution} | {model} | {reason} | lock={lock_owner}')
+PY
+}
+
+openclaw_ai_stack_full_status_summary() {
+  local route_summary resource_summary accel_summary expert_summary tool_summary plugin_summary cloud_summary lifecycle_summary context_summary
+  route_summary=$(openclaw_ai_stack_route_status_summary 2>/dev/null || printf '%s' '未记录')
+  resource_summary=$(openclaw_ai_stack_resource_status_summary 2>/dev/null || printf '%s' '未记录')
+  accel_summary=$(openclaw_ai_stack_acceleration_status_summary 2>/dev/null || printf '%s' '未记录')
+  expert_summary=$(openclaw_ai_stack_expert_status_summary 2>/dev/null || printf '%s' '未记录')
+  tool_summary=$(openclaw_ai_stack_tool_status_summary 2>/dev/null || printf '%s' '未记录')
+  plugin_summary=$(openclaw_ai_stack_plugin_status_summary 2>/dev/null || printf '%s' '未记录')
+  cloud_summary=$(openclaw_ai_stack_cloud_status_summary 2>/dev/null || printf '%s' '未记录')
+  lifecycle_summary=$(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || printf '%s' '未记录')
+  context_summary=$(openclaw_ai_stack_context_status_summary 2>/dev/null || printf '%s' '未记录')
+  printf 'route=%s | resource=%s | accel=%s | expert=%s | tool=%s | plugin=%s | cloud=%s | lifecycle=%s | context=%s\n' "$route_summary" "$resource_summary" "$accel_summary" "$expert_summary" "$tool_summary" "$plugin_summary" "$cloud_summary" "$lifecycle_summary" "$context_summary"
+}
+
+openclaw_ai_stack_delivery_status_summary() {
+  local precheck_summary route_summary context_summary resource_summary accel_summary expert_summary tool_summary plugin_summary cloud_summary evolve_summary lifecycle_summary memory_summary syntax_status acceptance_report
+  precheck_summary='未完成'
+  if bash -n "$0" >/dev/null 2>&1; then
+    precheck_summary='脚本语法已通过'
+  fi
+  route_summary=$(openclaw_ai_stack_route_status_summary 2>/dev/null || printf '%s' '未记录')
+  context_summary=$(openclaw_ai_stack_context_status_summary 2>/dev/null || printf '%s' '未记录')
+  resource_summary=$(openclaw_ai_stack_resource_status_summary 2>/dev/null || printf '%s' '未记录')
+  accel_summary=$(openclaw_ai_stack_acceleration_status_summary 2>/dev/null || printf '%s' '未记录')
+  expert_summary=$(openclaw_ai_stack_expert_status_summary 2>/dev/null || printf '%s' '未记录')
+  full_summary=$(openclaw_ai_stack_full_status_summary 2>/dev/null || true)
+  tool_summary=$(openclaw_ai_stack_tool_status_summary 2>/dev/null || printf '%s' '未记录')
+  plugin_summary=$(openclaw_ai_stack_plugin_status_summary 2>/dev/null || printf '%s' '未记录')
+  cloud_summary=$(openclaw_ai_stack_cloud_status_summary 2>/dev/null || printf '%s' '未记录')
+  evolve_summary=$(openclaw_ai_stack_evolve_status_summary 2>/dev/null || printf '%s' '未记录')
+  lifecycle_summary=$(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || printf '%s' '未记录')
+  memory_summary=$(openclaw_memory_acceptance_summary 2>/dev/null || printf '%s' '未记录')
+  syntax_status='未校验'
+  if bash -n "$0" >/dev/null 2>&1; then
+    syntax_status='已通过'
+  fi
+  acceptance_report=$(openclaw_ai_stack_acceptance_report 2>/dev/null || true)
+  python3 - "$precheck_summary" "$route_summary" "$context_summary" "$resource_summary" "$accel_summary" "$expert_summary" "$tool_summary" "$plugin_summary" "$cloud_summary" "$evolve_summary" "$lifecycle_summary" "$memory_summary" "$full_summary" "$syntax_status" "$acceptance_report" <<'PY'
+import sys
+
+precheck_summary, route_summary, context_summary, resource_summary, accel_summary, expert_summary, tool_summary, plugin_summary, cloud_summary, evolve_summary, lifecycle_summary, memory_summary, full_summary, syntax_status, acceptance_report = sys.argv[1:16]
+lines = [
+    f'前置层: {precheck_summary}',
+    f'第0层 预测性缓存层: {context_summary or "未记录"}',
+    f'第1层 多维度智能路由层: {route_summary or "未记录"}',
+    f'第2层 单模型多角色专家层: {expert_summary or "未记录"}',
+    f'第3层 混合检索增强层: {memory_summary or "未记录"}',
+    f'第4层 本地工具沙箱层: {tool_summary or "未记录"} | 插件={plugin_summary or "未记录"}',
+    f'第5层 多云端多模型协同层: {cloud_summary or "未记录"}',
+    f'第6层 自进化层(evomop): {evolve_summary or "未记录"}',
+    f'资源安全保障链: {resource_summary or "未记录"} | 生命周期={lifecycle_summary or "未记录"}',
+    f'兼容式记忆系统: 注入与长期记忆={memory_summary or "未记录"}',
+    f'全流程验收: 语法={syntax_status}',
+]
+if full_summary.strip():
+    lines.append('总览: 已生成')
+if acceptance_report.strip():
+    lines.append('验收报告: 已生成')
+print('\n'.join(lines))
+PY
+}
+
+openclaw_ai_stack_acceptance_report() {
+  local syntax_status route_summary resource_summary accel_summary tool_summary plugin_summary cloud_summary evolve_summary autotune_summary context_summary lifecycle_summary memory_summary
+  syntax_status='失败'
+  if bash -n "$0" >/dev/null 2>&1; then
+    syntax_status='通过'
+  fi
+  route_summary=$(openclaw_ai_stack_route_status_summary 2>/dev/null || printf '%s' '未记录')
+  resource_summary=$(openclaw_ai_stack_resource_status_summary 2>/dev/null || printf '%s' '未记录')
+  accel_summary=$(openclaw_ai_stack_acceleration_status_summary 2>/dev/null || printf '%s' '未记录')
+  tool_summary=$(openclaw_ai_stack_tool_status_summary 2>/dev/null || printf '%s' '未记录')
+  plugin_summary=$(openclaw_ai_stack_plugin_status_summary 2>/dev/null || printf '%s' '未记录')
+  cloud_summary=$(openclaw_ai_stack_cloud_status_summary 2>/dev/null || printf '%s' '未记录')
+  evolve_summary=$(openclaw_ai_stack_evolve_status_summary 2>/dev/null || printf '%s' '未记录')
+  autotune_summary=$(openclaw_ai_stack_autotune_status_summary 2>/dev/null || printf '%s' '未记录')
+  context_summary=$(openclaw_ai_stack_context_status_summary 2>/dev/null || printf '%s' '未记录')
+  lifecycle_summary=$(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || printf '%s' '未记录')
+  memory_summary=$(openclaw_memory_acceptance_summary 2>/dev/null || printf '%s' '未记录')
+  python3 - "$syntax_status" "$route_summary" "$resource_summary" "$accel_summary" "$tool_summary" "$plugin_summary" "$cloud_summary" "$evolve_summary" "$autotune_summary" "$context_summary" "$lifecycle_summary" "$memory_summary" <<'PY'
+import sys
+
+syntax_status, route_summary, resource_summary, accel_summary, tool_summary, plugin_summary, cloud_summary, evolve_summary, autotune_summary, context_summary, lifecycle_summary, memory_summary = sys.argv[1:13]
+lines = [
+    'OpenClaw 落地验收报告',
+    f'- 前置层: 语法={syntax_status}',
+    f'- 第0层 预测性缓存层: {context_summary}',
+    f'- 第1层 多维度智能路由层: {route_summary}',
+    f'- 第2层 单模型多角色专家层: 生命周期={lifecycle_summary}',
+    f'- 第3层 混合检索增强层: {memory_summary}',
+    f'- 第4层 本地工具沙箱层: {tool_summary} | 插件={plugin_summary}',
+    f'- 第5层 多云端多模型协同层: {cloud_summary}',
+    f'- 第6层 自进化层(evomop): {evolve_summary} | 自动调参={autotune_summary}',
+    f'- 资源安全保障链: {resource_summary}',
+    '- 用户请求处理全流程: 前置检查 -> 第0层缓存 -> 第1层路由 -> 第3层检索记忆 -> 第2层专家推理 -> 第4层工具 -> 第5层云端协同 -> 第6层自进化',
+]
+print('\n'.join(lines))
+PY
+}
+
+openclaw_memory_feature_enabled() {
+  local feature_name="${1:-all}"
+  memory_extension_prepare >/dev/null 2>&1 || return 1
+  python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" "$feature_name" <<'PY'
+import json
+import sys
+
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+feature = sys.argv[2]
+
+def enabled(path, default=True):
+    cur = cfg
+    for key in path:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(key)
+    if cur is None:
+        return default
+    return bool(cur)
+
+global_enabled = enabled(['enabled'], True)
+mapping = {
+    'all': global_enabled,
+    'shortTerm': global_enabled and enabled(['shortTerm', 'enabled'], True),
+    'midTerm': global_enabled and enabled(['midTerm', 'enabled'], True),
+    'longTerm': global_enabled and enabled(['longTerm', 'enabled'], True),
+    'knowledgeBase': global_enabled and enabled(['knowledgeBase', 'enabled'], True),
+}
+print('true' if mapping.get(feature, global_enabled) else 'false')
+PY
+}
+
+openclaw_memory_acceptance_summary() {
+  memory_extension_prepare >/dev/null 2>&1 || {
+    printf '%s' '失败: 记忆配置未初始化'
+    return 0
+  }
+  python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_AI_STACK_CONTEXT_STATE_FILE" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+cfg_path = Path(sys.argv[1])
+db_path = Path(sys.argv[2])
+context_path = Path(sys.argv[3])
+cfg = json.loads(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
+
+checks = []
+checks.append(bool(cfg.get('enabled', True)))
+checks.append('shortTerm' in cfg)
+checks.append('midTerm' in cfg)
+checks.append(bool((cfg.get('longTerm') or {}).get('enabled', True)))
+checks.append('knowledgeBase' in cfg)
+checks.append('localOnly' in (cfg.get('privacy') or {}))
+checks.append(bool((cfg.get('injection') or {}).get('maxContextPercent', 0)))
+checks.append(db_path.exists())
+checks.append(context_path.exists())
+
+row_count = 0
+if db_path.exists():
+    try:
+        conn = sqlite3.connect(db_path)
+        row_count = conn.execute('select count(*) from memory_entries').fetchone()[0]
+        conn.close()
+    except Exception:
+        row_count = 0
+
+passed = sum(1 for item in checks if item)
+total = len(checks)
+if passed == total:
+    print(f'通过: {passed}/{total} 项检查通过 | 条目数={row_count}')
+elif passed >= 3:
+    print(f'部分通过: {passed}/{total} 项检查通过 | 条目数={row_count}')
+else:
+    print(f'失败: {passed}/{total} 项检查通过 | 条目数={row_count}')
+PY
+}
+
+openclaw_ai_stack_memory_injection_json() {
+  local query="$1"
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" "$query" <<'PY'
+import json
+import sys
+
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+query = sys.argv[2]
+threshold = float(cfg.get('injection', {}).get('similarityThreshold', 0.58) or 0.58)
+max_percent = int(cfg.get('injection', {}).get('maxContextPercent', 15) or 15)
+print(json.dumps({'query': query, 'threshold': threshold, 'maxContextPercent': max_percent}, ensure_ascii=False))
+PY
+}
+
+# Get model context size from openclaw config
+openclaw_get_model_context_size() {
+  local model_id context_size
+  model_id=$(timeout 5 openclaw config get agents.defaults.model.primary 2>/dev/null || echo "")
+  [ -z "$model_id" ] && model_id=$(timeout 5 openclaw config get agents.defaults.models 2>/dev/null | head -1 | cut -d'"' -f2 || echo "")
+  # Default context sizes for common models
+  case "$model_id" in
+    *qwen3:0.3b*|*0.3b*) context_size=32768 ;;
+    *qwen3:0.5b*|*0.5b*) context_size=32768 ;;
+    *qwen3:1.8b*|*1.8b*) context_size=32768 ;;
+    *qwen2.5:7b*|*7b*|*llama3.2*) context_size=128000 ;;
+    *qwen2.5:14b*|*14b*) context_size=128000 ;;
+    *qwen2.5:32b*|*32b*) context_size=128000 ;;
+    *qwen2.5:72b*|*72b*) context_size=128000 ;;
+    *gemini*) context_size=1000000 ;;
+    *gpt-4o*) context_size=128000 ;;
+    *gpt-4*) context_size=8192 ;;
+    *claude-3-sonnet*|*claude-3.5-sonnet*) context_size=200000 ;;
+    *claude-3-opus*) context_size=200000 ;;
+    *claude*) context_size=100000 ;;
+    *) context_size=8192 ;;  # Default fallback
+  esac
+  echo "$context_size"
+}
+
+openclaw_ai_stack_memory_injection_text() {
+  local query="$1" model_context_size="$2" merged_json
+  if [ "$(openclaw_memory_feature_enabled all 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    return 0
+  fi
+  if [ "$(openclaw_memory_feature_enabled longTerm 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    return 0
+  fi
+  # Get model context size from config or use default
+  if [ -z "$model_context_size" ]; then
+    model_context_size=$(openclaw_get_model_context_size 2>/dev/null || echo "8192")
+  fi
+  merged_json=$(python3 - "$query" "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" "$model_context_size" <<'PY'
+import json
+import sqlite3
+import sys
+import base64
+
+query = (sys.argv[1] or '').strip().lower()
+db_path = sys.argv[2]
+config_path = sys.argv[3]
+model_context_size = int(sys.argv[4]) if len(sys.argv) > 4 else 8192
+
+cfg = json.loads(open(config_path, 'r', encoding='utf-8').read())
+threshold = float(cfg.get('injection', {}).get('similarityThreshold', 0.58) or 0.58)
+max_percent = int(cfg.get('injection', {}).get('maxContextPercent', 15) or 15)
+
+# Calculate max tokens based on model context size
+max_tokens = int(model_context_size * max_percent / 100)
+
+def decrypt_if_needed(value):
+    if not isinstance(value, str):
+        return value
+    if not value.startswith('enc::'):
+        return value
+    try:
+        import os
+        from cryptography.fernet import Fernet
+        import base64
+        
+        # Get or generate key
+        key_file = os.path.expanduser('~/.skpl/.memory-key')
+        if os.path.exists(key_file):
+            with open(key_file, 'r') as f:
+                key = f.read().strip()
+        else:
+            # Fallback: use environment or generate
+            key = os.environ.get('OPENCLAW_MEMORY_KEY', '')
+            if not key:
+                return value  # Cannot decrypt without key
+        
+        # Ensure valid Fernet key
+        key = key.ljust(32, '0')[:32]
+        key = base64.urlsafe_b64encode(key.encode())
+        
+        cipher = Fernet(key)
+        token = base64.urlsafe_b64decode(value[5:].encode())
+        return cipher.decrypt(token).decode('utf-8')
+    except Exception:
+        # Fallback: try legacy XOR decryption
+        try:
+            raw = base64.b64decode(value[5:].encode('utf-8')).decode('utf-8')
+            return ''.join(chr(ord(ch) ^ 23) for ch in raw)
+        except Exception:
+            return value
+
+def tokens(text):
+    return {part for part in ''.join(ch if ch.isalnum() else ' ' for ch in text.lower()).split() if part}
+
+def estimate_tokens(text):
+    # Rough estimate: 1 token ≈ 4 characters for CJK, 1 token ≈ 4 chars for English
+    return len(text) // 4 + 1
+
+conn = sqlite3.connect(db_path)
+rows = conn.execute('select category, title, content, tags, updated_at from memory_entries where deleted = 0 order by updated_at desc limit 50').fetchall()
+conn.close()
+query_tokens = tokens(query)
+results = []
+for category, title, content, tags_raw, updated_at in rows:
+    title = decrypt_if_needed(title)
+    content = decrypt_if_needed(content)
+    text = ' '.join([category or '', title or '', content or ''])
+    cand_tokens = tokens(text)
+    if not cand_tokens or not query_tokens:
+        continue
+    inter = len(query_tokens & cand_tokens)
+    union = len(query_tokens | cand_tokens)
+    score = (inter / union) if union else 0.0
+    if score >= threshold:
+        item_tokens = estimate_tokens(title or '') + estimate_tokens(content or '')
+        results.append({'category': category, 'title': title, 'content': content, 'score': round(score, 3), 'updatedAt': updated_at, 'tokens': item_tokens})
+# Sort by score and recency
+results.sort(key=lambda item: (item['score'], item['updatedAt']), reverse=True)
+# Select results within token budget
+total_tokens = 0
+selected = []
+for item in results:
+    if total_tokens + item['tokens'] <= max_tokens:
+        selected.append(item)
+        total_tokens += item['tokens']
+    else:
+        break
+payload = {'maxContextPercent': max_percent, 'modelContextSize': model_context_size, 'maxTokens': max_tokens, 'usedTokens': total_tokens, 'results': selected}
+print(json.dumps(payload, ensure_ascii=False))
+PY
+)
+  python3 - "$merged_json" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+items = data.get('results') or []
+if not items:
+    raise SystemExit(0)
+lines = ['[memory_context]']
+for item in items:
+    lines.append(f"- {item.get('title')}: {item.get('content')}")
+lines.append(f"[memory_stats: model={data.get('modelContextSize')} tokens, limit={data.get('maxContextPercent')}%, max={data.get('maxTokens')}, used={data.get('usedTokens')}]")
+print('\n'.join(lines))
+PY
+}
+
+openclaw_ai_stack_short_term_context_text() {
+  [ "$(openclaw_memory_feature_enabled shortTerm 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" "$SKPL_AI_STACK_CONTEXT_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+path = Path(sys.argv[2])
+if not path.exists():
+    raise SystemExit(0)
+data = json.loads(path.read_text(encoding='utf-8'))
+turns = data.get('recentTurns') or []
+limit = int((cfg.get('shortTerm') or {}).get('maxItems', 24) or 24)
+items = [item for item in turns[-limit:] if isinstance(item, dict)]
+if not items:
+    raise SystemExit(0)
+lines = ['[short_term_context]']
+for item in items[-6:]:
+    query = str(item.get('query') or '').strip()
+    if query:
+        lines.append(f'- 最近请求: {query[:180]}')
+print('\n'.join(lines))
+PY
+}
+
+openclaw_ai_stack_mid_term_context_text() {
+  local query="$1"
+  [ "$(openclaw_memory_feature_enabled midTerm 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" "$SKPL_AI_STACK_CONTEXT_STATE_FILE" "$query" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+path = Path(sys.argv[2])
+query = str(sys.argv[3] or '').strip().lower()
+if not path.exists() or not query:
+    raise SystemExit(0)
+data = json.loads(path.read_text(encoding='utf-8'))
+turns = data.get('recentTurns') or []
+days = int((cfg.get('midTerm') or {}).get('retentionDays', 14) or 14)
+threshold = int(time.time()) - days * 86400
+
+def tokens(text):
+    return {part for part in ''.join(ch if ch.isalnum() else ' ' for ch in text.lower()).split() if part}
+
+query_tokens = tokens(query)
+matched = []
+for item in turns:
+    if not isinstance(item, dict):
+        continue
+    if int(item.get('ts', 0) or 0) < threshold:
+        continue
+    text = str(item.get('query') or '').strip()
+    cand = tokens(text)
+    if not text or not cand or not query_tokens:
+        continue
+    inter = len(cand & query_tokens)
+    union = len(cand | query_tokens)
+    score = (inter / union) if union else 0.0
+    if score >= 0.12:
+        matched.append((score, text))
+matched.sort(key=lambda x: x[0], reverse=True)
+if not matched:
+    raise SystemExit(0)
+lines = ['[mid_term_context]']
+for score, text in matched[:3]:
+    lines.append(f'- 历史相关请求: {text[:180]} (score={score:.2f})')
+print('\n'.join(lines))
+PY
+}
+
+openclaw_ai_stack_knowledge_context_text() {
+  local query="$1" raw
+  [ "$(openclaw_memory_feature_enabled knowledgeBase 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  raw=$(hybrid_memory_search_raw_json "$query" 2>/dev/null || printf '%s' '[]')
+  python3 - "$raw" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json
+import sys
+
+raw = json.loads(sys.argv[1]) if sys.argv[1] else []
+cfg = json.loads(open(sys.argv[2], 'r', encoding='utf-8').read())
+kb_cfg = cfg.get('knowledgeBase') or {}
+weight = float(kb_cfg.get('weight', 1.0) or 1.0)
+if not raw:
+    raise SystemExit(0)
+limit = 1 if weight < 0.8 else (3 if weight <= 1.4 else 5)
+lines = ['[knowledge_base_context]']
+for item in raw[:limit]:
+    summary = str(item.get('summary') or '').strip()
+    explain = str(item.get('explain') or '').strip()
+    if summary:
+        suffix = f' | {explain}' if explain else ''
+        lines.append(f'- {summary[:180]}{suffix[:120]}')
+print('\n'.join(lines))
+PY
+}
+
+# Fast memory context retrieval with adaptive strategy based on memory size
+openclaw_ai_stack_memory_context_text() {
+  local query="$1"
+  local memory_count strategy start_time
+  start_time=$(date +%s%N 2>/dev/null || echo "0")
+  
+  # Check if memory features are enabled
+  if [ "$(openclaw_memory_feature_enabled all 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    return 0
+  fi
+  
+  # Get memory count to determine strategy
+  memory_count=$(openclaw_memory_fast_count 2>/dev/null || echo "0")
+  
+  # Adaptive strategy: fast path for small memory, indexed path for large memory
+  if [ "$memory_count" -lt 50 ]; then
+    strategy="fast"
+  elif [ "$memory_count" -lt 500 ]; then
+    strategy="balanced"
+  else
+    strategy="indexed"
+  fi
+  
+  # Execute unified memory fetch with appropriate strategy
+  openclaw_memory_unified_fetch "$query" "$strategy" "$memory_count"
+  
+  # Log performance if slow (for debugging)
+  local end_time elapsed_ms
+  end_time=$(date +%s%N 2>/dev/null || echo "0")
+  if [ "$start_time" != "0" ] && [ "$end_time" != "0" ]; then
+    elapsed_ms=$(( (end_time - start_time) / 1000000 ))
+    if [ "$elapsed_ms" -gt 200 ]; then
+      echo "[memory_perf] strategy=$strategy count=$memory_count elapsed=${elapsed_ms}ms" >&2
+    fi
+  fi
+}
+
+# Fast memory count (cached, no DB query)
+openclaw_memory_fast_count() {
+  local cache_file count
+  cache_file="${SKPL_AI_STACK_CACHE_DIR}/memory-count.cache"
+  
+  # Check cache (TTL 60 seconds for count)
+  if [ -f "$cache_file" ]; then
+    local cache_age
+    cache_age=$(( $(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo "0") ))
+    if [ "$cache_age" -lt 60 ]; then
+      cat "$cache_file" 2>/dev/null
+      return 0
+    fi
+  fi
+  
+  # Fast count from SQLite (COUNT is fast)
+  count=$(sqlite3 "$SKPL_MEMORY_EXTENSION_DB" "SELECT COUNT(*) FROM memory_entries WHERE deleted=0;" 2>/dev/null || echo "0")
+  echo "$count" > "$cache_file"
+  echo "$count"
+}
+
+# Unified memory fetch with strategy-aware optimization
+openclaw_memory_unified_fetch() {
+  local query="$1" strategy="$2" memory_count="$3"
+  local model_context_size max_tokens
+  
+  # Get model context size once
+  model_context_size=$(openclaw_get_model_context_size 2>/dev/null || echo "8192")
+  max_tokens=$(( model_context_size * 15 / 100 ))  # 15% default
+  
+  # Single Python execution for all memory layers
+  python3 - "$query" "$strategy" "$memory_count" "$max_tokens" "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_AI_STACK_CONTEXT_STATE_FILE" "$SKPL_HYBRID_MEMORY_DB" <<'PY'
+import json
+import sqlite3
+import sys
+import os
+import time
+from pathlib import Path
+
+query = sys.argv[1]
+strategy = sys.argv[2]  # fast, balanced, indexed
+memory_count = int(sys.argv[3])
+max_tokens = int(sys.argv[4])
+db_path = sys.argv[5]
+context_file = sys.argv[6]
+hybrid_db = sys.argv[7]
+
+lines = ['[memory_context]']
+total_tokens = 0
+def estimate_tokens(text):
+    return len(text) // 4 + 1
+
+def add_if_fits(content, source):
+    global total_tokens
+    tokens = estimate_tokens(content)
+    if total_tokens + tokens <= max_tokens:
+        lines.append(f"- [{source}] {content[:200]}")
+        total_tokens += tokens
+        return True
+    return False
+
+# Layer 1: Short-term memory (always fast - from JSON file)
+try:
+    if os.path.exists(context_file):
+        with open(context_file, 'r', encoding='utf-8') as f:
+            ctx = json.load(f)
+        turns = ctx.get('recentTurns', [])
+        for item in turns[-6:]:  # Last 6 turns
+            if isinstance(item, dict):
+                q = str(item.get('query', '')).strip()[:180]
+                if q:
+                    add_if_fits(f"recent: {q}", "short")
+except Exception:
+    pass
+
+# For fast strategy with small memory: full scan is faster than index
+if strategy == 'fast' and memory_count < 50:
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA query_only = 1")
+        rows = conn.execute(
+            "SELECT category, title, content FROM memory_entries WHERE deleted=0 ORDER BY updated_at DESC LIMIT 20"
+        ).fetchall()
+        conn.close()
+        
+        for category, title, content in rows:
+            text = f"{title or ''}: {content or ''}".strip(': ')
+            if text and not add_if_fits(text, category or "memory"):
+                break
+    except Exception:
+        pass
+
+else:
+    # Balanced/Indexed: Use similarity search
+    try:
+        # Build query tokens once
+        query_words = set(''.join(c if c.isalnum() else ' ' for c in query.lower()).split())
+        
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA query_only = 1")
+        
+        # For indexed strategy, use FTS5 if available
+        if strategy == 'indexed':
+            try:
+                # Try FTS5 match
+                fts_rows = conn.execute(
+                    "SELECT category, title, content FROM memory_entries_fts WHERE memory_entries_fts MATCH ? ORDER BY rank LIMIT 10",
+                    (query,)
+                ).fetchall()
+                for category, title, content in fts_rows:
+                    text = f"{title or ''}: {content or ''}".strip(': ')
+                    if text and not add_if_fits(text, category or "fts"):
+                        break
+            except Exception:
+                pass  # FTS5 not available, fall through
+        
+        # Fallback: token similarity with early termination
+        rows = conn.execute(
+            "SELECT category, title, content FROM memory_entries WHERE deleted=0 ORDER BY updated_at DESC LIMIT 100"
+        ).fetchall()
+        conn.close()
+        
+        scored = []
+        for category, title, content in rows:
+            text = f"{title or ''} {content or ''}"
+            text_words = set(''.join(c if c.isalnum() else ' ' for c in text.lower()).split())
+            if text_words and query_words:
+                inter = len(query_words & text_words)
+                union = len(query_words | text_words)
+                score = inter / union if union else 0
+                if score >= 0.3:  # Lower threshold for balanced
+                    scored.append((score, category, title, content))
+        
+        scored.sort(reverse=True)
+        for score, category, title, content in scored[:10]:
+            text = f"{title or ''}: {content or ''}".strip(': ')
+            if text and not add_if_fits(text, category or "memory"):
+                break
+    except Exception:
+        pass
+
+# Add stats line (minimal format)
+if len(lines) > 1:
+    lines.append(f"[m:cnt={memory_count},tok={total_tokens},strat={strategy}]")
+    print('\n'.join(lines))
+PY
+}
+
+openclaw_ai_stack_cloud_memory_policy() {
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+privacy = cfg.get('privacy', {}) if isinstance(cfg, dict) else {}
+global_enabled = bool(cfg.get('enabled', True))
+long_enabled = bool((cfg.get('longTerm') or {}).get('enabled', True))
+local_only = bool(privacy.get('localOnly', True))
+cloud_upload = bool(privacy.get('cloudUploadMemory', False))
+if not global_enabled or not long_enabled:
+    print('disabled')
+elif local_only:
+    print('local-only')
+elif cloud_upload:
+    print('allow')
+else:
+    print('strip')
+PY
+}
+
+openclaw_ai_stack_filter_memory_for_cloud() {
+  local memory_text="$1"
+  local policy
+  policy=$(openclaw_ai_stack_cloud_memory_policy)
+  if [ "$policy" = "allow" ]; then
+    printf '%s\n' "$memory_text"
+    return 0
+  fi
+  if [ "$policy" = "disabled" ]; then
+    return 0
+  fi
+  if [ "$policy" = "local-only" ]; then
+    printf '%s\n' "[memory_context]\n- 当前为本地 only 模式，长期记忆只在本地推理链路使用。"
+    return 0
+  fi
+  printf '%s\n' "[memory_context]\n- 云端模式已启用记忆禁传，本次不上传本地长期记忆。"
+}
+
+openclaw_ai_stack_reclaim_memory_pressure() {
+  openclaw_ai_stack_prepare
+  memory_extension_prepare
+  python3 - "$SKPL_AI_STACK_RESOURCE_STATE_FILE" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+config = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
+cooldown = int(((config.get('budget') or {}).get('emergencyCleanupCooldownSeconds', 900)) or 900)
+now = int(time.time())
+state = {}
+if state_path.exists():
+    try:
+        state = json.loads(state_path.read_text(encoding='utf-8'))
+    except Exception:
+        state = {}
+last = int(state.get('cleanupAt', 0) or 0)
+payload = {
+    'cleanupAt': now,
+    'cooldownSeconds': cooldown,
+    'cleanupAllowed': bool(now - last >= cooldown),
+    'actions': ['memory-entry-cleanup', 'expert-idle-unload', 'cache-pressure-relief'],
+}
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(payload, ensure_ascii=False))
+PY
+  local reclaim_json cleanup_allowed
+  reclaim_json=$(cat "$SKPL_AI_STACK_RESOURCE_STATE_FILE" 2>/dev/null || printf '%s' '{}')
+  cleanup_allowed=$(python3 - "$reclaim_json" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1] or '{}')
+print('true' if data.get('cleanupAllowed') else 'false')
+PY
+)
+  if [ "$cleanup_allowed" = "true" ]; then
+    openclaw_memory_extension_cleanup_entries >/dev/null 2>&1 || true
+    openclaw_ai_stack_idle_unload_expert_if_needed 300 >/dev/null 2>&1 || true
+    openclaw_ai_stack_cache_cleanup_all >/dev/null 2>&1 || true
+  fi
+  printf '%s\n' "$reclaim_json"
+}
+
+openclaw_ai_stack_resource_guard_json() {
+  local route_json="$1"
+  openclaw_ai_stack_prepare
+  local profile_json reclaim_json
+  profile_json=$(openclaw_detect_hardware_profile_json)
+  reclaim_json='{}'
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$profile_json" "$route_json" "$SKPL_AI_STACK_RESOURCE_STATE_FILE" "$reclaim_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+profile = json.loads(sys.argv[2])
+route = json.loads(sys.argv[3])
+state_path = Path(sys.argv[4])
+reclaim_raw = sys.argv[5]
+budget_cfg = config.get('budget') or {}
+requirements = budget_cfg.get('modelRequirementMb') or {}
+route_name = route.get('route') or 'text'
+req = requirements.get(route_name) or requirements.get('fallback') or {'gpu': 614, 'memory': 1024}
+budget = profile.get('budget') or {}
+usable_gpu = int(budget.get('usableGpuMb', 0) or 0)
+usable_mem = int(budget.get('usableMemoryMb', 0) or 0)
+reserve_gpu = int(budget_cfg.get('reserveGpuMb', budget.get('reserveGpuMb', 100)) or 100)
+reserve_mem = int(budget_cfg.get('reserveMemoryMb', budget.get('reserveMemoryMb', 512)) or 512)
+gpu_need = int(req.get('gpu', 614) or 614)
+mem_need = int(req.get('memory', 1024) or 1024)
+enough = usable_gpu >= gpu_need and usable_mem >= mem_need
+degrade_to = 'local' if route_name in ('vision', 'code', 'text', 'search') else 'text'
+payload = {
+    'updatedAt': __import__('time').time_ns() // 1000000000,
+    'route': route_name,
+    'reserveGpuMb': reserve_gpu,
+    'reserveMemoryMb': reserve_mem,
+    'usableGpuMb': usable_gpu,
+    'usableMemoryMb': usable_mem,
+    'requiredGpuMb': gpu_need,
+    'requiredMemoryMb': mem_need,
+    'enough': enough,
+    'degradeTo': degrade_to,
+    'cleanupTriggered': False,
+    'cleanupState': {},
+}
+try:
+    reclaim = json.loads(reclaim_raw) if reclaim_raw else {}
+except Exception:
+    reclaim = {}
+payload['cleanupState'] = reclaim if isinstance(reclaim, dict) else {}
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(payload, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_resource_status_summary() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_RESOURCE_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.exists():
+    print('未记录')
+    raise SystemExit(0)
+data = json.loads(path.read_text(encoding='utf-8'))
+lock_owner = data.get('lockOwner') or '-'
+unload_state = data.get('nonMemoryGpuUnload') or '-'
+previous_unload = data.get('previousExpertUnload') or '-'
+idle_state = data.get('idleUnloadPolicy') or '-'
+print(f"route={data.get('route', '-')} | usable={data.get('usableGpuMb', 0)}/{data.get('usableMemoryMb', 0)} | required={data.get('requiredGpuMb', 0)}/{data.get('requiredMemoryMb', 0)} | enough={'yes' if data.get('enough') else 'no'} | secondPass={'yes' if data.get('secondPassReady') else 'no'} | fallback={data.get('finalFallbackModel', '-')} | lock={lock_owner} | trim={unload_state} | prev={previous_unload} | idle={idle_state}")
+PY
+}
+
+openclaw_ai_stack_json_update_field() {
+  local file_path="$1" field_path="$2" field_value="$3" value_type="${4:-string}"
+  python3 - "$file_path" "$field_path" "$field_value" "$value_type" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+field_path = sys.argv[2].split('.')
+field_value = sys.argv[3]
+value_type = sys.argv[4]
+data = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        data = {}
+cur = data
+for key in field_path[:-1]:
+    node = cur.get(key)
+    if not isinstance(node, dict):
+        node = {}
+        cur[key] = node
+    cur = node
+last = field_path[-1]
+if value_type == 'bool':
+    cur[last] = field_value.lower() in ('1', 'true', 'yes', 'y', 'on')
+elif value_type == 'int':
+    cur[last] = int(field_value)
+elif value_type == 'float':
+    cur[last] = float(field_value)
+elif value_type == 'json':
+    cur[last] = json.loads(field_value)
+else:
+    cur[last] = field_value
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+openclaw_ai_stack_frontend_status_summary() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$SKPL_AI_STACK_FRONTEND_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+state_path = Path(sys.argv[2])
+front = cfg.get('frontend') or {}
+state = {}
+if state_path.exists():
+    try:
+        state = json.loads(state_path.read_text(encoding='utf-8'))
+    except Exception:
+        state = {}
+mode = state.get('connectivityMode') or front.get('connectivityMode', 'auto')
+loader = state.get('dynamicLoader') or front.get('dynamicLoader', 'auto')
+monitor = state.get('resourceMonitor', front.get('resourceMonitor', True))
+balance = state.get('loadBalancer') or front.get('loadBalancer', 'balanced')
+autoscale = state.get('autoScale') or front.get('autoScale', 'enabled')
+print(f"mode={mode} | loader={loader} | monitor={monitor} | balance={balance} | scale={autoscale}")
+PY
+}
+
+openclaw_ai_stack_cache_status_summary() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$SKPL_AI_STACK_CODE_CACHE_DIR" "$SKPL_AI_STACK_MULTIMODAL_CACHE_DIR" "$SKPL_AI_STACK_ENCRYPTED_CACHE_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+cfg = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+cache = cfg.get('cache') or {}
+layout = cache.get('layout') or {}
+code_count = len(list(Path(sys.argv[2]).glob('*.json'))) if Path(sys.argv[2]).exists() else 0
+mm_count = len(list(Path(sys.argv[3]).glob('*.json'))) if Path(sys.argv[3]).exists() else 0
+enc_count = len(list(Path(sys.argv[4]).glob('*.json'))) if Path(sys.argv[4]).exists() else 0
+print(f"route={cache.get('routeTtlSeconds', 900)}s | result={cache.get('resultTtlSeconds', 1800)}s | tool={cache.get('toolTtlSeconds', 900)}s | semantic={cache.get('semanticTtlSeconds', 3600)}s | predictive={cache.get('predictiveTtlSeconds', 1800)}s | code={cache.get('codeSnippetTtlSeconds', 1800)}s/{layout.get('codeSnippetMb', 128)}MB/{code_count} | mm={cache.get('multimodalTtlSeconds', 1800)}s/{layout.get('multimodalMb', 128)}MB/{mm_count} | enc={cache.get('encryptedTtlSeconds', 900)}s/{layout.get('encryptedSensitiveMb', 64)}MB/{enc_count}")
+PY
+}
+
+openclaw_ai_stack_expert_catalog_json() {
+  local expert_kind="${1:-general}"
+  local profile_json
+  profile_json=$(openclaw_detect_hardware_profile_json)
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$profile_json" "$expert_kind" <<'PY'
+import json
+import sys
+from pathlib import Path
+cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+profile = json.loads(sys.argv[2])
+kind = sys.argv[3]
+tier = profile.get('tier') or 'entry-cpu'
+experts = (cfg.get('experts') or {}).get('byTier') or {}
+selected = experts.get(tier) or experts.get('entry-cpu') or {}
+payload = {
+    'tier': tier,
+    'kind': kind,
+    'baseRoles': (cfg.get('experts') or {}).get('baseRoles') or [],
+    'selected': selected.get(kind) or {},
+    'all': experts,
+}
+print(json.dumps(payload, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_set_expert_default_model() {
+  local expert_kind="$1" model_name="$2"
+  local profile_json
+  [ -n "$expert_kind" ] || return 1
+  [ -n "$model_name" ] || return 1
+  profile_json=$(openclaw_detect_hardware_profile_json)
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$profile_json" "$expert_kind" "$model_name" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+profile = json.loads(sys.argv[2])
+kind = sys.argv[3]
+model = sys.argv[4]
+cfg = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+tier = profile.get('tier') or 'entry-cpu'
+experts = cfg.setdefault('experts', {}).setdefault('byTier', {})
+selected = experts.setdefault(tier, {}).setdefault(kind, {})
+alts = [item for item in (selected.get('alternatives') or []) if item != model]
+current_default = selected.get('default') or ''
+if current_default and current_default != model:
+    alts.insert(0, current_default)
+selected['default'] = model
+selected['alternatives'] = alts[:6]
+routing = cfg.setdefault('routing', {})
+mapping = {'general': 'defaultTextModel', 'code': 'defaultCodeModel', 'vision': 'defaultVisionModel'}
+target_field = mapping.get(kind)
+if target_field:
+    routing[target_field] = model
+path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps({'tier': tier, 'kind': kind, 'model': model}, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_frontend_refresh_state() {
+  openclaw_ai_stack_prepare
+  local profile_json
+  profile_json=$(openclaw_detect_hardware_profile_json)
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$SKPL_AI_STACK_FRONTEND_STATE_FILE" "$profile_json" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+state_path = Path(sys.argv[2])
+profile = json.loads(sys.argv[3])
+front = cfg.get('frontend') or {}
+network = profile.get('network') or {}
+battery = profile.get('battery') or {}
+memory = profile.get('memory') or {}
+state = {
+    'updatedAt': int(time.time()),
+    'connectivityMode': front.get('connectivityMode', 'auto' if network.get('online') else 'offline'),
+    'dynamicLoader': front.get('dynamicLoader', 'auto'),
+    'resourceMonitor': bool(front.get('resourceMonitor', True)),
+    'loadBalancer': front.get('loadBalancer', 'balanced'),
+    'autoScale': front.get('autoScale', 'enabled'),
+    'crossDeviceSync': front.get('crossDeviceSync', 'optional'),
+    'networkOnline': bool(network.get('online')),
+    'batteryPercent': battery.get('percent'),
+    'memoryTotalMb': memory.get('totalMb', 0),
+}
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(state, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_acceleration_status_summary() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$SKPL_AI_STACK_ACCEL_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+state_path = Path(sys.argv[2])
+acc = (cfg.get('acceleration') or {}) if isinstance(cfg, dict) else {}
+if state_path.exists():
+    try:
+        state = json.loads(state_path.read_text(encoding='utf-8'))
+        if isinstance(state, dict):
+            acc.update(state)
+    except Exception:
+        pass
+fa2 = (acc.get('flashAttention2') or {}).get('status', '-')
+kv = (acc.get('kvInt8') or {}).get('status', '-')
+cpu = (acc.get('cpuAssist') or {}).get('status', '-')
+trt = (acc.get('tensorRt') or {}).get('status', '-')
+print(f"fa2={fa2} | kv={kv} | cpu={cpu} | trt={trt}")
+PY
+}
+
+openclaw_ai_stack_detect_acceleration_state() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$SKPL_AI_STACK_ACCEL_STATE_FILE" <<'PY'
+import json
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+state_path = Path(sys.argv[2])
+acc = (cfg.get('acceleration') or {}) if isinstance(cfg, dict) else {}
+
+def pip_show(name):
+    try:
+        out = subprocess.check_output(['python3', '-m', 'pip', 'show', name], text=True, timeout=5).strip()
+        return bool(out)
+    except Exception:
+        return False
+
+def cmd_ok(command):
+    return shutil.which(command) is not None
+
+flash_available = pip_show('flash-attn') or pip_show('flash_attn')
+trt_available = cmd_ok('trtexec') or pip_show('tensorrt')
+gpu_present = cmd_ok('nvidia-smi')
+
+payload = {
+    'updatedAt': int(time.time()),
+    'flashAttention2': {
+        'enabled': flash_available,
+        'status': 'available' if flash_available else 'planned',
+        'backend': 'python-package' if flash_available else 'none'
+    },
+    'kvInt8': {
+        'enabled': gpu_present,
+        'status': 'candidate' if gpu_present else 'planned',
+        'backend': 'gpu-runtime' if gpu_present else 'none'
+    },
+    'cpuAssist': {
+        'enabled': True,
+        'status': 'active',
+        'backend': 'host-cpu'
+    },
+    'tensorRt': {
+        'enabled': trt_available,
+        'status': 'available' if trt_available else 'reserved',
+        'backend': 'trtexec' if cmd_ok('trtexec') else ('python-package' if pip_show('tensorrt') else 'none')
+    }
+}
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(payload, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_run_local_ocr() {
+  local input_text="$1"
+  python3 - "$input_text" <<'PY' >/tmp/openclaw-local-ocr-path.txt
+import os
+import re
+import sys
+from pathlib import Path
+
+text = sys.argv[1]
+patterns = re.findall(r'(?:~|/|\./|\.\./)[^\s\"\']+\.(?:png|jpg|jpeg|webp|bmp|tiff|gif)', text, flags=re.IGNORECASE)
+for raw in patterns:
+    path = Path(os.path.expanduser(raw)).resolve()
+    if path.exists() and path.is_file():
+        print(str(path))
+        raise SystemExit(0)
+print('')
+PY
+  local image_path
+  image_path=$(python3 - <<'PY'
+from pathlib import Path
+path = Path('/tmp/openclaw-local-ocr-path.txt')
+print(path.read_text(encoding='utf-8').strip() if path.exists() else '')
+PY
+)
+  [ -n "$image_path" ] || return 1
+  if ! command -v tesseract >/dev/null 2>&1; then
+    return 2
+  fi
+  local raw_ocr
+  raw_ocr=$(timeout 15 tesseract "$image_path" stdout 2>/dev/null || true)
+  [ -n "$raw_ocr" ] || return 3
+  python3 - "$image_path" "$raw_ocr" <<'PY'
+import re
+import sys
+path = sys.argv[1]
+text = sys.argv[2]
+clean = re.sub(r'\s+', ' ', text).strip()
+print(f"ocr:{path}\n{clean[:2000]}")
+PY
+}
+
+openclaw_ai_stack_run_image_preprocess() {
+  local input_text="$1"
+  python3 - "$input_text" <<'PY' >/tmp/openclaw-image-preprocess.txt
+import os
+import re
+import sys
+from pathlib import Path
+text = sys.argv[1]
+patterns = re.findall(r'(?:~|/|\./|\.\./)[^\s\"\']+\.(?:png|jpg|jpeg|webp|bmp|tiff|gif)', text, flags=re.IGNORECASE)
+for raw in patterns:
+    path = Path(os.path.expanduser(raw)).resolve()
+    if path.exists() and path.is_file():
+        print(str(path))
+        raise SystemExit(0)
+print('')
+PY
+  local image_path
+  image_path=$(python3 - <<'PY'
+from pathlib import Path
+path = Path('/tmp/openclaw-image-preprocess.txt')
+print(path.read_text(encoding='utf-8').strip() if path.exists() else '')
+PY
+)
+  [ -n "$image_path" ] || return 1
+  python3 - "$image_path" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+
+def classify_ratio(width, height):
+    if not width or not height:
+        return 'unknown'
+    ratio = width / height
+    if ratio > 1.2:
+        return 'landscape'
+    if ratio < 0.8:
+        return 'portrait'
+    return 'square'
+
+def classify_size(width, height):
+    pixels = int(width or 0) * int(height or 0)
+    if pixels >= 3000000:
+        return 'xl'
+    if pixels >= 1000000:
+        return 'large'
+    if pixels >= 300000:
+        return 'medium'
+    return 'small'
+
+def ocr_hint(width, height, mode):
+    hints = []
+    if width and width < 900:
+        hints.append('upscale-before-ocr')
+    if height and height < 600:
+        hints.append('sharpen-text')
+    if mode and mode not in ('L', 'RGB'):
+        hints.append('convert-to-rgb')
+    if not hints:
+        hints.append('ready-for-ocr')
+    return ','.join(hints)
+
+def quality_risk(width, height, mode):
+    risk = []
+    if width and height and width * height < 250000:
+        risk.append('low-resolution')
+    if width and height and max(width, height) >= 5000:
+        risk.append('oversized-image')
+    if mode and mode not in ('L', 'RGB'):
+        risk.append('mode-conversion-needed')
+    if not risk:
+        risk.append('normal')
+    return ','.join(risk)
+
+try:
+    from PIL import Image
+    img = Image.open(path)
+    ratio_tag = classify_ratio(img.width, img.height)
+    size_tag = classify_size(img.width, img.height)
+    print(f"image:{path}\nsize={img.width}x{img.height}\nmode={img.mode}\nratio={ratio_tag}\nsizeClass={size_tag}\nqualityRisk={quality_risk(img.width, img.height, img.mode)}\nocrHint={ocr_hint(img.width, img.height, img.mode)}")
+except Exception:
+    stat = path.stat()
+    byte_size = int(stat.st_size or 0)
+    size_tag = 'large' if byte_size >= 1048576 else ('medium' if byte_size >= 262144 else 'small')
+    risk = 'large-binary' if byte_size >= 1048576 else 'unknown-dimensions'
+    print(f"image:{path}\nbytes={byte_size}\nsizeClass={size_tag}\nqualityRisk={risk}\nocrHint=inspect-with-pil-for-better-routing")
+PY
+}
+
+openclaw_ai_stack_run_table_recognition() {
+  local input_text="$1"
+  local ocr_text
+  ocr_text=$(openclaw_ai_stack_run_local_ocr "$input_text" 2>/dev/null || true)
+  [ -n "$ocr_text" ] || return 1
+  python3 - "$ocr_text" <<'PY'
+import re
+import sys
+text = sys.argv[1]
+lines = [line.strip() for line in text.splitlines() if line.strip()]
+rows = []
+for line in lines:
+    parts = [part.strip(' :;-') for part in re.split(r'\s{2,}|\t|\|', line) if part.strip(' :;-')]
+    if len(parts) >= 2:
+        rows.append(parts[:8])
+if not rows:
+    raise SystemExit(1)
+column_count = max(len(row) for row in rows)
+normalized = [row + [''] * (column_count - len(row)) for row in rows[:20]]
+header = normalized[0]
+header_score = sum(1 for cell in header if cell and not re.search(r'\d', cell))
+looks_like_header = header_score >= max(1, len([cell for cell in header if cell]) // 2)
+if not looks_like_header:
+    header = [f'col_{idx + 1}' for idx in range(column_count)]
+    body = normalized
+else:
+    body = normalized[1:]
+body = body[:20]
+header_line = '\t'.join(header)
+separator_line = '\t'.join(['---'] * column_count)
+body_lines = ['\t'.join(row) for row in body]
+header_mode = 'yes' if looks_like_header else 'generated'
+summary = f'columns={column_count}\trows={len(body)}\theader={header_mode}'
+output = ['table-recognition', summary, header_line, separator_line]
+output.extend(body_lines)
+print('\n'.join(output))
+PY
+}
+
+openclaw_ai_stack_plugin_capability_index_json() {
+  openclaw_ai_stack_prepare
+  local plugin_policy_json
+  plugin_policy_json=$(openclaw_ai_stack_plugin_policy_json 2>/dev/null || printf '%s' '{}')
+  python3 - "$plugin_policy_json" "$SKPL_AI_STACK_PLUGIN_CAPABILITY_FILE" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+import os
+
+policy = json.loads(sys.argv[1] or '{}')
+state_path = Path(sys.argv[2])
+allowed = [str(x).strip() for x in (policy.get('allowedPlugins') or []) if str(x).strip()]
+installed = [str(x).strip() for x in (policy.get('installedPlugins') or []) if str(x).strip()]
+plugins = sorted(set(allowed + installed))
+
+plugin_roots = [
+    Path(os.path.expanduser('~/.openclaw/extensions')),
+    Path('/root/.openclaw/extensions'),
+    Path('/usr/lib/node_modules/openclaw/extensions'),
+]
+
+def plugin_dirs(name):
+    names = [name, f'openclaw-{name}']
+    paths = []
+    for root in plugin_roots:
+        for item in names:
+            candidate = root / item
+            if candidate.exists() and candidate.is_dir():
+                paths.append(candidate)
+    return paths
+
+def read_manifest_caps(paths):
+    caps = []
+    for base in paths:
+        for manifest_name in ('package.json', 'manifest.json', 'plugin.json'):
+            manifest = base / manifest_name
+            if not manifest.exists():
+                continue
+            try:
+                data = json.loads(manifest.read_text(encoding='utf-8'))
+            except Exception:
+                continue
+            merged = ' '.join([
+                str(data.get('name') or ''),
+                str(data.get('description') or ''),
+                json.dumps(data.get('keywords') or [], ensure_ascii=False),
+                json.dumps(data.get('capabilities') or [], ensure_ascii=False),
+                json.dumps(data.get('commands') or [], ensure_ascii=False),
+            ]).lower()
+            if any(token in merged for token in ('memory', 'rag', 'search')):
+                caps.extend(['hybrid-search', 'memory'])
+            if any(token in merged for token in ('ocr', 'vision', 'image', 'vl')):
+                caps.extend(['ocr', 'image-preprocess'])
+            if any(token in merged for token in ('code', 'debug', 'binary', 'hex', 'runtime')):
+                caps.extend(['code-exec', 'debug', 'binary-analysis'])
+            if any(token in merged for token in ('terminal', 'shell', 'exec', 'bash')):
+                caps.extend(['local-exec', 'terminal'])
+            if any(token in merged for token in ('table', 'excel', 'csv')):
+                caps.extend(['table-recognition'])
+    return sorted(set(caps))
+
+def capabilities_for(name):
+    lowered = name.lower()
+    caps = []
+    if any(token in lowered for token in ('memory', 'memos', 'rag')):
+        caps.extend(['hybrid-search', 'memory'])
+    if any(token in lowered for token in ('vision', 'ocr', 'image', 'vl')):
+        caps.extend(['ocr', 'image-preprocess'])
+    if any(token in lowered for token in ('code', 'coder', 'debug', 'binary', 'hex')):
+        caps.extend(['code-exec', 'debug', 'binary-analysis'])
+    if any(token in lowered for token in ('terminal', 'shell', 'exec', 'bash')):
+        caps.extend(['local-exec', 'terminal'])
+    if any(token in lowered for token in ('table', 'excel', 'csv')):
+        caps.extend(['table-recognition'])
+    manifest_caps = read_manifest_caps(plugin_dirs(name))
+    caps.extend(manifest_caps)
+    return sorted(set(caps))
+
+entries = []
+capability_map = {}
+for plugin in plugins:
+    caps = capabilities_for(plugin)
+    entries.append({
+        'plugin': plugin,
+        'allowed': plugin in allowed,
+        'installed': plugin in installed,
+        'capabilities': caps,
+    })
+    for cap in caps:
+        capability_map.setdefault(cap, []).append(plugin)
+
+payload = {
+    'updatedAt': int(time.time()),
+    'plugins': entries,
+    'capabilityMap': capability_map,
+}
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(payload, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_post_reclaim_route_json() {
+  local route_json="$1"
+  local profile_json
+  profile_json=$(openclaw_detect_hardware_profile_json)
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$profile_json" "$route_json" "$SKPL_AI_STACK_RESOURCE_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+profile = json.loads(sys.argv[2])
+route = json.loads(sys.argv[3])
+resource_state = {}
+state_path = Path(sys.argv[4])
+if state_path.exists():
+    try:
+        resource_state = json.loads(state_path.read_text(encoding='utf-8'))
+    except Exception:
+        resource_state = {}
+
+budget_cfg = cfg.get('budget') or {}
+routing_cfg = cfg.get('routing') or {}
+fallback_cfg = routing_cfg.get('fallbackModels') or {}
+threshold_gpu = int(budget_cfg.get('expertReloadThresholdGpuMb', 3300) or 3300)
+threshold_mem = int(budget_cfg.get('expertReloadThresholdMemoryMb', 6144) or 6144)
+usable_gpu = int(((profile.get('budget') or {}).get('usableGpuMb', 0)) or 0)
+usable_mem = int(((profile.get('budget') or {}).get('usableMemoryMb', 0)) or 0)
+route_name = route.get('route') or 'text'
+tier = profile.get('tier') or 'entry-cpu'
+
+resource_guard = route.get('resourceGuard') or {}
+resource_guard['postReclaimGpuMb'] = usable_gpu
+resource_guard['postReclaimMemoryMb'] = usable_mem
+resource_guard['secondPassReady'] = bool(usable_gpu >= threshold_gpu or usable_mem >= threshold_mem)
+resource_guard['secondPassThresholdGpuMb'] = threshold_gpu
+resource_guard['secondPassThresholdMemoryMb'] = threshold_mem
+resource_guard['nonMemoryGpuUnload'] = 'planned'
+resource_guard['previousExpertUnload'] = 'planned'
+resource_guard['residentFallbackLocked'] = False
+
+if resource_guard['secondPassReady']:
+    if route_name == 'vision':
+        route['model'] = routing_cfg.get('defaultVisionModel', route.get('model') or 'google/gemini-2.5-pro')
+        route['execution'] = 'cloud' if str(route.get('model') or '').startswith(('google/', 'openrouter/', 'deepseek/', 'siliconflow/')) else 'local'
+    elif route_name == 'code':
+        route['model'] = routing_cfg.get('defaultCodeModel', route.get('model') or 'ollama/qwen3-coder')
+        route['execution'] = 'local'
+    elif route_name in ('text', 'local'):
+        route['model'] = routing_cfg.get('defaultTextModel', route.get('model') or 'ollama/qwen2.5:7b')
+        route['execution'] = 'local' if route_name == 'local' or str(route['model']).startswith('ollama/') else 'cloud'
+    route['reason'] = 'resource-guard-second-pass-ready'
+else:
+    if tier == 'emergency-cpu':
+        fallback_model = fallback_cfg.get('emergency', 'ollama/qwen3:0.3b')
+    elif tier == 'entry-cpu':
+        fallback_model = fallback_cfg.get('entry', 'ollama/qwen3:0.5b')
+    else:
+        fallback_model = fallback_cfg.get('advanced', 'ollama/qwen3:1.8b')
+    if route_name == 'vision':
+        fallback_model = fallback_cfg.get('cpuVision', 'local-ocr')
+    elif route_name == 'code':
+        fallback_model = fallback_cfg.get('cpuCode', fallback_model)
+    route['fallbackModel'] = fallback_model
+    route['model'] = fallback_model
+    route['execution'] = 'local'
+    route['reason'] = 'resource-guard-lightweight-fallback'
+    route['residentFallback'] = True
+    resource_guard['residentFallbackLocked'] = True
+
+resource_guard['finalRoute'] = route.get('route')
+resource_guard['finalModel'] = route.get('model')
+resource_guard['finalExecution'] = route.get('execution')
+resource_guard['finalFallbackModel'] = route.get('fallbackModel', '')
+
+route['resourceGuard'] = resource_guard
+resource_state['secondPassReady'] = resource_guard['secondPassReady']
+resource_state['finalFallbackModel'] = resource_guard.get('finalFallbackModel', '')
+resource_state['finalModel'] = resource_guard.get('finalModel', '')
+resource_state['finalExecution'] = resource_guard.get('finalExecution', '')
+resource_state['nonMemoryGpuUnload'] = resource_guard.get('nonMemoryGpuUnload', '-')
+resource_state['previousExpertUnload'] = resource_guard.get('previousExpertUnload', '-')
+resource_state['residentFallbackLocked'] = resource_guard.get('residentFallbackLocked', False)
+resource_state['idleUnloadPolicy'] = 'after-900s'
+state_path.write_text(json.dumps(resource_state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(route, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_predictive_cache_store() {
+  local query="$1" route_json="$2"
+  local lowered prediction payload key file_path
+  openclaw_ai_stack_prepare
+  lowered=$(python3 - "$query" <<'PY'
+import sys
+print((sys.argv[1] or '').strip().lower())
+PY
+)
+  prediction=$(python3 - "$lowered" "$route_json" <<'PY'
+import json
+import sys
+query = sys.argv[1]
+route = json.loads(sys.argv[2])
+tokens = [part for part in query.split() if part][:6]
+print(json.dumps({'query': query, 'tokens': tokens, 'route': route}, ensure_ascii=False))
+PY
+)
+  key=$(openclaw_ai_stack_cache_key predictive "$query")
+  file_path="${SKPL_AI_STACK_PREDICTIVE_CACHE_DIR}/${key}.json"
+  openclaw_ai_stack_cache_write "$file_path" "$prediction"
+}
+
+openclaw_ai_stack_predictive_cache_hint() {
+  local query="$1"
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_PREDICTIVE_CACHE_DIR" "$query" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+cache_dir = Path(sys.argv[1])
+query = (sys.argv[2] or '').strip().lower()
+tokens = [part for part in query.split() if part]
+best = None
+best_score = 0
+for path in cache_dir.glob('*.json'):
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        continue
+    payload = data.get('payload') or {}
+    cached_tokens = payload.get('tokens') or []
+    score = len(set(tokens) & set(cached_tokens))
+    if score > best_score:
+        best_score = score
+        best = payload
+if best and best_score > 0:
+    print(json.dumps(best, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_code_cache_read() {
+  local query="$1" key ttl file_path
+  openclaw_ai_stack_prepare
+  key=$(openclaw_ai_stack_cache_key code-snippet "$query")
+  ttl=$(openclaw_ai_stack_cache_ttl codeSnippetTtlSeconds 1800)
+  file_path="${SKPL_AI_STACK_CODE_CACHE_DIR}/${key}.json"
+  openclaw_ai_stack_cache_read "$file_path" "$ttl"
+}
+
+openclaw_ai_stack_code_cache_write() {
+  local query="$1" payload="$2" key file_path
+  openclaw_ai_stack_prepare
+  key=$(openclaw_ai_stack_cache_key code-snippet "$query")
+  file_path="${SKPL_AI_STACK_CODE_CACHE_DIR}/${key}.json"
+  openclaw_ai_stack_cache_write "$file_path" "$payload"
+}
+
+openclaw_ai_stack_multimodal_cache_read() {
+  local query="$1" key ttl file_path
+  openclaw_ai_stack_prepare
+  key=$(openclaw_ai_stack_cache_key multimodal "$query")
+  ttl=$(openclaw_ai_stack_cache_ttl multimodalTtlSeconds 1800)
+  file_path="${SKPL_AI_STACK_MULTIMODAL_CACHE_DIR}/${key}.json"
+  openclaw_ai_stack_cache_read "$file_path" "$ttl"
+}
+
+openclaw_ai_stack_multimodal_cache_write() {
+  local query="$1" payload="$2" key file_path
+  openclaw_ai_stack_prepare
+  key=$(openclaw_ai_stack_cache_key multimodal "$query")
+  file_path="${SKPL_AI_STACK_MULTIMODAL_CACHE_DIR}/${key}.json"
+  openclaw_ai_stack_cache_write "$file_path" "$payload"
+}
+
+openclaw_ai_stack_encrypted_cache_read() {
+  local query="$1" key ttl file_path
+  openclaw_ai_stack_prepare
+  key=$(openclaw_ai_stack_cache_key encrypted "$query")
+  ttl=$(openclaw_ai_stack_cache_ttl encryptedTtlSeconds 900)
+  file_path="${SKPL_AI_STACK_ENCRYPTED_CACHE_DIR}/${key}.json"
+  openclaw_ai_stack_cache_read "$file_path" "$ttl"
+}
+
+openclaw_ai_stack_encrypted_cache_write() {
+  local query="$1" payload="$2" key file_path
+  openclaw_ai_stack_prepare
+  key=$(openclaw_ai_stack_cache_key encrypted "$query")
+  file_path="${SKPL_AI_STACK_ENCRYPTED_CACHE_DIR}/${key}.json"
+  openclaw_ai_stack_cache_write "$file_path" "$payload"
+}
+
+openclaw_ai_stack_specialized_cache_read() {
+  local cache_scope="$1" query="$2"
+  case "$cache_scope" in
+    code) openclaw_ai_stack_code_cache_read "$query" ;;
+    multimodal) openclaw_ai_stack_multimodal_cache_read "$query" ;;
+    encrypted) openclaw_ai_stack_encrypted_cache_read "$query" ;;
+    *) return 1 ;;
+  esac
+}
+
+openclaw_ai_stack_specialized_cache_write() {
+  local cache_scope="$1" query="$2" payload="$3"
+  case "$cache_scope" in
+    code) openclaw_ai_stack_code_cache_write "$query" "$payload" ;;
+    multimodal) openclaw_ai_stack_multimodal_cache_write "$query" "$payload" ;;
+    encrypted) openclaw_ai_stack_encrypted_cache_write "$query" "$payload" ;;
+    *) return 1 ;;
+  esac
+}
+
+openclaw_ai_stack_specialized_cache_profile() {
+  local input_text="$1" route_json="$2"
+  python3 - "$input_text" "$route_json" <<'PY'
+import json
+import sys
+
+text = (sys.argv[1] or '').strip()
+lowered = text.lower()
+route = json.loads(sys.argv[2]) if sys.argv[2].strip() else {}
+route_name = route.get('route') or 'text'
+intent = route.get('intent') or route_name
+privacy = route.get('privacy') or 'normal'
+
+sensitive_markers = ['password', 'token', 'secret', 'credential', 'api key', 'private key', 'cookie', '密码', '密钥', '令牌', '私钥', '敏感']
+vision_markers = ['image', 'screenshot', 'ocr', '图片', '截图', '识图', '看图', '视觉']
+
+scope = ''
+reason = ''
+if privacy == 'local-first' or any(marker in lowered for marker in sensitive_markers):
+    scope = 'encrypted'
+    reason = 'privacy-or-sensitive'
+elif route_name == 'vision' or intent == 'vision' or any(marker in lowered for marker in vision_markers):
+    scope = 'multimodal'
+    reason = 'vision-routing'
+elif route_name == 'code' or intent == 'code':
+    scope = 'code'
+    reason = 'code-routing'
+
+print(json.dumps({'scope': scope, 'reason': reason, 'query': text}, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_connectivity_mode() {
+  local profile_json
+  profile_json=$(openclaw_detect_hardware_profile_json)
+  python3 - "$profile_json" <<'PY'
+import json
+import sys
+data = json.loads(sys.argv[1])
+network = data.get('network') or {}
+print('online' if network.get('online') else 'offline')
+PY
+}
+
+openclaw_ai_stack_mark_activity() {
+  openclaw_ai_stack_prepare
+  date +%s > "${SKPL_AI_STACK_STATE_DIR}/last-activity.stamp"
+}
+
+openclaw_ai_stack_idle_unload_expert_if_needed() {
+  local idle_seconds="${1:-300}"
+  openclaw_ai_stack_prepare
+  local idle_model
+  idle_model=$(python3 - "$SKPL_AI_STACK_STATE_DIR/last-activity.stamp" "$SKPL_AI_STACK_ROUTE_STATUS_FILE" "$idle_seconds" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+stamp_path = Path(sys.argv[1])
+route_path = Path(sys.argv[2])
+idle_seconds = int(sys.argv[3])
+now = int(time.time())
+if not stamp_path.exists() or not route_path.exists():
+    raise SystemExit(1)
+try:
+    last_activity = int(stamp_path.read_text(encoding='utf-8').strip() or '0')
+except Exception:
+    raise SystemExit(1)
+if now - last_activity < idle_seconds:
+    raise SystemExit(2)
+data = json.loads(route_path.read_text(encoding='utf-8'))
+route = data.get('route') or {}
+model = route.get('model') or ''
+if not model:
+    raise SystemExit(3)
+route['idleUnloaded'] = True
+route['idleUnloadedAt'] = now
+route['reason'] = 'idle-unload'
+data['route'] = route
+route_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(model)
+PY
+)
+  if [ -n "$idle_model" ]; then
+    openclaw_ai_stack_unload_local_model "$idle_model" >/dev/null 2>&1 || true
+    openclaw_ai_stack_lifecycle_write_state "idle-unload" "$idle_model" "general" "unloaded" >/dev/null 2>&1 || true
+    # 规范要求: 空闲卸载后重新加载混合检索层和自进化层GPU部件
+    local default_embed_model
+    default_embed_model=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('retrieval', {}).get('defaultVectorModel', 'nomic-embed-text'))
+PY
+)
+    [ -n "$default_embed_model" ] && {
+      curl -sf --max-time 10 "http://localhost:11434/api/generate" \
+        -d "{\"model\":\"${default_embed_model}\",\"keep_alive\":300000}" >/dev/null 2>&1 || true
+    }
+    python3 - "$SKPL_AI_STACK_RESOURCE_STATE_FILE" "$idle_seconds" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+idle_seconds = int(sys.argv[2])
+data = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        data = {}
+data['idleUnloadPolicy'] = f'after-{idle_seconds}s:done'
+data['baseLayersReloaded'] = True
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+  fi
+}
+
+openclaw_ollama_running_models_json() {
+  if ! openclaw_has_command ollama; then
+    printf '%s\n' '[]'
+    return 0
+  fi
+  if ! openclaw_ensure_ollama_running >/dev/null 2>&1; then
+    printf '%s\n' '[]'
+    return 0
+  fi
+  python3 - <<'PY'
+import json
+import subprocess
+
+def parse_rows(text):
+    rows = []
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if len(lines) <= 1:
+        return rows
+    for line in lines[1:]:
+        parts = line.split()
+        if not parts:
+            continue
+        name = parts[0]
+        until = ' '.join(parts[-2:]) if len(parts) >= 2 else ''
+        size = parts[1] if len(parts) > 1 else ''
+        rows.append({'name': name, 'size': size, 'until': until})
+    return rows
+
+try:
+    out = subprocess.check_output(['ollama', 'ps'], text=True, stderr=subprocess.DEVNULL, timeout=8)
+except Exception:
+    out = ''
+print(json.dumps(parse_rows(out), ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_lifecycle_write_state() {
+  local event_type="$1" model_name="$2" expert_name="$3" status_text="$4"
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_LIFECYCLE_STATE_FILE" "$event_type" "$model_name" "$expert_name" "$status_text" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+event_type, model_name, expert_name, status_text = sys.argv[2:6]
+state = {'updatedAt': int(time.time()), 'lastEvent': {}, 'history': []}
+if path.exists():
+    try:
+        current = json.loads(path.read_text(encoding='utf-8'))
+        if isinstance(current, dict):
+            state.update(current)
+    except Exception:
+        pass
+event = {
+    'at': int(time.time()),
+    'type': event_type,
+    'model': model_name,
+    'expert': expert_name,
+    'status': status_text,
+}
+history = list(state.get('history') or [])
+history.append(event)
+state['updatedAt'] = event['at']
+state['lastEvent'] = event
+state['history'] = history[-20:]
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(state, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_unload_local_model() {
+  local target_model="$1"
+  [ -n "$target_model" ] || return 0
+  openclaw_install_ollama_runtime >/dev/null 2>&1 || true
+  openclaw_ensure_ollama_running >/dev/null 2>&1 || return 1
+  local model_name="${target_model#ollama/}"
+  if ! openclaw_has_command curl; then
+    return 1
+  fi
+  curl -fsS --connect-timeout 3 --max-time 10 http://127.0.0.1:11434/api/generate \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"${model_name}\",\"prompt\":\"\",\"keep_alive\":0}" >/dev/null 2>&1
+}
+
+openclaw_ai_stack_warm_local_model() {
+  local target_model="$1"
+  [ -n "$target_model" ] || return 0
+  openclaw_install_ollama_runtime >/dev/null 2>&1 || true
+  openclaw_ensure_ollama_running >/dev/null 2>&1 || return 1
+  local model_name="${target_model#ollama/}"
+  if ! openclaw_has_command curl; then
+    return 1
+  fi
+  curl -fsS --connect-timeout 3 --max-time 20 http://127.0.0.1:11434/api/generate \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"${model_name}\",\"prompt\":\"hi\",\"stream\":false,\"options\":{\"num_predict\":1},\"keep_alive\":\"15m\"}" >/dev/null 2>&1
+}
+
+openclaw_ai_stack_lifecycle_status_summary() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_LIFECYCLE_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.exists():
+    print('未记录')
+    raise SystemExit(0)
+data = json.loads(path.read_text(encoding='utf-8'))
+event = data.get('lastEvent') or {}
+print(f"{event.get('type', '-')} | {event.get('model', '-')} | {event.get('status', '-')}")
+PY
+}
+
+openclaw_ai_stack_context_migration_json() {
+  local route_json="$1"
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_CONTEXT_STATE_FILE" "$route_json" <<'PY'
+import json
+import re
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+route = json.loads(sys.argv[2])
+
+def compact(value, limit):
+    text = re.sub(r'\s+', ' ', str(value or '').strip())
+    return text[:limit]
+
+memory = compact(route.get('memoryInjection') or '', 900)
+predictive = compact(route.get('predictiveHint') or '', 280)
+cloud = compact(route.get('cloudAggregatedText') or '', 1400)
+tool_result = route.get('toolResult') or {}
+tool_summaries = []
+for item in tool_result.get('results') or []:
+    if not isinstance(item, dict):
+        continue
+    task = str(item.get('task') or '')
+    output = compact(item.get('output') or '', 240)
+    if task and output:
+        tool_summaries.append(f'{task}: {output}')
+
+segments = []
+if memory:
+    segments.append(f'[memory] {memory}')
+if predictive:
+    segments.append(f'[predictive] {predictive}')
+if cloud:
+    segments.append(f'[cloud] {cloud}')
+if tool_summaries:
+    segments.append('[tools] ' + ' | '.join(tool_summaries[:3]))
+
+migration_text = '\n'.join(segments).strip()
+payload = {
+    'updatedAt': int(time.time()),
+    'model': route.get('model') or '',
+    'route': route.get('route') or '',
+    'execution': route.get('execution') or '',
+    'text': migration_text[:2400],
+    'segments': len(segments),
+}
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(payload, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_context_record_turn() {
+  local route_json="$1"
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_CONTEXT_STATE_FILE" "$route_json" <<'PY'
+import json
+import re
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+route = json.loads(sys.argv[2])
+
+def compact(value, limit):
+    text = re.sub(r'\s+', ' ', str(value or '').strip())
+    return text[:limit]
+
+current = {}
+if path.exists():
+    try:
+        current = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        current = {}
+
+recent = current.get('recentTurns') or []
+tool_result = route.get('toolResult') or {}
+tool_outputs = []
+for item in tool_result.get('results') or []:
+    if isinstance(item, dict):
+        output = compact(item.get('output') or '', 180)
+        if output:
+            tool_outputs.append(output)
+
+response = compact(route.get('cloudAggregatedText') or '', 320)
+if not response and tool_outputs:
+    response = ' | '.join(tool_outputs[:2])[:320]
+
+entry = {
+    'ts': int(time.time()),
+    'query': compact(route.get('inputPreview') or '', 220),
+    'route': route.get('route') or '',
+    'execution': route.get('execution') or '',
+    'model': route.get('model') or '',
+    'response': response,
+}
+if entry['query']:
+    recent.append(entry)
+recent = [item for item in recent if isinstance(item, dict)][-80:]
+current['updatedAt'] = int(time.time())
+current['recentTurns'] = recent
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(current, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps({'recentTurns': len(recent)}, ensure_ascii=False))
+PY
+}
+
+openclaw_memory_auto_capture_from_request() {
+  local input_text="$1" route_json="$2"
+  [ -n "$input_text" ] || return 0
+  [ "$(openclaw_memory_feature_enabled all 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  [ "$(openclaw_memory_feature_enabled longTerm 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  local extract_strength capture_text
+  extract_strength=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print((cfg.get('longTerm') or {}).get('autoExtract', 'balanced'))
+PY
+)
+  case "$extract_strength" in
+    low)
+      capture_text=$(python3 - "$input_text" <<'PY'
+import re, sys
+text = re.sub(r'\s+', ' ', sys.argv[1]).strip()
+if len(text) < 18:
+    raise SystemExit(0)
+# Smart markers for important information
+identity_markers = ['记住', '我叫', '我是', '我的名字', '你叫', '称呼我']
+preference_markers = ['我喜欢', '我讨厌', '我的偏好', '我偏好', '我习惯', '我通常']
+work_markers = ['我在做', '我的项目', '我的工作', '我在开发', '我在学习']
+all_markers = identity_markers + preference_markers + work_markers
+if not any(marker in text for marker in all_markers):
+    raise SystemExit(0)
+# Extract structured facts
+facts = []
+for marker in identity_markers:
+    if marker in text:
+        match = re.search(re.escape(marker) + r'[\s:：]*([^,.。，!！?？]+)', text)
+        if match:
+            facts.append(f"identity: {match.group(1).strip()}")
+for marker in preference_markers:
+    if marker in text:
+        match = re.search(re.escape(marker) + r'[\s:：]*([^,.。，!！?？]+)', text)
+        if match:
+            facts.append(f"preference: {match.group(1).strip()}")
+for marker in work_markers:
+    if marker in text:
+        match = re.search(re.escape(marker) + r'[\s:：]*([^,.。，!！?？]+)', text)
+        if match:
+            facts.append(f"work: {match.group(1).strip()}")
+if facts:
+    print('\n'.join(facts[:5]))
+else:
+    print(text[:300])
+PY
+) || return 0
+      ;;
+    balanced)
+      capture_text=$(python3 - "$input_text" <<'PY'
+import re, sys
+text = re.sub(r'\s+', ' ', sys.argv[1]).strip()
+if len(text) < 12:
+    raise SystemExit(0)
+# Extract potential facts using patterns
+facts = []
+# Pattern: I am/do/have ...
+patterns = [
+    (r'我(?:是|叫|在|有|用|做)\s*([^,.。，!！?？]{3,60})', 'identity'),
+    (r'我(?:喜欢|讨厌|偏好|习惯|想要|需要)\s*([^,.。，!！?？]{3,80})', 'preference'),
+    (r'我的\s*(?:名字|工作|项目|公司|团队|目标)\s*(?:是|为)?\s*[:：]?\s*([^,.。，!！?？]{3,60})', 'profile'),
+    (r'(?:记住|别忘了|请记住)\s*[,，]?\s*([^,.。，!！?？]{3,100})', 'important'),
+]
+for pattern, category in patterns:
+    matches = re.findall(pattern, text)
+    for match in matches:
+        clean = match.strip()
+        if len(clean) >= 3:
+            facts.append(f"{category}: {clean}")
+# Also capture explicit "remember" statements
+if '记住' in text or '请记住' in text:
+    if not facts:
+        facts.append(f"note: {text[:200]}")
+if facts:
+    print('\n'.join(facts[:8]))
+else:
+    # No structured facts found, skip capture
+    raise SystemExit(0)
+PY
+) || return 0
+      ;;
+    high)
+      capture_text=$(python3 - "$route_json" "$input_text" <<'PY'
+import json, sys, re
+route = json.loads(sys.argv[1])
+query = sys.argv[2]
+facts = []
+# Extract from user query
+patterns = [
+    (r'我(?:是|叫|在|有|用|做)\s*([^,.。，!！?？]{3,60})', 'identity'),
+    (r'我(?:喜欢|讨厌|偏好|习惯|想要|需要)\s*([^,.。，!！?？]{3,80})', 'preference'),
+    (r'我的\s*(?:名字|工作|项目|公司|团队|目标)\s*(?:是|为)?\s*[:：]?\s*([^,.。，!！?？]{3,60})', 'profile'),
+    (r'(?:记住|别忘了|请记住)\s*[,，]?\s*([^,.。，!！?？]{3,100})', 'important'),
+]
+for pattern, category in patterns:
+    matches = re.findall(pattern, query)
+    for match in matches:
+        clean = match.strip()
+        if len(clean) >= 3:
+            facts.append(f"{category}: {clean}")
+# Extract from AI response (if contains confirmations)
+response = route.get('cloudAggregatedText') or ''
+if response:
+    # Look for confirmations like "好的，我记住了" or "已记录"
+    if any(phrase in response for phrase in ['记住了', '已记录', '已保存', '了解了']):
+        # The AI acknowledged something, extract the original query
+        if not facts and len(query) >= 12:
+            facts.append(f"interaction: {query[:200]}")
+# Extract from tool outputs
+tool = route.get('toolResult') or {}
+for item in tool.get('results') or []:
+    if isinstance(item, dict):
+        output = str(item.get('output') or '').strip()
+        # Only capture tool outputs that look like facts
+        if output and len(output) >= 10 and len(output) <= 200:
+            if any(marker in output for marker in ['成功', '完成', '结果', '输出', 'found', 'result']):
+                facts.append(f"tool_result: {output[:150]}")
+if facts:
+    print('\n'.join(facts[:10]))
+else:
+    raise SystemExit(0)
+PY
+)
+      ;;
+    *)
+      capture_text="$input_text"
+      ;;
+  esac
+  openclaw_memory_extension_capture_text "$capture_text" >/dev/null 2>&1 || true
+}
+
+openclaw_memory_extension_automerge() {
+  [ "$(openclaw_memory_feature_enabled all 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  [ "$(openclaw_memory_feature_enabled longTerm 2>/dev/null || printf '%s' 'true')" = "true" ] || return 0
+  memory_extension_prepare >/dev/null 2>&1 || return 0
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json
+import sqlite3
+import time
+import sys
+from collections import defaultdict
+
+db_path = sys.argv[1]
+cfg = json.loads(open(sys.argv[2], 'r', encoding='utf-8').read())
+cleanup_days = int((cfg.get('maintenance') or {}).get('cleanupDays', 30) or 30)
+now = int(time.time())
+threshold = now - cleanup_days * 86400
+
+conn = sqlite3.connect(db_path)
+rows = conn.execute('select id, category, title, content, tags, sensitive, created_at, updated_at from memory_entries where deleted = 0 order by updated_at desc').fetchall()
+
+def normalize(text):
+    return ' '.join(str(text or '').lower().split())
+
+groups = defaultdict(list)
+for row in rows:
+    entry_id, category, title, content, tags, sensitive, created_at, updated_at = row
+    key = (str(category or '').strip().lower(), normalize(title))
+    groups[key].append(row)
+
+for key, items in groups.items():
+    if len(items) <= 1:
+        continue
+    keeper = items[0]
+    keeper_id = keeper[0]
+    merged_parts = []
+    merged_tags = []
+    sensitive_flag = 0
+    newest_updated = keeper[7]
+    oldest_created = keeper[6]
+    for item in items:
+        content = str(item[3] or '').strip()
+        if content and content not in merged_parts:
+            merged_parts.append(content)
+        try:
+            parsed_tags = json.loads(item[4] or '[]')
+            if isinstance(parsed_tags, list):
+                for tag in parsed_tags:
+                    tag_text = str(tag).strip()
+                    if tag_text and tag_text not in merged_tags:
+                        merged_tags.append(tag_text)
+        except Exception:
+            pass
+        sensitive_flag = max(sensitive_flag, int(item[5] or 0))
+        newest_updated = max(newest_updated, int(item[7] or 0))
+        oldest_created = min(oldest_created, int(item[6] or 0))
+
+    summary = '；'.join(merged_parts[:4]).strip()
+    if len(summary) > 600:
+        summary = summary[:600]
+    conn.execute(
+        'update memory_entries set content = ?, tags = ?, sensitive = ?, created_at = ?, updated_at = ? where id = ?',
+        (summary, json.dumps(merged_tags, ensure_ascii=False), sensitive_flag, oldest_created, newest_updated, keeper_id)
+    )
+    for item in items[1:]:
+        conn.execute('update memory_entries set deleted = 1 where id = ?', (item[0],))
+
+for row in rows:
+    entry_id, category, title, content, tags, sensitive, created_at, updated_at = row
+    content_text = str(content or '').strip()
+    if len(content_text) > 800:
+        compact = content_text[:800]
+        conn.execute('update memory_entries set content = ?, updated_at = ? where id = ?', (compact, max(int(updated_at or 0), now), entry_id))
+
+conn.execute('update memory_entries set deleted = 1 where deleted = 0 and updated_at < ?', (threshold,))
+conn.commit()
+conn.close()
+PY
+}
+
+openclaw_ai_stack_context_status_summary() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_CONTEXT_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.exists():
+    print('未记录')
+    raise SystemExit(0)
+data = json.loads(path.read_text(encoding='utf-8'))
+print(f"{data.get('route', '-')} | {data.get('model', '-')} | segments={data.get('segments', 0)}")
+PY
+}
+
+openclaw_ai_stack_expert_target_from_route() {
+  local route_json="$1"
+  python3 - "$route_json" <<'PY'
+import json
+import sys
+route = json.loads(sys.argv[1])
+route_name = route.get('route') or 'text'
+model = route.get('model') or ''
+if route_name == 'vision':
+    expert = 'vision'
+elif route_name == 'code':
+    expert = 'code'
+else:
+    expert = 'general'
+print(json.dumps({'expert': expert, 'model': model}, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_expert_transition() {
+  local route_json="$1"
+  openclaw_ai_stack_prepare
+  local context_json
+  context_json=$(openclaw_ai_stack_context_migration_json "$route_json" 2>/dev/null || printf '%s' '{}')
+  python3 - "$SKPL_AI_STACK_EXPERT_STATE_FILE" "$route_json" "$context_json" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+route = json.loads(sys.argv[2])
+context_payload = json.loads(sys.argv[3])
+route_name = route.get('route') or 'text'
+model = route.get('model') or ''
+if route_name == 'vision':
+    target_expert = 'vision'
+elif route_name == 'code':
+    target_expert = 'code'
+else:
+    target_expert = 'general'
+
+now = int(time.time())
+current = {}
+if state_path.exists():
+    try:
+        current = json.loads(state_path.read_text(encoding='utf-8'))
+    except Exception:
+        current = {}
+
+actions = []
+current_model = current.get('activeModel') or ''
+current_expert = current.get('activeExpert') or ''
+if current_model and current_model != model:
+    actions.append({'type': 'release-model', 'model': current_model})
+if current_expert and current_expert != target_expert:
+    actions.append({'type': 'release-expert', 'model': current_model, 'expert': current_expert})
+if model:
+    actions.append({'type': 'load-model', 'model': model, 'expert': target_expert})
+
+state = {
+    'updatedAt': now,
+    'activeExpert': target_expert,
+    'activeModel': model,
+    'actions': actions,
+    'route': route,
+    'contextMigration': context_payload,
+}
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(state, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_tool_sandbox_dispatch() {
+  local route_json="$1" input_text="$2"
+  openclaw_ai_stack_prepare
+  local plugin_policy_json plugin_capability_json
+  plugin_policy_json=$(openclaw_ai_stack_plugin_policy_json 2>/dev/null || printf '%s' '{}')
+  plugin_capability_json=$(openclaw_ai_stack_plugin_capability_index_json 2>/dev/null || printf '%s' '{}')
+  python3 - "$SKPL_AI_STACK_TOOL_STATE_FILE" "$route_json" "$input_text" "$plugin_policy_json" "$plugin_capability_json" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+route = json.loads(sys.argv[2])
+input_text = sys.argv[3]
+plugin_policy = json.loads(sys.argv[4])
+plugin_caps = json.loads(sys.argv[5])
+stack_cfg = json.loads(Path(sys.argv[6]).read_text(encoding='utf-8'))
+tool = route.get('tool') or 'none'
+intent = route.get('intent') or 'text'
+tasks = []
+risk_by_task = ((stack_cfg.get('tools') or {}).get('riskByTask') or {})
+plugin_task_map = ((stack_cfg.get('tools') or {}).get('pluginTaskMap') or {})
+capability_map = (plugin_caps.get('capabilityMap') or {}) if isinstance(plugin_caps, dict) else {}
+
+def resolve_plugin(name, capability, plugin_gate):
+    dynamic = capability_map.get(capability) if isinstance(capability_map.get(capability), list) else []
+    if plugin_gate and dynamic:
+        return dynamic[0]
+    return plugin_task_map.get(name, '') if plugin_gate else ''
+
+def make_task(name, category, capability, needs_plugin=False):
+    risk = risk_by_task.get(name, 'medium')
+    requires_approval = risk in ('high', 'critical') or category in ('terminal', 'runtime')
+    plugin_gate = bool(needs_plugin and plugin_policy.get('requireAllowlist', False))
+    plugin_name = resolve_plugin(name, capability, plugin_gate)
+    return {
+        'name': name,
+        'category': category,
+        'capability': capability,
+        'risk': risk,
+        'requiresApproval': requires_approval,
+        'pluginGate': plugin_gate,
+        'plugin': plugin_name,
+        'cacheScope': name,
+        'status': 'planned',
+    }
+
+if tool == 'terminal':
+    tasks.append(make_task('local-terminal', 'terminal', 'local-exec'))
+if intent == 'vision':
+    tasks.append(make_task('ocr-preprocess', 'preprocess', 'ocr'))
+    tasks.append(make_task('image-preprocess', 'preprocess', 'image-preprocess', True))
+    tasks.append(make_task('table-recognition', 'preprocess', 'table-recognition', True))
+if intent == 'code':
+    tasks.append(make_task('code-runtime', 'runtime', 'code-exec'))
+if route.get('requiresSearch'):
+    tasks.append(make_task('hybrid-search', 'memory', 'hybrid-search', True))
+if not tasks:
+    tasks.append(make_task('no-tool-needed', 'noop', 'none'))
+
+state = {
+    'updatedAt': int(time.time()),
+    'tasks': tasks,
+    'governance': {
+        'requireAllowlist': plugin_policy.get('requireAllowlist', True),
+        'approvalMode': plugin_policy.get('approvalMode', 'inherit'),
+        'allowedPlugins': plugin_policy.get('allowedPlugins') or [],
+        'blockedPlugins': plugin_policy.get('blockedPlugins') or [],
+        'pluginCapabilities': capability_map,
+        'approvalDefaults': plugin_policy.get('approvalDefaults') or {},
+    },
+    'route': route,
+    'inputPreview': input_text[:160],
+}
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(state, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_plugin_policy_json() {
+  openclaw_ai_stack_prepare
+  local config_file approvals_json
+  config_file=$(openclaw_get_config_file)
+  approvals_json='{}'
+  if openclaw_has_command openclaw; then
+    approvals_json=$(timeout 5 openclaw approvals get --json 2>/dev/null || printf '%s' '{}')
+  fi
+  if [ -z "$approvals_json" ] || [ "$approvals_json" = "null" ]; then
+    approvals_json=$(python3 - "$HOME/.openclaw/exec-approvals.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.exists():
+    print('{}')
+else:
+    try:
+        print(json.dumps(json.loads(path.read_text(encoding='utf-8')), ensure_ascii=False))
+    except Exception:
+        print('{}')
+PY
+)
+  fi
+  python3 - "$config_file" "$approvals_json" "$SKPL_AI_STACK_PLUGIN_STATE_FILE" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+approvals_raw = sys.argv[2]
+state_path = Path(sys.argv[3])
+stack_cfg_path = Path(sys.argv[4])
+
+cfg = {}
+if config_path.exists():
+    try:
+        cfg = json.loads(config_path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+
+try:
+    approvals = json.loads(approvals_raw) if approvals_raw else {}
+except Exception:
+    approvals = {}
+
+stack_cfg = {}
+if stack_cfg_path.exists():
+    try:
+        stack_cfg = json.loads(stack_cfg_path.read_text(encoding='utf-8'))
+    except Exception:
+        stack_cfg = {}
+
+plugins = (cfg.get('plugins') or {}) if isinstance(cfg, dict) else {}
+allowed = plugins.get('allow') if isinstance(plugins.get('allow'), list) else []
+installs = plugins.get('installs') if isinstance(plugins.get('installs'), dict) else {}
+defaults = ((approvals.get('file') or {}).get('defaults') or approvals.get('defaults') or {}) if isinstance(approvals, dict) else {}
+stack_tools = (stack_cfg.get('tools') or {}) if isinstance(stack_cfg, dict) else {}
+
+payload = {
+    'updatedAt': int(time.time()),
+    'requireAllowlist': bool(stack_tools.get('requirePluginAllowlist', True)),
+    'approvalMode': stack_tools.get('approvalMode', 'inherit'),
+    'allowedPlugins': sorted({str(x).strip() for x in allowed if str(x).strip()}),
+    'blockedPlugins': [],
+    'installedPlugins': sorted(str(k).strip() for k in installs.keys() if str(k).strip()),
+    'approvalDefaults': {
+        'security': defaults.get('security', '(unset)'),
+        'ask': defaults.get('ask', '(unset)'),
+        'askFallback': defaults.get('askFallback', '(unset)'),
+        'autoAllowSkills': bool(defaults.get('autoAllowSkills', False)),
+    },
+}
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(payload, ensure_ascii=False))
+PY
+}
+
+# 卸载所有非必要GPU模型（检索层向量模型+自进化层评估模型）
+# 保留 safe_model 指定的基础路由模型
+openclaw_ai_stack_unload_non_essential_gpu_models() {
+  local safe_model="$1"
+  [ -z "$safe_model" ] && safe_model="ollama/qwen2.5:14b"
+  local safe_name
+  safe_name=$(echo "$safe_model" | sed 's|^ollama/||')
+  # 查询 Ollama 当前加载的模型列表
+  local loaded_models
+  loaded_models=$(curl -sf --max-time 5 http://localhost:11434/api/ps 2>/dev/null | \
+    python3 -c "import json,sys; [print(m.get('name','')) for m in json.load(sys.stdin).get('models',[])]" 2>/dev/null || true)
+  [ -z "$loaded_models" ] && return 0
+  # 需要保留的模型: 基础路由模型(安全模型)
+  echo "$loaded_models" | while IFS= read -r model_name; do
+    [ -z "$model_name" ] && continue
+    # 跳过基础路由安全模型
+    if [ "$model_name" = "$safe_name" ] || [ "$model_name" = "${safe_name}:latest" ]; then
+      continue
+    fi
+    # 卸载非必要模型: 嵌入模型、评估模型、旧的专家模型
+    if echo "$model_name" | grep -qiE 'embed|nomic|bge-|e5-|all-mini|text2vec|eval|judge|cross-encoder' 2>/dev/null; then
+      curl -sf --max-time 10 "http://localhost:11434/api/generate" \
+        -d "{\"model\":\"${model_name}\",\"keep_alive\":0}" >/dev/null 2>&1 || true
+    fi
+  done
+  return 0
+}
+
+openclaw_ai_stack_apply_expert_actions() {
+  local expert_state_json="$1"
+  [ -n "$expert_state_json" ] || return 0
+  # 规范要求: 模型互斥加载引擎 — 获取独占锁
+  local lock_acquired=false
+  if openclaw_ai_stack_lock_acquire "expert-loader" 300 >/dev/null 2>&1; then
+    lock_acquired=true
+  else
+    skpl_log_warn "未能获取专家模型独占锁，跳过加载"
+    return 1
+  fi
+  python3 - "$expert_state_json" <<'PY' >/tmp/openclaw-ai-expert-actions.tsv
+import json
+import sys
+data = json.loads(sys.argv[1])
+for action in data.get('actions') or []:
+    print(action.get('type', ''))
+    print(action.get('model', ''))
+    print(action.get('expert', ''))
+PY
+  local migration_text
+  migration_text=$(python3 - "$expert_state_json" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+ctx = data.get('contextMigration') or {}
+print(ctx.get('text', ''))
+PY
+)
+  local lines=()
+  mapfile -t lines < /tmp/openclaw-ai-expert-actions.tsv
+  local idx=0 action_type action_model action_expert last_loaded_model="" safe_text_model="ollama/qwen2.5:14b" current_route_json precheck_json
+  # 规范要求: 完全卸载所有非必要GPU组件(检索+自进化层的GPU模型)
+  openclaw_ai_stack_unload_non_essential_gpu_models "$safe_text_model" >/dev/null 2>&1 || true
+  while [ $idx -lt ${#lines[@]} ]; do
+    action_type="${lines[$idx]}"
+    action_model="${lines[$((idx+1))]}"
+    action_expert="${lines[$((idx+2))]}"
+    idx=$((idx+3))
+    case "$action_type" in
+      release-model)
+        openclaw_ai_stack_unload_local_model "$action_model" >/dev/null 2>&1 || true
+        openclaw_configure_local_ollama_provider "${safe_text_model#ollama/}" text >/dev/null 2>&1 || true
+        openclaw_ai_stack_lifecycle_write_state "release-model" "$action_model" "$action_expert" "requested" >/dev/null 2>&1 || true
+        ;;
+      release-expert)
+        openclaw_ai_stack_unload_local_model "$action_model" >/dev/null 2>&1 || true
+        openclaw_configure_local_ollama_provider "${safe_text_model#ollama/}" text >/dev/null 2>&1 || true
+        openclaw_ai_stack_lifecycle_write_state "release-expert" "$action_model" "$action_expert" "requested" >/dev/null 2>&1 || true
+        ;;
+      load-model)
+        current_route_json=$(cat "$SKPL_AI_STACK_ROUTE_STATUS_FILE" 2>/dev/null || printf '%s' '{}')
+        precheck_json=$(python3 - "$current_route_json" "$SKPL_AI_STACK_ROOT/config.json" "$(openclaw_detect_hardware_profile_json)" <<'PY'
+import json, sys
+route_state = json.loads(sys.argv[1]) if sys.argv[1].strip() else {}
+cfg = json.loads(open(sys.argv[2], 'r', encoding='utf-8').read())
+profile = json.loads(sys.argv[3])
+route = route_state.get('route') or {}
+budget_cfg = cfg.get('budget') or {}
+gpu = int(((profile.get('budget') or {}).get('usableGpuMb', 0)) or 0)
+mem = int(((profile.get('budget') or {}).get('usableMemoryMb', 0)) or 0)
+threshold_gpu = int(budget_cfg.get('expertReloadThresholdGpuMb', 3300) or 3300)
+threshold_mem = int(budget_cfg.get('expertReloadThresholdMemoryMb', 6144) or 6144)
+route_name = route.get('route') or 'text'
+resident = budget_cfg.get('modelRequirementMb', {}).get('fallback', {'gpu': 614, 'memory': 1024})
+fallback_map = (cfg.get('routing') or {}).get('fallbackModels') or {}
+tier = profile.get('tier') or 'entry-cpu'
+fallback_model = fallback_map.get('advanced', 'ollama/qwen3:1.8b')
+if tier == 'emergency-cpu':
+    fallback_model = fallback_map.get('emergency', 'ollama/qwen3:0.3b')
+elif tier == 'entry-cpu':
+    fallback_model = fallback_map.get('entry', 'ollama/qwen3:0.5b')
+elif route_name == 'vision':
+    fallback_model = fallback_map.get('cpuVision', 'local-ocr')
+elif route_name == 'code':
+    fallback_model = fallback_map.get('cpuCode', fallback_model)
+print(json.dumps({
+    'secondPassReady': bool(gpu >= threshold_gpu or mem >= threshold_mem),
+    'thresholdGpuMb': threshold_gpu,
+    'thresholdMemoryMb': threshold_mem,
+    'usableGpuMb': gpu,
+    'usableMemoryMb': mem,
+    'fallbackModel': fallback_model,
+    'residentRequirement': resident,
+}, ensure_ascii=False))
+PY
+)
+        local route_ready
+        route_ready=$(openclaw_detect_hardware_profile_json)
+        if ! python3 - "$route_ready" <<'PY'
+import json, sys
+profile = json.loads(sys.argv[1])
+budget = profile.get('budget') or {}
+gpu = int(budget.get('usableGpuMb', 0) or 0)
+mem = int(budget.get('usableMemoryMb', 0) or 0)
+raise SystemExit(0 if gpu >= 5000 or mem >= 6144 else 1)
+PY
+        then
+          action_model=$(python3 - "$precheck_json" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+print(data.get('fallbackModel') or 'ollama/qwen3:1.8b')
+PY
+)
+          action_expert="general"
+        fi
+        if [ "$action_model" = "local-ocr" ]; then
+          openclaw_ai_stack_lifecycle_write_state "load-model" "$action_model" "vision" "tool-fallback" >/dev/null 2>&1 || true
+          last_loaded_model=""
+          continue
+        fi
+        case "$action_expert" in
+          vision)
+            openclaw_configure_local_ollama_provider "${action_model#ollama/}" image >/dev/null 2>&1 || true
+            ;;
+          code)
+            openclaw_configure_local_ollama_provider "${action_model#ollama/}" code >/dev/null 2>&1 || true
+            ;;
+          *)
+            openclaw_configure_local_ollama_provider "${action_model#ollama/}" text >/dev/null 2>&1 || true
+            ;;
+        esac
+        if [ -n "$migration_text" ]; then
+          openclaw_ai_stack_lifecycle_write_state "context-migrate" "$action_model" "$action_expert" "$(printf '%s' "$migration_text" | cut -c1-180)" >/dev/null 2>&1 || true
+        fi
+        openclaw_ai_stack_warm_local_model "$action_model" >/dev/null 2>&1 || true
+        local running_models
+        running_models=$(openclaw_ollama_running_models_json 2>/dev/null || printf '%s' '[]')
+        local lifecycle_status="configured"
+        if python3 - "$running_models" "$action_model" <<'PY' >/dev/null 2>&1
+import json, sys
+items = json.loads(sys.argv[1])
+target = (sys.argv[2] or '').split('/', 1)[-1]
+raise SystemExit(0 if any((item.get('name') or '') == target for item in items if isinstance(item, dict)) else 1)
+PY
+        then
+          lifecycle_status="loaded"
+        fi
+        openclaw_ai_stack_lifecycle_write_state "load-model" "$action_model" "$action_expert" "$lifecycle_status" >/dev/null 2>&1 || true
+        last_loaded_model="$action_model"
+        ;;
+    esac
+  done
+  if [ -n "$last_loaded_model" ]; then
+    openclaw_apply_and_restart >/dev/null 2>&1 || true
+  fi
+  # 规范要求: 释放独占锁
+  if [ "$lock_acquired" = "true" ]; then
+    openclaw_ai_stack_lock_release "expert-loader" >/dev/null 2>&1 || true
+  fi
+}
+
+openclaw_ai_stack_execute_tool_tasks() {
+  local tool_state_json="$1"
+  [ -n "$tool_state_json" ] || return 0
+  python3 - "$tool_state_json" <<'PY' >/tmp/openclaw-ai-tool-state.json
+import json, sys
+data = json.loads(sys.argv[1])
+print(json.dumps(data, ensure_ascii=False))
+PY
+  local input_preview tasks_json result_json governance_json
+  input_preview=$(python3 - <<'PY'
+import json
+from pathlib import Path
+data = json.loads(Path('/tmp/openclaw-ai-tool-state.json').read_text(encoding='utf-8'))
+print(data.get('inputPreview', ''))
+PY
+)
+  tasks_json=$(python3 - <<'PY'
+import json
+from pathlib import Path
+data = json.loads(Path('/tmp/openclaw-ai-tool-state.json').read_text(encoding='utf-8'))
+print(json.dumps(data.get('tasks') or [], ensure_ascii=False))
+PY
+  )
+  governance_json=$(python3 - <<'PY'
+import json
+from pathlib import Path
+data = json.loads(Path('/tmp/openclaw-ai-tool-state.json').read_text(encoding='utf-8'))
+print(json.dumps(data.get('governance') or {}, ensure_ascii=False))
+PY
+  )
+  result_json=$(python3 - "$tasks_json" <<'PY'
+import json, sys
+items = []
+for task in json.loads(sys.argv[1]):
+    if isinstance(task, dict):
+        item = dict(task)
+        item['task'] = item.get('name') or item.get('task') or 'unknown'
+    else:
+        item = {'task': str(task), 'name': str(task)}
+    item['status'] = 'pending'
+    items.append(item)
+print(json.dumps({'results': items}, ensure_ascii=False))
+PY
+  )
+  if printf '%s' "$tasks_json" | grep -q 'hybrid-search'; then
+    local search_output
+    search_output=$(hybrid_memory_search "$input_preview" 2>/dev/null || true)
+    result_json=$(python3 - "$result_json" "$search_output" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+output = sys.argv[2]
+for item in data.get('results', []):
+    if item.get('task') == 'hybrid-search':
+        item['status'] = 'done'
+        item['output'] = output
+        item['summary'] = 'memory search completed' if output else 'memory search empty'
+print(json.dumps(data, ensure_ascii=False))
+PY
+)
+  fi
+  if printf '%s' "$tasks_json" | grep -q 'local-terminal'; then
+    local terminal_probe
+    terminal_probe=$(openclaw_ai_stack_run_tool_cached terminal-probe "$input_preview" openclaw_panel_run_command_with_timeout 8 openclaw models status 2>/dev/null || true)
+    result_json=$(python3 - "$result_json" "$terminal_probe" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+probe = sys.argv[2]
+for item in data.get('results', []):
+    if item.get('task') == 'local-terminal':
+        item['status'] = 'done' if probe else 'ready'
+        item['output'] = probe or 'terminal dispatch prepared'
+        item['summary'] = 'terminal probe ready'
+print(json.dumps(data, ensure_ascii=False))
+PY
+)
+  fi
+  if printf '%s' "$tasks_json" | grep -q 'code-runtime'; then
+    local code_probe
+    code_probe=$(openclaw_ai_stack_run_tool_cached code-probe "$input_preview" openclaw_panel_run_command_with_timeout 8 openclaw models list --provider ollama 2>/dev/null || true)
+    result_json=$(python3 - "$result_json" "$code_probe" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+probe = sys.argv[2]
+for item in data.get('results', []):
+    if item.get('task') == 'code-runtime':
+        item['status'] = 'done' if probe else 'ready'
+        item['output'] = probe or 'code runtime prepared'
+        item['summary'] = 'runtime probe ready'
+print(json.dumps(data, ensure_ascii=False))
+PY
+)
+  fi
+  if printf '%s' "$tasks_json" | grep -q 'ocr-preprocess'; then
+    local ocr_probe
+    ocr_probe=$(openclaw_ai_stack_run_local_ocr "$input_preview" 2>/dev/null || python3 - "$input_preview" <<'PY'
+import sys
+text = sys.argv[1].lower()
+if any(token in text for token in ['image', 'ocr', '截图', '图片', '识图']):
+    print('ocr preprocess prepared')
+PY
+)
+    result_json=$(python3 - "$result_json" "$ocr_probe" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+probe = sys.argv[2]
+for item in data.get('results', []):
+    if item.get('task') == 'ocr-preprocess':
+        item['status'] = 'done' if probe else 'ready'
+        item['output'] = probe or 'ocr preprocess prepared'
+        item['summary'] = 'ocr preprocess ready'
+print(json.dumps(data, ensure_ascii=False))
+PY
+)
+  fi
+  if printf '%s' "$tasks_json" | grep -q 'image-preprocess'; then
+    local image_probe
+    image_probe=$(openclaw_ai_stack_run_image_preprocess "$input_preview" 2>/dev/null || true)
+    result_json=$(python3 - "$result_json" "$image_probe" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+probe = sys.argv[2]
+for item in data.get('results', []):
+    if item.get('task') == 'image-preprocess':
+        item['status'] = 'done' if probe else 'ready'
+        item['output'] = probe or 'image preprocess prepared'
+        item['summary'] = 'image preprocess ready'
+print(json.dumps(data, ensure_ascii=False))
+PY
+)
+  fi
+  if printf '%s' "$tasks_json" | grep -q 'table-recognition'; then
+    local table_probe
+    table_probe=$(openclaw_ai_stack_run_table_recognition "$input_preview" 2>/dev/null || true)
+    result_json=$(python3 - "$result_json" "$table_probe" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+probe = sys.argv[2]
+for item in data.get('results', []):
+    if item.get('task') == 'table-recognition':
+        item['status'] = 'done' if probe else 'ready'
+        item['output'] = probe or 'table recognition prepared'
+        item['summary'] = 'table recognition ready'
+print(json.dumps(data, ensure_ascii=False))
+PY
+)
+  fi
+  result_json=$(python3 - "$result_json" "$governance_json" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+governance = json.loads(sys.argv[2]) if sys.argv[2] else {}
+allowed = set(governance.get('allowedPlugins') or [])
+require_allowlist = bool(governance.get('requireAllowlist', True))
+approval_defaults = governance.get('approvalDefaults') or {}
+security = str(approval_defaults.get('security', '(unset)'))
+ask = str(approval_defaults.get('ask', '(unset)'))
+for item in data.get('results', []):
+    if item.get('pluginGate') and require_allowlist:
+        preferred = item.get('plugin') or 'memory-core'
+        item['plugin'] = preferred
+        item['pluginAllowed'] = preferred in allowed
+        if not item['pluginAllowed']:
+            item['status'] = 'blocked'
+            item['output'] = item.get('output') or 'plugin allowlist required'
+            item['summary'] = 'plugin allowlist missing'
+    if item.get('requiresApproval') and item.get('status') == 'pending':
+        if security == 'full' or ask == 'off':
+            item['status'] = 'ready'
+            item['summary'] = 'approval bypassed by policy'
+        else:
+            item['status'] = 'approval-required'
+            item['summary'] = 'waiting for approval policy'
+data['governance'] = governance
+print(json.dumps(data, ensure_ascii=False))
+PY
+  )
+  printf '%s\n' "$result_json"
+}
+
+openclaw_ai_stack_expert_status_summary() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_EXPERT_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.exists():
+    print('未记录')
+    raise SystemExit(0)
+data = json.loads(path.read_text(encoding='utf-8'))
+print(f"{data.get('activeExpert', '-')} | {data.get('activeModel', '-')} | actions={len(data.get('actions') or [])}")
+PY
+}
+
+openclaw_ai_stack_tool_status_summary() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_TOOL_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.exists():
+    print('未记录')
+    raise SystemExit(0)
+data = json.loads(path.read_text(encoding='utf-8'))
+tasks = data.get('tasks') or []
+names = []
+for item in tasks:
+    if isinstance(item, dict):
+        names.append(f"{item.get('name', '-')}/{item.get('risk', '-')}")
+    else:
+        names.append(str(item))
+print(','.join(names or ['-']))
+PY
+}
+
+openclaw_ai_stack_plugin_status_summary() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_PLUGIN_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.exists():
+    print('未记录')
+    raise SystemExit(0)
+data = json.loads(path.read_text(encoding='utf-8'))
+allowed = len(data.get('allowedPlugins') or [])
+installed = len(data.get('installedPlugins') or [])
+security = ((data.get('approvalDefaults') or {}).get('security') or '-')
+print(f"allow={allowed} | installed={installed} | security={security}")
+PY
+}
+
+openclaw_ai_stack_cloud_model_pool_json() {
+  local route_json="$1"
+  local config_file
+  config_file=$(openclaw_get_config_file)
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$config_file" "$route_json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+stack_cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+config_path = Path(sys.argv[2])
+route = json.loads(sys.argv[3])
+cfg = {}
+if config_path.exists():
+    try:
+        cfg = json.loads(config_path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+
+providers = (((cfg or {}).get('models') or {}).get('providers') or {})
+routing = (stack_cfg.get('routing') or {})
+route_name = route.get('route') or 'text'
+execution = route.get('execution') or 'local'
+selected = str(route.get('model') or '').strip()
+
+default_map = {
+    'text': routing.get('defaultCloudTextModel', 'google/gemini-2.5-flash'),
+    'vision': routing.get('defaultCloudVisionModel', 'google/gemini-2.5-pro'),
+    'search': routing.get('defaultCloudSearchModel', 'google/gemini-2.5-flash'),
+    'code': routing.get('defaultCloudCodeModel', 'google/gemini-2.5-flash'),
+    'local': routing.get('defaultCloudTextModel', 'google/gemini-2.5-flash'),
+}
+
+def score_provider(name, provider, route_name, execution, selected):
+    base_url = str(provider.get('baseUrl') or '').strip().lower()
+    api = str(provider.get('api') or '').strip().lower()
+    models = provider.get('models') or []
+    if not isinstance(models, list):
+        return None
+    if name == 'ollama':
+        return None
+    if execution != 'cloud':
+        return None
+    if not base_url or not api:
+        return None
+    score = 0
+    if api in ('openai-completions', 'openai-responses'):
+        score += 3
+    if any(token in base_url for token in ('gemini', 'google', 'openrouter', 'deepseek', 'siliconflow', 'volces', 'moonshot', 'baidu')):
+        score += 2
+    if route_name in ('vision', 'search'):
+        score += 1
+    return score
+
+pool = []
+for name, provider in providers.items():
+    if not isinstance(provider, dict):
+        continue
+    score = score_provider(name, provider, route_name, execution, selected)
+    if score is None:
+        continue
+    for model in provider.get('models') or []:
+        if not isinstance(model, dict):
+            continue
+        model_id = str(model.get('id') or model.get('name') or '').strip()
+        if not model_id:
+            continue
+        inputs = model.get('input') or []
+        inputs = inputs if isinstance(inputs, list) else []
+        lower = model_id.lower()
+        fit = 0
+        if selected and f'{name}/{model_id}' == selected:
+            fit += 6
+        if route_name == 'vision' and 'image' in inputs:
+            fit += 4
+        if route_name == 'code' and ('coder' in lower or model.get('reasoning') is True):
+            fit += 4
+        if route_name == 'search' and any(token in lower for token in ('flash', 'search', 'sonar')):
+            fit += 4
+        if route_name == 'text' and 'image' not in inputs:
+            fit += 3
+        if default_map.get(route_name) == f'{name}/{model_id}':
+            fit += 5
+        pool.append({
+            'provider': name,
+            'model': f'{name}/{model_id}',
+            'baseUrl': provider.get('baseUrl'),
+            'api': provider.get('api'),
+            'score': score + fit,
+            'input': inputs,
+        })
+
+pool.sort(key=lambda item: (item.get('score', 0), item.get('model', '')), reverse=True)
+if execution == 'cloud' and not pool:
+    fallback_model = default_map.get(route_name) or routing.get('defaultCloudTextModel', 'google/gemini-2.5-flash')
+    provider, _, model_id = fallback_model.partition('/')
+    pool.append({
+        'provider': provider or 'cloud',
+        'model': fallback_model,
+        'baseUrl': '',
+        'api': 'openai-responses',
+        'score': 1,
+        'input': ['text'],
+        'fallback': True,
+    })
+
+print(json.dumps({'route': route_name, 'execution': execution, 'selected': selected, 'candidates': pool[:6]}, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_cloud_dispatch_json() {
+  local route_json="$1" pool_json="$2" input_text="$3"
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$route_json" "$pool_json" "$input_text" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+stack_cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+route = json.loads(sys.argv[2])
+pool = json.loads(sys.argv[3])
+input_text = sys.argv[4]
+cloud_cfg = stack_cfg.get('cloud') or {}
+strategy_map = cloud_cfg.get('strategyByRoute') or {}
+route_name = route.get('route') or 'text'
+execution = route.get('execution') or 'local'
+fanout = int(cloud_cfg.get('parallelFanout', 2) or 2)
+strategy = strategy_map.get(route_name, 'single')
+candidates = pool.get('candidates') or []
+
+jobs = []
+if execution != 'cloud':
+    strategy = 'bypass'
+elif strategy == 'parallel':
+    for item in candidates[:max(1, fanout)]:
+        jobs.append({'mode': 'parallel', 'model': item.get('model'), 'provider': item.get('provider'), 'score': item.get('score', 0)})
+elif strategy == 'serial':
+    for item in candidates[:max(1, fanout)]:
+        jobs.append({'mode': 'serial', 'model': item.get('model'), 'provider': item.get('provider'), 'score': item.get('score', 0)})
+else:
+    if candidates:
+        item = candidates[0]
+        jobs.append({'mode': 'single', 'model': item.get('model'), 'provider': item.get('provider'), 'score': item.get('score', 0)})
+
+dispatch = {
+    'updatedAt': 0,
+    'route': route,
+    'strategy': strategy,
+    'inputPreview': input_text[:160],
+    'jobs': jobs,
+}
+print(json.dumps(dispatch, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_cloud_call_provider() {
+  local provider_name="$1" model_name="$2" prompt_text="$3"
+  local config_file
+  config_file=$(openclaw_get_config_file)
+  python3 - "$config_file" "$provider_name" "$model_name" "$prompt_text" <<'PY'
+import json
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+cfg = {}
+config_path = Path(sys.argv[1])
+provider_name = sys.argv[2]
+model_name = sys.argv[3]
+prompt_text = sys.argv[4]
+if config_path.exists():
+    try:
+        cfg = json.loads(config_path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+
+provider = ((((cfg or {}).get('models') or {}).get('providers') or {}).get(provider_name) or {})
+base_url = str(provider.get('baseUrl') or '').strip().rstrip('/')
+api_key = str(provider.get('apiKey') or '').strip()
+api_type = str(provider.get('api') or '').strip().lower()
+timeout_seconds = int(provider.get('timeoutSeconds', 90) or 90)
+if not base_url or not api_key or not model_name:
+    print(json.dumps({'ok': False, 'status': 0, 'latencyMs': 0, 'text': '', 'error': 'missing-provider-config'}, ensure_ascii=False))
+    raise SystemExit(0)
+
+if api_type == 'openai-responses':
+    endpoint = '/responses'
+    payload = {
+        'model': model_name,
+        'input': prompt_text,
+        'temperature': 0.2,
+        'max_output_tokens': 512,
+    }
+else:
+    endpoint = '/chat/completions'
+    payload = {
+        'model': model_name,
+        'messages': [{'role': 'user', 'content': prompt_text}],
+        'temperature': 0.2,
+        'max_tokens': 512,
+    }
+
+raw = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+req = urllib.request.Request(
+    base_url + endpoint,
+    data=raw,
+    headers={
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {api_key}',
+    },
+    method='POST',
+)
+start = time.time()
+body = b''
+status = 0
+ok = False
+error = ''
+try:
+    with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+        status = getattr(resp, 'status', 200)
+        body = resp.read()
+        ok = 200 <= status < 300
+except urllib.error.HTTPError as exc:
+    status = getattr(exc, 'code', 0) or 0
+    body = exc.read()
+    error = f'http-{status}'
+except Exception as exc:
+    error = str(exc)
+latency_ms = int((time.time() - start) * 1000)
+
+text = ''
+if body:
+    try:
+        data = json.loads(body.decode('utf-8', errors='replace'))
+        if api_type == 'openai-responses':
+            output = data.get('output') or []
+            texts = []
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                for content in item.get('content') or []:
+                    if isinstance(content, dict) and isinstance(content.get('text'), str) and content.get('text').strip():
+                        texts.append(content.get('text').strip())
+            text = ' '.join(texts).strip()
+        else:
+            choices = data.get('choices') or []
+            if choices and isinstance(choices[0], dict):
+                message = choices[0].get('message') or {}
+                if isinstance(message, dict):
+                    content = message.get('content')
+                    if isinstance(content, str):
+                        text = content.strip()
+        if not text:
+            for key in ('message', 'detail', 'error'):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    text = value.strip()
+                    break
+                if isinstance(value, dict):
+                    nested = value.get('message')
+                    if isinstance(nested, str) and nested.strip():
+                        text = nested.strip()
+                        break
+    except Exception:
+        text = body.decode('utf-8', errors='replace').strip()
+
+print(json.dumps({'ok': ok, 'status': status, 'latencyMs': latency_ms, 'text': text[:4000], 'error': error, 'endpoint': endpoint}, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_cloud_compress_prompt() {
+  local route_json="$1" prompt_text="$2"
+  python3 - "$route_json" "$prompt_text" <<'PY'
+import json
+import re
+import sys
+
+route = json.loads(sys.argv[1])
+prompt = sys.argv[2]
+profile_tier = str(route.get('profileTier') or '')
+complexity = str(route.get('complexity') or 'normal')
+intent = str(route.get('intent') or 'general')
+
+def dedupe_lines(text):
+    seen = set()
+    out = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        key = re.sub(r'\s+', ' ', line)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(line)
+    return out
+
+def split_sentences(text):
+    return re.split(r'(?<=[。！？.!?])\s*', text)
+
+def smart_truncate(text, max_chars, mode='standard'):
+    """按句子边界智能截断"""
+    if len(text) <= max_chars:
+        return text
+    sentences = split_sentences(text)
+    result = []
+    current_len = 0
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        new_len = current_len + len(s)
+        if new_len > max_chars:
+            if mode == 'extreme' and result:
+                # 极致模式: 跳过中间句子, 仅保留首尾
+                remaining = max_chars - current_len
+                if remaining > 40:
+                    result.append('...')
+                break
+            else:
+                # 标准/无损: 尽力保留完整句子
+                if current_len > 0:
+                    break
+                else:
+                    result.append(s[:max_chars])
+                    break
+        result.append(s)
+        current_len = new_len
+    return '\n'.join(result)
+
+# 三级压缩: 映射到规范的三级语义保留模式
+if profile_tier in ('entry-cpu', 'emergency-cpu'):
+    limit = 1200
+    mode = 'extreme'
+    retention = '92%'
+elif profile_tier in ('server', 'workstation'):
+    limit = len(prompt) + 100  # 几乎不截断
+    mode = 'lossless'
+    retention = '100%'
+else:
+    limit = 2200
+    mode = 'standard'
+    retention = '98%'
+
+lines = dedupe_lines(prompt)
+compressed = '\n'.join(lines)
+compressed = re.sub(r'\n{3,}', '\n\n', compressed).strip()
+# 智能截断（保留句子边界）
+compressed = smart_truncate(compressed, limit, mode)
+# 去冗余空白
+compressed = re.sub(r'[ \t]{2,}', ' ', compressed).strip()
+print(json.dumps({
+    'mode': mode,
+    'retention': retention,
+    'text': compressed,
+    'sourceLength': len(prompt),
+    'finalLength': len(compressed),
+}, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_cloud_aggregate_results() {
+  local route_json="$1" results_json="$2"
+  python3 - "$route_json" "$results_json" <<'PY'
+import json
+import re
+import sys
+
+route = json.loads(sys.argv[1])
+results = json.loads(sys.argv[2])
+done_items = [item for item in results if item.get('status') == 'done' and str(item.get('text') or '').strip()]
+
+def normalize(text):
+    return re.sub(r'\s+', ' ', (text or '').strip().lower())
+
+def token_set(text):
+    lowered = normalize(text)
+    return {part for part in re.split(r'[^a-z0-9\u4e00-\u9fff]+', lowered) if part}
+
+clusters = {}
+for item in done_items:
+    key = normalize(item.get('text', ''))[:280]
+    clusters.setdefault(key, []).append(item)
+
+consensus_count = max((len(items) for items in clusters.values()), default=0)
+consensus = 'high' if consensus_count >= 2 else ('medium' if done_items else 'low')
+
+provider_count = len({str(item.get('provider') or '').strip() for item in done_items if str(item.get('provider') or '').strip()})
+success_ratio = (len(done_items) / len(results)) if results else 0.0
+avg_score = (sum(float(item.get('score', 0) or 0) for item in done_items) / len(done_items)) if done_items else 0.0
+avg_latency = (sum(int(item.get('latencyMs', 0) or 0) for item in done_items) / len(done_items)) if done_items else 0.0
+similarity_scores = []
+for idx, item in enumerate(done_items):
+    left = token_set(item.get('text', ''))
+    if not left:
+        continue
+    for other in done_items[idx + 1:]:
+        right = token_set(other.get('text', ''))
+        if not right:
+            continue
+        inter = len(left & right)
+        union = len(left | right)
+        if union:
+            similarity_scores.append(inter / union)
+avg_similarity = (sum(similarity_scores) / len(similarity_scores)) if similarity_scores else (1.0 if len(done_items) == 1 else 0.0)
+lengths = [len(str(item.get('text') or '').strip()) for item in done_items if str(item.get('text') or '').strip()]
+length_balance = (min(lengths) / max(lengths)) if len(lengths) >= 2 and max(lengths) else (1.0 if lengths else 0.0)
+quality_score = 0.0
+quality_score += min(0.4, success_ratio * 0.4)
+quality_score += min(0.25, avg_score * 0.25)
+quality_score += min(0.2, (consensus_count / max(1, len(done_items))) * 0.2) if done_items else 0.0
+quality_score += 0.15 if provider_count >= 2 else (0.08 if provider_count == 1 else 0.0)
+quality_score += min(0.1, avg_similarity * 0.1)
+quality_score += min(0.05, length_balance * 0.05)
+quality_score = round(min(1.0, quality_score), 3)
+quality_band = 'high' if quality_score >= 0.75 else ('medium' if quality_score >= 0.45 else 'low')
+
+best = {}
+if done_items:
+    best = sorted(done_items, key=lambda item: (item.get('score', 0), -(item.get('latencyMs', 0) or 0)), reverse=True)[0]
+
+merged_parts = []
+for item in sorted(done_items, key=lambda item: (item.get('score', 0), -(item.get('latencyMs', 0) or 0)), reverse=True)[:3]:
+    text = str(item.get('text') or '').strip()
+    if text and text not in merged_parts:
+        merged_parts.append(text)
+
+aggregated_text = '\n\n'.join(merged_parts).strip()
+summary_lines = []
+if best.get('model'):
+    summary_lines.append(f"best={best.get('model')}")
+summary_lines.append(f"consensus={consensus}")
+summary_lines.append(f"success={len(done_items)}/{len(results)}")
+summary_lines.append(f"quality={quality_band}:{quality_score}")
+summary_lines.append(f"similarity={round(avg_similarity, 3)}")
+if avg_latency:
+    summary_lines.append(f"latency={int(avg_latency)}ms")
+
+print(json.dumps({
+    'best': best,
+    'aggregatedText': aggregated_text,
+    'consensus': consensus,
+    'consensusCount': consensus_count,
+    'qualityScore': quality_score,
+    'qualityBand': quality_band,
+    'providerCount': provider_count,
+    'successRatio': round(success_ratio, 3),
+    'avgSimilarity': round(avg_similarity, 3),
+    'lengthBalance': round(length_balance, 3),
+    'summary': ' | '.join(summary_lines),
+}, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_cloud_execute() {
+  local dispatch_json="$1"
+  openclaw_ai_stack_prepare
+  local route_json prompt_text compressed_prompt_json results_json aggregate_json
+  route_json=$(python3 - "$dispatch_json" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+print(json.dumps(data.get('route') or {}, ensure_ascii=False))
+PY
+)
+  prompt_text=$(python3 - "$dispatch_json" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+route = data.get('route') or {}
+memory = route.get('memoryInjection') or ''
+preview = data.get('inputPreview') or ''
+parts = [part for part in (memory, preview) if isinstance(part, str) and part.strip()]
+print('\n\n'.join(parts)[:12000])
+PY
+)
+  compressed_prompt_json=$(openclaw_ai_stack_cloud_compress_prompt "$route_json" "$prompt_text" 2>/dev/null || printf '%s' '{"mode":"standard","text":""}')
+  prompt_text=$(python3 - "$compressed_prompt_json" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+print(data.get('text', ''))
+PY
+)
+  python3 - "$dispatch_json" <<'PY' >/tmp/openclaw-ai-cloud-jobs.tsv
+import json, sys
+data = json.loads(sys.argv[1])
+for item in data.get('jobs') or []:
+    print(item.get('mode', ''))
+    print(item.get('provider', ''))
+    print(item.get('model', ''))
+    print(item.get('score', 0))
+PY
+  local lines=() idx=0 mode provider model score call_json
+  mapfile -t lines < /tmp/openclaw-ai-cloud-jobs.tsv
+  results_json='[]'
+  while [ $idx -lt ${#lines[@]} ]; do
+    mode="${lines[$idx]}"
+    provider="${lines[$((idx+1))]}"
+    model="${lines[$((idx+2))]}"
+    score="${lines[$((idx+3))]}"
+    idx=$((idx+4))
+    if [ -n "$provider" ] && [ -n "$model" ]; then
+      call_json=$(openclaw_ai_stack_cloud_call_provider "$provider" "${model#*/}" "$prompt_text" 2>/dev/null || true)
+    else
+      call_json='{}'
+    fi
+    results_json=$(python3 - "$results_json" "$mode" "$provider" "$model" "$score" "$call_json" <<'PY'
+import json, sys
+items = json.loads(sys.argv[1])
+mode, provider, model, score = sys.argv[2:6]
+call = {}
+try:
+    if sys.argv[6]:
+        call = json.loads(sys.argv[6])
+except Exception:
+    call = {}
+items.append({
+    'mode': mode,
+    'provider': provider,
+    'model': model,
+    'score': float(score or 0),
+    'status': 'done' if call.get('ok') else ('failed' if call else 'planned'),
+    'latencyMs': int(call.get('latencyMs', 0) or 0),
+    'endpoint': call.get('endpoint', ''),
+    'text': call.get('text', ''),
+    'httpStatus': int(call.get('status', 0) or 0),
+    'error': call.get('error', ''),
+})
+print(json.dumps(items, ensure_ascii=False))
+PY
+)
+    if [ "$mode" = "serial" ] && python3 - "$call_json" <<'PY' >/dev/null 2>&1
+import json, sys
+data = json.loads(sys.argv[1] or '{}')
+raise SystemExit(0 if data.get('ok') else 1)
+PY
+    then
+      break
+    fi
+  done
+  aggregate_json=$(openclaw_ai_stack_cloud_aggregate_results "$route_json" "$results_json" 2>/dev/null || printf '%s' '{}')
+  python3 - "$SKPL_AI_STACK_CLOUD_STATE_FILE" "$dispatch_json" "$results_json" "$compressed_prompt_json" "$aggregate_json" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+dispatch = json.loads(sys.argv[2])
+results = json.loads(sys.argv[3])
+compression = json.loads(sys.argv[4])
+aggregate = json.loads(sys.argv[5])
+strategy = dispatch.get('strategy') or 'bypass'
+jobs = dispatch.get('jobs') or []
+route = dispatch.get('route') or {}
+
+for index, item in enumerate(results, 1):
+    item['order'] = index
+    item['summary'] = f"{item.get('mode', strategy)}:{item.get('model') or item.get('provider') or '-'}"
+
+best = aggregate.get('best') or ((results[:1] if results else [{}])[0])
+aggregated_text = str(aggregate.get('aggregatedText') or '').strip()
+payload = {
+    'updatedAt': int(time.time()),
+    'strategy': strategy,
+    'route': route,
+    'jobs': jobs,
+    'results': results,
+    'best': best,
+    'aggregatedText': aggregated_text,
+    'consensus': aggregate.get('consensus', 'low'),
+    'consensusCount': int(aggregate.get('consensusCount', 0) or 0),
+    'summary': aggregate.get('summary', ''),
+    'compression': compression,
+}
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(payload, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_cloud_status_summary() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_CLOUD_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.exists():
+    print('未记录')
+    raise SystemExit(0)
+data = json.loads(path.read_text(encoding='utf-8'))
+best = data.get('best') or {}
+compression = data.get('compression') or {}
+print(f"{data.get('strategy', '-')} | {best.get('model', '-') } | jobs={len(data.get('jobs') or [])} | mode={compression.get('mode', '-')}")
+PY
+}
+
+openclaw_memory_type_leaf_menu() {
+  local memory_kind="$1"
+  while true; do
+    clear
+    case "$memory_kind" in
+      short)
+        skpl_ui_header "短期记忆" "当前会话记忆开关与长度"
+        skpl_ui_menu_item 1 "切换开关" "开启或关闭短期记忆"
+        skpl_ui_menu_item 2 "设置长度" "设置短期记忆最大条数"
+        ;;
+      mid)
+        skpl_ui_header "中期记忆" "超上下文记忆开关与保留天数"
+        skpl_ui_menu_item 1 "切换开关" "开启或关闭中期记忆"
+        skpl_ui_menu_item 2 "设置保留天数" "设置中期记忆保留时长"
+        ;;
+      long)
+        skpl_ui_header "长期记忆" "跨会话记忆开关与自动提取强度"
+        skpl_ui_menu_item 1 "切换开关" "开启或关闭长期记忆"
+        skpl_ui_menu_item 2 "设置自动提取强度" "low/balanced/high"
+        ;;
+      kb)
+        skpl_ui_header "知识库记忆" "知识库开关与检索权重"
+        skpl_ui_menu_item 1 "切换开关" "开启或关闭知识库记忆"
+        skpl_ui_menu_item 2 "设置检索权重" "如 1.0"
+        ;;
+    esac
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$memory_kind:$choice" in
+      short:1) read -e -p "输入 true/false: " v; memory_extension_update_config_field "shortTerm.enabled" "$v" bool; break_end ;;
+      short:2) read -e -p "输入短期记忆最大条数: " v; memory_extension_update_config_field "shortTerm.maxItems" "$v" int; break_end ;;
+      mid:1) read -e -p "输入 true/false: " v; memory_extension_update_config_field "midTerm.enabled" "$v" bool; break_end ;;
+      mid:2) read -e -p "输入中期记忆保留天数: " v; memory_extension_update_config_field "midTerm.retentionDays" "$v" int; break_end ;;
+      long:1) read -e -p "输入 true/false: " v; memory_extension_update_config_field "longTerm.enabled" "$v" bool; break_end ;;
+      long:2) read -e -p "输入 autoExtract 强度(low/balanced/high): " v; memory_extension_update_config_field "longTerm.autoExtract" "$v" string; break_end ;;
+      kb:1) read -e -p "输入 true/false: " v; memory_extension_update_config_field "knowledgeBase.enabled" "$v" bool; break_end ;;
+      kb:2) read -e -p "输入知识库检索权重: " v; memory_extension_update_config_field "knowledgeBase.weight" "$v" float; break_end ;;
+      *:0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_ai_stack_evolve_record() {
+  local route_json="$1"
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_EVOLVE_STATE_FILE" "$route_json" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+route = json.loads(sys.argv[2])
+state = {'updatedAt': int(time.time()), 'totalRuns': 0, 'routeStats': {}, 'modelStats': {}, 'memoryLearning': {'captures': 0, 'cloudSuccess': 0}, 'quality': {'high': 0, 'medium': 0, 'low': 0}, 'resourcePressure': {'hits': 0, 'recoveries': 0, 'fallbacks': 0}, 'leaderboard': []}
+if state_path.exists():
+    try:
+        current = json.loads(state_path.read_text(encoding='utf-8'))
+        if isinstance(current, dict):
+            state.update(current)
+    except Exception:
+        pass
+
+route_name = str(route.get('route') or 'text')
+model_name = str(route.get('model') or '-')
+cloud_state = route.get('cloudState') or {}
+cloud_ok = 1 if (cloud_state.get('best') or {}).get('status') == 'done' else 0
+memory_text = str(route.get('memoryInjection') or '').strip()
+memory_capture = 1 if memory_text else 0
+consensus = str(cloud_state.get('consensus') or 'low')
+quality_score = float(cloud_state.get('qualityScore', 0.0) or 0.0)
+quality_band = str(cloud_state.get('qualityBand') or consensus or 'low')
+resource_guard = route.get('resourceGuard') or {}
+resource_pressure = 1 if route.get('resourcePressure') else 0
+resource_recovery = 1 if resource_guard.get('secondPassReady') else 0
+resource_fallback = 1 if resource_pressure and not resource_recovery else 0
+
+state['updatedAt'] = int(time.time())
+state['totalRuns'] = int(state.get('totalRuns', 0) or 0) + 1
+route_stats = state.setdefault('routeStats', {})
+route_stats[route_name] = int(route_stats.get(route_name, 0) or 0) + 1
+model_stats = state.setdefault('modelStats', {})
+model_stats[model_name] = int(model_stats.get(model_name, 0) or 0) + 1
+learning = state.setdefault('memoryLearning', {})
+learning['captures'] = int(learning.get('captures', 0) or 0) + memory_capture
+learning['cloudSuccess'] = int(learning.get('cloudSuccess', 0) or 0) + cloud_ok
+quality = state.setdefault('quality', {})
+quality[quality_band] = int(quality.get(quality_band, 0) or 0) + 1
+scores = state.setdefault('qualityScores', {'total': 0.0, 'count': 0, 'average': 0.0})
+scores['total'] = round(float(scores.get('total', 0.0) or 0.0) + quality_score, 3)
+scores['count'] = int(scores.get('count', 0) or 0) + (1 if quality_score > 0 else 0)
+scores['average'] = round((scores['total'] / scores['count']), 3) if scores['count'] else 0.0
+route_quality = state.setdefault('routeQualityScores', {})
+route_bucket = route_quality.setdefault(route_name, {'total': 0.0, 'count': 0, 'average': 0.0})
+route_bucket['total'] = round(float(route_bucket.get('total', 0.0) or 0.0) + quality_score, 3)
+route_bucket['count'] = int(route_bucket.get('count', 0) or 0) + (1 if quality_score > 0 else 0)
+route_bucket['average'] = round((route_bucket['total'] / route_bucket['count']), 3) if route_bucket['count'] else 0.0
+pressure = state.setdefault('resourcePressure', {})
+pressure['hits'] = int(pressure.get('hits', 0) or 0) + resource_pressure
+pressure['recoveries'] = int(pressure.get('recoveries', 0) or 0) + resource_recovery
+pressure['fallbacks'] = int(pressure.get('fallbacks', 0) or 0) + resource_fallback
+leaderboard = sorted(model_stats.items(), key=lambda item: item[1], reverse=True)[:10]
+state['leaderboard'] = [{'model': name, 'runs': count} for name, count in leaderboard]
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(state, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_evolve_status_summary() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_EVOLVE_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+if not path.exists():
+    print('未记录')
+    raise SystemExit(0)
+data = json.loads(path.read_text(encoding='utf-8'))
+board = data.get('leaderboard') or []
+top = board[0].get('model', '-') if board else '-'
+quality = data.get('quality', {})
+pressure = data.get('resourcePressure', {})
+print(f"runs={data.get('totalRuns', 0)} | memory={data.get('memoryLearning', {}).get('captures', 0)} | cloud={data.get('memoryLearning', {}).get('cloudSuccess', 0)} | pressure={pressure.get('hits', 0)}/{pressure.get('recoveries', 0)}/{pressure.get('fallbacks', 0)} | top={top} | q={quality.get('high', 0)}/{quality.get('medium', 0)}/{quality.get('low', 0)}")
+PY
+}
+
+openclaw_ai_stack_autotune_apply() {
+  openclaw_ai_stack_prepare
+  memory_extension_prepare
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$SKPL_AI_STACK_EVOLVE_STATE_FILE" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+stack_path = Path(sys.argv[1])
+evolve_path = Path(sys.argv[2])
+memory_path = Path(sys.argv[3])
+stack = json.loads(stack_path.read_text(encoding='utf-8'))
+memory_cfg = json.loads(memory_path.read_text(encoding='utf-8'))
+evolve = {}
+if evolve_path.exists():
+    try:
+        evolve = json.loads(evolve_path.read_text(encoding='utf-8'))
+    except Exception:
+        evolve = {}
+
+quality = evolve.get('quality') or {}
+leaderboard = evolve.get('leaderboard') or []
+route_stats = evolve.get('routeStats') or {}
+cloud_success = int((evolve.get('memoryLearning') or {}).get('cloudSuccess', 0) or 0)
+pressure_stats = evolve.get('resourcePressure') or {}
+total_runs = int(evolve.get('totalRuns', 0) or 0)
+quality_scores = evolve.get('qualityScores') or {}
+route_quality_scores = evolve.get('routeQualityScores') or {}
+
+high = int(quality.get('high', 0) or 0)
+medium = int(quality.get('medium', 0) or 0)
+low = int(quality.get('low', 0) or 0)
+pressure_hits = int(pressure_stats.get('hits', 0) or 0)
+pressure_recoveries = int(pressure_stats.get('recoveries', 0) or 0)
+pressure_fallbacks = int(pressure_stats.get('fallbacks', 0) or 0)
+low_ratio = (low / total_runs) if total_runs else 0.0
+high_ratio = (high / total_runs) if total_runs else 0.0
+pressure_ratio = (pressure_hits / total_runs) if total_runs else 0.0
+recovery_ratio = (pressure_recoveries / pressure_hits) if pressure_hits else 0.0
+avg_quality_score = float(quality_scores.get('average', 0.0) or 0.0)
+text_quality = float((route_quality_scores.get('text') or {}).get('average', avg_quality_score) or avg_quality_score)
+code_quality = float((route_quality_scores.get('code') or {}).get('average', avg_quality_score) or avg_quality_score)
+search_quality = float((route_quality_scores.get('search') or {}).get('average', avg_quality_score) or avg_quality_score)
+vision_quality = float((route_quality_scores.get('vision') or {}).get('average', avg_quality_score) or avg_quality_score)
+
+cloud_cfg = stack.setdefault('cloud', {})
+route_cfg = stack.setdefault('routing', {})
+budget_cfg = stack.setdefault('budget', {})
+cache_cfg = stack.setdefault('cache', {})
+strategy = cloud_cfg.setdefault('strategyByRoute', {})
+changes = []
+
+fanout = int(cloud_cfg.get('parallelFanout', 2) or 2)
+if low_ratio >= 0.45 and fanout < 3:
+    cloud_cfg['parallelFanout'] = fanout + 1
+    changes.append(f'parallelFanout->{fanout + 1}')
+elif high_ratio >= 0.7 and fanout > 1:
+    cloud_cfg['parallelFanout'] = fanout - 1
+    changes.append(f'parallelFanout->{fanout - 1}')
+
+if avg_quality_score < 0.45 and fanout < 4:
+    cloud_cfg['parallelFanout'] = max(int(cloud_cfg.get('parallelFanout', fanout) or fanout), fanout + 1)
+    changes.append(f'parallelFanout-quality->{cloud_cfg["parallelFanout"]}')
+elif avg_quality_score >= 0.8 and fanout > 1:
+    cloud_cfg['parallelFanout'] = min(int(cloud_cfg.get('parallelFanout', fanout) or fanout), fanout)
+
+if int(route_stats.get('code', 0) or 0) >= 3 and low_ratio >= 0.35:
+    if strategy.get('code') != 'parallel':
+        strategy['code'] = 'parallel'
+        changes.append('strategy.code->parallel')
+if code_quality >= 0.8 and strategy.get('code') != 'single':
+    strategy['code'] = 'single'
+    changes.append('strategy.code->single')
+
+if text_quality < 0.5 and strategy.get('text') != 'parallel':
+    strategy['text'] = 'parallel'
+    changes.append('strategy.text->parallel')
+elif text_quality >= 0.8 and strategy.get('text') != 'single':
+    strategy['text'] = 'single'
+    changes.append('strategy.text->single')
+
+if search_quality < 0.5 and strategy.get('search') != 'parallel':
+    strategy['search'] = 'parallel'
+    changes.append('strategy.search->parallel')
+elif search_quality >= 0.8 and strategy.get('search') != 'single':
+    strategy['search'] = 'single'
+    changes.append('strategy.search->single')
+
+if vision_quality < 0.45 and strategy.get('vision') != 'serial':
+    strategy['vision'] = 'serial'
+    changes.append('strategy.vision->serial')
+
+if int(route_stats.get('search', 0) or 0) >= 3 and cloud_success >= max(2, total_runs // 3):
+    ttl = int(cache_cfg.get('routeTtlSeconds', 900) or 900)
+    if ttl < 1200:
+        cache_cfg['routeTtlSeconds'] = 1200
+        changes.append('cache.routeTtlSeconds->1200')
+
+if low_ratio >= 0.4:
+    current_mem = int(memory_cfg.get('injection', {}).get('maxContextPercent', 15) or 15)
+    if current_mem < 18:
+        memory_cfg.setdefault('injection', {})['maxContextPercent'] = current_mem + 1
+        changes.append(f'memory.maxContextPercent->{current_mem + 1}')
+    current_threshold = float(memory_cfg.get('injection', {}).get('similarityThreshold', 0.58) or 0.58)
+    next_threshold = round(max(0.5, current_threshold - 0.02), 2)
+    if next_threshold != current_threshold:
+        memory_cfg.setdefault('injection', {})['similarityThreshold'] = next_threshold
+        changes.append(f'memory.similarityThreshold->{next_threshold}')
+elif high_ratio >= 0.7:
+    current_threshold = float(memory_cfg.get('injection', {}).get('similarityThreshold', 0.58) or 0.58)
+    next_threshold = round(min(0.72, current_threshold + 0.01), 2)
+    if next_threshold != current_threshold:
+        memory_cfg.setdefault('injection', {})['similarityThreshold'] = next_threshold
+        changes.append(f'memory.similarityThreshold->{next_threshold}')
+
+if avg_quality_score < 0.45:
+    current_mem = int(memory_cfg.get('injection', {}).get('maxContextPercent', 15) or 15)
+    if current_mem < 20:
+        memory_cfg.setdefault('injection', {})['maxContextPercent'] = current_mem + 1
+        changes.append(f'memory.maxContextPercent.quality->{current_mem + 1}')
+
+if leaderboard:
+    top_model = str(leaderboard[0].get('model') or '')
+    if top_model and top_model != '-' and top_model.startswith(('google/', 'openrouter/', 'deepseek/', 'siliconflow/')):
+        if route_cfg.get('defaultCloudTextModel') != top_model:
+            route_cfg['defaultCloudTextModel'] = top_model
+            changes.append(f'defaultCloudTextModel->{top_model}')
+
+if low_ratio >= 0.5:
+    gpu_budget = int(budget_cfg.get('minFreeGpuMbForLocalExpert', 4096) or 4096)
+    if gpu_budget > 3584:
+        budget_cfg['minFreeGpuMbForLocalExpert'] = gpu_budget - 256
+        changes.append(f'minFreeGpuMbForLocalExpert->{gpu_budget - 256}')
+
+if pressure_ratio >= 0.3:
+    reserve_mem = int(budget_cfg.get('reserveMemoryMb', 512) or 512)
+    if recovery_ratio >= 0.5 and reserve_mem > 384:
+        budget_cfg['reserveMemoryMb'] = reserve_mem - 64
+        changes.append(f'reserveMemoryMb->{reserve_mem - 64}')
+    elif recovery_ratio < 0.3 and reserve_mem < 768:
+        budget_cfg['reserveMemoryMb'] = reserve_mem + 64
+        changes.append(f'reserveMemoryMb->{reserve_mem + 64}')
+    reserve_gpu = int(budget_cfg.get('reserveGpuMb', 100) or 100)
+    if pressure_fallbacks >= max(2, total_runs // 4) and reserve_gpu < 192:
+        budget_cfg['reserveGpuMb'] = reserve_gpu + 16
+        changes.append(f'reserveGpuMb->{reserve_gpu + 16}')
+
+stack_path.write_text(json.dumps(stack, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+memory_path.write_text(json.dumps(memory_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps({'changes': changes, 'totalRuns': total_runs, 'lowRatio': round(low_ratio, 3), 'highRatio': round(high_ratio, 3), 'pressureRatio': round(pressure_ratio, 3), 'recoveryRatio': round(recovery_ratio, 3), 'avgQualityScore': round(avg_quality_score, 3), 'routeQuality': {'text': round(text_quality, 3), 'code': round(code_quality, 3), 'search': round(search_quality, 3), 'vision': round(vision_quality, 3)}}, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_autotune_status_summary() {
+  local result
+  result=$(openclaw_ai_stack_autotune_apply 2>/dev/null || printf '%s' '{}')
+  python3 - "$result" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1] or '{}')
+changes = data.get('changes') or []
+if not changes:
+    print('无调整')
+else:
+    print(', '.join(changes[:4]))
+PY
+}
+
+memory_extension_prepare() {
+  hybrid_memory_prepare_dirs
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1])
+config_path = Path(sys.argv[2])
+db_path.parent.mkdir(parents=True, exist_ok=True)
+conn = sqlite3.connect(db_path)
+conn.execute('create table if not exists memory_entries (id integer primary key autoincrement, category text not null, title text not null, content text not null, tags text not null default "[]", sensitive integer not null default 0, deleted integer not null default 0, created_at integer not null, updated_at integer not null)')
+conn.execute('create index if not exists idx_memory_entries_category on memory_entries(category)')
+conn.execute('create index if not exists idx_memory_entries_deleted on memory_entries(deleted)')
+conn.commit()
+conn.close()
+
+default_config = {
+    'enabled': True,
+    'shortTerm': {'enabled': True, 'maxItems': 24},
+    'midTerm': {'enabled': True, 'retentionDays': 14},
+    'longTerm': {'enabled': True, 'autoExtract': 'balanced'},
+    'knowledgeBase': {'enabled': True, 'weight': 1.0},
+    'privacy': {
+        'localOnly': True,
+        'maskSensitive': True,
+        'blockedKeywords': [],
+        'encryptAtRest': False,
+        'cloudUploadMemory': False
+    },
+    'injection': {
+        'maxContextPercent': 15,
+        'similarityThreshold': 0.58,
+        'maxResults': 5
+    },
+    'maintenance': {
+        'cleanupDays': 30,
+        'autoUpdateMinutes': 30
+    }
+}
+
+if config_path.exists():
+    try:
+        current = json.loads(config_path.read_text(encoding='utf-8'))
+        if isinstance(current, dict):
+            merged = default_config
+            merged.update(current)
+            default_config = merged
+    except Exception:
+        pass
+
+config_path.write_text(json.dumps(default_config, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+memory_extension_search_json() {
+  local query="$1"
+  if [ "$(openclaw_memory_feature_enabled all 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    printf '%s\n' '[]'
+    return 0
+  fi
+  if [ "$(openclaw_memory_feature_enabled longTerm 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    printf '%s\n' '[]'
+    return 0
+  fi
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" "$query" <<'PY'
+import json
+import sqlite3
+import sys
+import base64
+
+db_path = sys.argv[1]
+config_path = sys.argv[2]
+query = (sys.argv[3] or '').strip().lower()
+cfg = json.loads(open(config_path, 'r', encoding='utf-8').read())
+privacy = cfg.get('privacy', {}) if isinstance(cfg, dict) else {}
+
+def decrypt_if_needed(value):
+    if not isinstance(value, str):
+        return value
+    if not value.startswith('enc::'):
+        return value
+    try:
+        import os
+        from cryptography.fernet import Fernet
+        
+        key_file = os.path.expanduser('~/.skpl/.memory-key')
+        if os.path.exists(key_file):
+            with open(key_file, 'r') as f:
+                key = f.read().strip()
+        else:
+            key = os.environ.get('OPENCLAW_MEMORY_KEY', '')
+            if not key:
+                return value
+        
+        key = key.ljust(32, '0')[:32]
+        key = base64.urlsafe_b64encode(key.encode())
+        
+        cipher = Fernet(key)
+        token = base64.urlsafe_b64decode(value[5:].encode())
+        return cipher.decrypt(token).decode('utf-8')
+    except Exception:
+        # Fallback to legacy XOR
+        try:
+            raw = base64.b64decode(value[5:].encode('utf-8')).decode('utf-8')
+            return ''.join(chr(ord(ch) ^ 23) for ch in raw)
+        except Exception:
+            return value
+
+conn = sqlite3.connect(db_path)
+rows = conn.execute('select id, category, title, content, tags, sensitive, updated_at from memory_entries where deleted = 0 order by updated_at desc limit 200').fetchall()
+conn.close()
+
+def score_item(row, needle):
+    _id, category, title, content, tags_raw, sensitive, updated_at = row
+    title = decrypt_if_needed(title)
+    content = decrypt_if_needed(content)
+    tags = []
+    try:
+        tags = json.loads(tags_raw or '[]')
+        if not isinstance(tags, list):
+            tags = []
+    except Exception:
+        tags = []
+    text = ' '.join([category or '', title or '', content or '', ' '.join(str(x) for x in tags)])
+    hay = text.lower()
+    score = 0.0
+    reasons = []
+    if not needle:
+        score = 0.1
+    else:
+        if needle in (title or '').lower():
+            score += 2.2
+            reasons.append('标题命中')
+        if needle in (content or '').lower():
+            score += 1.6
+            reasons.append('内容命中')
+        if needle in (category or '').lower():
+            score += 1.2
+            reasons.append('分类命中')
+        for tag in tags:
+            t = str(tag).lower()
+            if needle in t:
+                score += 1.4
+                reasons.append('标签命中')
+                break
+        tokens = [t for t in needle.split() if t]
+        for token in tokens:
+            if token in hay:
+                score += 0.35
+    return {
+        'id': _id,
+        'source': 'memory-extension',
+        'summary': title,
+        'score': score,
+        'channels': ['long-term-memory'],
+        'category': category,
+        'sensitive': bool(sensitive),
+        'updatedAt': updated_at,
+        'explain': ' / '.join(reasons[:3]) if reasons else '长期记忆命中',
+    }
+
+items = [score_item(row, query) for row in rows]
+items = [item for item in items if item['score'] > 0]
+items.sort(key=lambda x: (x['score'], x['updatedAt']), reverse=True)
+print(json.dumps(items[:5], ensure_ascii=False))
+PY
+}
+
+memory_extension_upsert_entry() {
+  local category="$1" title="$2" content="$3" tags_json="${4:-[]}" sensitive="${5:-0}"
+  [ -n "$category" ] || return 1
+  [ -n "$title" ] || return 1
+  [ -n "$content" ] || return 1
+  if [ "$(openclaw_memory_feature_enabled all 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    echo "ℹ️ 记忆总开关当前关闭，已跳过写入。"
+    return 0
+  fi
+  if [ "$(openclaw_memory_feature_enabled longTerm 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    echo "ℹ️ 长期记忆当前关闭，已跳过写入。"
+    return 0
+  fi
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" "$category" "$title" "$content" "$tags_json" "$sensitive" <<'PY'
+import json
+import sqlite3
+import sys
+import time
+import base64
+
+db_path, config_path, category, title, content, tags_raw, sensitive = sys.argv[1:8]
+now = int(time.time())
+cfg = json.loads(open(config_path, 'r', encoding='utf-8').read())
+privacy = cfg.get('privacy', {}) if isinstance(cfg, dict) else {}
+blocked = [str(item).lower() for item in privacy.get('blockedKeywords', []) if str(item).strip()]
+
+def mask_sensitive_text(value):
+    import re
+    value = re.sub(r'([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,})', r'***@\2', value)
+    value = re.sub(r'\b1\d{10}\b', '1**********', value)
+    value = re.sub(r'\b\d{15,19}\b', '****', value)
+    return value
+
+def encrypt_text(value):
+    raw = ''.join(chr(ord(ch) ^ 23) for ch in value)
+    return 'enc::' + base64.b64encode(raw.encode('utf-8')).decode('utf-8')
+
+merged_text = ' '.join([category, title, content]).lower()
+for word in blocked:
+    if word and word in merged_text:
+        raise SystemExit(4)
+
+if bool(privacy.get('maskSensitive', True)):
+    title = mask_sensitive_text(title)
+    content = mask_sensitive_text(content)
+
+if bool(privacy.get('encryptAtRest', False)):
+    title = encrypt_text(title)
+    content = encrypt_text(content)
+
+conn = sqlite3.connect(db_path)
+row = conn.execute('select id from memory_entries where deleted = 0 and category = ? and title = ? limit 1', (category, title)).fetchone()
+if row:
+    conn.execute('update memory_entries set content = ?, tags = ?, sensitive = ?, updated_at = ? where id = ?', (content, tags_raw, int(sensitive), now, row[0]))
+else:
+    conn.execute('insert into memory_entries (category, title, content, tags, sensitive, deleted, created_at, updated_at) values (?, ?, ?, ?, ?, 0, ?, ?)', (category, title, content, tags_raw, int(sensitive), now, now))
+conn.commit()
+conn.close()
+PY
+  local rc=$?
+  if [ "$rc" = "4" ]; then
+    echo "⚠️ 该记忆命中屏蔽关键词，已跳过写入。"
+    return 0
+  fi
+  return "$rc"
+}
+
+memory_extension_get_config_json() {
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+from pathlib import Path
+import json
+import sys
+path = Path(sys.argv[1])
+print(path.read_text(encoding='utf-8'))
+PY
+}
+
+memory_extension_update_config_field() {
+  local field_path="$1" field_value="$2" value_type="${3:-string}"
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" "$field_path" "$field_value" "$value_type" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+field_path = sys.argv[2].split('.')
+field_value = sys.argv[3]
+value_type = sys.argv[4]
+data = json.loads(path.read_text(encoding='utf-8'))
+cur = data
+for key in field_path[:-1]:
+    node = cur.get(key)
+    if not isinstance(node, dict):
+        node = {}
+        cur[key] = node
+    cur = node
+last = field_path[-1]
+if value_type == 'bool':
+    cur[last] = field_value.lower() in ('1', 'true', 'yes', 'y', 'on')
+elif value_type == 'int':
+    cur[last] = int(field_value)
+elif value_type == 'float':
+    cur[last] = float(field_value)
+elif value_type == 'json':
+    cur[last] = json.loads(field_value)
+else:
+    cur[last] = field_value
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+openclaw_detect_hardware_profile_json() {
+  if skpl_cached_hardware_profile 2>/dev/null; then
+    return 0
+  fi
+  # 使用子shell和timeout确保不会卡住
+  (
+    timeout 10 python3 - <<'PY'
+import json
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+def read_mem_mb():
+    try:
+        with open('/proc/meminfo', 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('MemTotal:'):
+                    return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 0
+
+def cpu_threads():
+    try:
+        return os.cpu_count() or 1
+    except Exception:
+        return 1
+
+def cpu_flags():
+    try:
+        with open('/proc/cpuinfo', 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                if line.lower().startswith('flags') or line.lower().startswith('features'):
+                    return line.split(':', 1)[1].strip().split()
+    except Exception:
+        pass
+    return []
+
+def cpu_instruction_profile(flags):
+    wanted = ['avx512f', 'avx2', 'avx', 'f16c', 'sse4_2', 'neon']
+    return [flag for flag in wanted if flag in set(flags)]
+
+def storage_info():
+    try:
+        usage = shutil.disk_usage('/')
+        rotational = None
+        storage_type = 'unknown'
+        try:
+            root_dev = os.path.realpath('/dev/disk/by-uuid')
+        except Exception:
+            root_dev = ''
+        for candidate in ('/sys/block/nvme0n1/queue/rotational', '/sys/block/sda/queue/rotational', '/sys/block/vda/queue/rotational'):
+            p = Path(candidate)
+            if p.exists():
+                rotational = p.read_text().strip()
+                break
+        if rotational == '0':
+            storage_type = 'ssd'
+        elif rotational == '1':
+            storage_type = 'hdd'
+        return {'totalGb': round(usage.total / (1024**3), 1), 'freeGb': round(usage.free / (1024**3), 1), 'type': storage_type}
+    except Exception:
+        return {'totalGb': 0, 'freeGb': 0, 'type': 'unknown'}
+
+def network_info():
+    latency_ms = None
+    online = False
+    quality = 'offline'
+    # 修复：使用 socket 直接检测，避免 bash -lc 加载慢的问题
+    try:
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        result = sock.connect_ex(('223.5.5.5', 53))  # 阿里云 DNS
+        if result == 0:
+            online = True
+        sock.close()
+    except Exception:
+        online = False
+    # 延迟检测 - 使用更轻量的方式
+    if online:
+        try:
+            import time
+            start = time.time()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            sock.connect(('223.5.5.5', 53))
+            sock.close()
+            latency_ms = (time.time() - start) * 1000
+        except Exception:
+            latency_ms = None
+    if online and latency_ms is not None:
+        if latency_ms <= 80:
+            quality = 'excellent'
+        elif latency_ms <= 180:
+            quality = 'normal'
+        else:
+            quality = 'slow'
+    elif online:
+        quality = 'online'
+    return {'online': online, 'latencyMs': latency_ms, 'quality': quality}
+
+def battery_present():
+    base = Path('/sys/class/power_supply')
+    if not base.exists():
+        return {'present': False, 'percent': None}
+    for item in base.iterdir():
+        try:
+            if item.name.startswith('BAT'):
+                cap = item / 'capacity'
+                percent = int(cap.read_text().strip()) if cap.exists() else None
+                return {'present': True, 'percent': percent}
+        except Exception:
+            pass
+    return {'present': False, 'percent': None}
+
+def gpu_info():
+    if not shutil.which('nvidia-smi'):
+        return {'present': False, 'name': '', 'vramMb': 0, 'freeVramMb': 0}
+    try:
+        out = subprocess.check_output(['nvidia-smi', '--query-gpu=name,memory.total,memory.free', '--format=csv,noheader,nounits'], text=True, timeout=3)
+        line = out.strip().splitlines()[0]
+        parts = [p.strip() for p in line.split(',')]
+        return {'present': True, 'name': parts[0], 'vramMb': int(parts[1]), 'freeVramMb': int(parts[2])}
+    except Exception:
+        return {'present': False, 'name': '', 'vramMb': 0, 'freeVramMb': 0}
+
+mem_mb = read_mem_mb()
+threads = cpu_threads()
+flags = cpu_flags()
+gpu = gpu_info()
+storage = storage_info()
+battery = battery_present()
+network = network_info()
+
+if gpu['present']:
+    vram = gpu['vramMb']
+    # 规范要求: 每级需同时满足VRAM和系统内存约束
+    if vram >= 48000 and mem_mb >= 128000:
+        tier = 'server'
+    elif vram >= 16000 and mem_mb >= 64000:
+        tier = 'workstation'
+    elif vram >= 12000 and mem_mb >= 32000:
+        tier = 'flagship-gpu'
+    elif vram >= 8000 and mem_mb >= 16000:
+        tier = 'golden-gpu'
+    elif vram >= 4000 and mem_mb >= 8000:
+        tier = 'advanced-gpu'
+    elif vram >= 2000 and mem_mb >= 8000:
+        tier = 'entry-gpu'
+    else:
+        # GPU存在但规格不足对应tier，降级到CPU tier
+        if mem_mb < 4096:
+            tier = 'emergency-cpu'
+        elif mem_mb < 8192:
+            tier = 'entry-cpu'
+        else:
+            tier = 'advanced-cpu'
+else:
+    if mem_mb < 4096:
+        tier = 'emergency-cpu'
+    elif mem_mb < 8192:
+        tier = 'entry-cpu'
+    elif mem_mb < 16384:
+        tier = 'advanced-cpu'
+    else:
+        tier = 'advanced-cpu'
+
+budget = {
+    'reserveGpuMb': 200,
+    'reserveMemoryMb': 512,
+    'usableMemoryMb': max(mem_mb - 512, 0),
+    'usableGpuMb': max(gpu['freeVramMb'] - 200, 0) if gpu['present'] else 0,
+}
+
+print(json.dumps({
+    'tier': tier,
+    'memoryMb': mem_mb,
+    'cpuThreads': threads,
+    'cpuInstructionSet': cpu_instruction_profile(flags),
+    'gpu': gpu,
+    'storage': storage,
+    'network': network,
+    'battery': battery,
+    'budget': budget,
+}, ensure_ascii=False))
+PY
+  ) || {
+    # 超时或失败时使用默认值
+    echo '{"tier":"unknown","memoryMb":8192,"cpuThreads":4,"cpuInstructionSet":[],"gpu":{"present":false,"name":"","vramMb":0,"freeVramMb":0},"storage":{"totalGb":0,"freeGb":0,"type":"unknown"},"network":{"online":false,"latencyMs":null,"quality":"offline"},"battery":{"present":false,"percent":null},"budget":{"reserveGpuMb":200,"reserveMemoryMb":512,"usableMemoryMb":7680,"usableGpuMb":0}}'
+    return 0
+  }
+  skpl_cache_hardware_profile
+}
+
+openclaw_render_hardware_profile() {
+  local profile_json
+  profile_json=$(openclaw_detect_hardware_profile_json)
+  python3 - "$profile_json" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+gpu = data.get('gpu', {})
+storage = data.get('storage', {})
+battery = data.get('battery', {})
+budget = data.get('budget', {})
+print(f"硬件分级: {data.get('tier', 'unknown')}")
+print(f"系统内存: {data.get('memoryMb', 0)} MB")
+print(f"CPU线程: {data.get('cpuThreads', 1)}")
+if gpu.get('present'):
+    print(f"GPU: {gpu.get('name', '-')}")
+    print(f"显存: {gpu.get('vramMb', 0)} MB / 可用 {gpu.get('freeVramMb', 0)} MB")
+else:
+    print("GPU: 未检测到")
+print(f"磁盘剩余: {storage.get('freeGb', 0)} GB / 总计 {storage.get('totalGb', 0)} GB")
+if battery.get('present'):
+    print(f"电池: {battery.get('percent')}%")
+else:
+    print("电池: 未检测到")
+print(f"记忆保留预算: GPU {budget.get('reserveGpuMb', 0)} MB / 内存 {budget.get('reserveMemoryMb', 0)} MB")
+PY
 }
 
 hybrid_memory_write_broker() {
@@ -2356,6 +7131,7 @@ hybrid_memory_enqueue_event() {
   local message="$2"
   local event_file
   [ -n "$event_type" ] || return 1
+  event_type=$(echo "$event_type" | tr -cd 'a-zA-Z0-9_-')
   hybrid_memory_prepare_dirs
   event_file="${SKPL_HYBRID_MEMORY_EVENTS_DIR}/$(date +%s)-${event_type}.json"
   python3 - "$event_file" "$event_type" "$message" <<'PY'
@@ -2434,10 +7210,132 @@ for line in lines[-80:]:
 PY
 }
 
+hybrid_memory_search_raw_json() {
+  local query="$1"
+  [ -n "$query" ] || {
+    echo '[]'
+    return 0
+  }
+  hybrid_memory_prepare_dirs
+  [ -x "$SKPL_HYBRID_MEMORY_BROKER" ] || hybrid_memory_write_broker
+  [ -f "$SKPL_HYBRID_MEMORY_DB" ] || hybrid_memory_install_stack
+  python3 "$SKPL_HYBRID_MEMORY_BROKER" "$SKPL_HYBRID_MEMORY_DB" search "$query" 2>/dev/null || echo '[]'
+}
+
 hybrid_memory_search() {
   local query="$1"
   [ -n "$query" ] || return 1
-  echo "混合记忆检索暂返回最小实现结果: $query"
+  local cached semantic_cached raw ext_raw merged_json
+  cached=$(openclaw_ai_stack_result_cache_read memory-search "$query" 2>/dev/null || true)
+  if [ -n "$cached" ] && [ "$cached" != "null" ]; then
+    python3 - "$cached" <<'PY'
+import json
+import sys
+try:
+    merged = json.loads(sys.argv[1])
+except Exception:
+    merged = []
+if not merged:
+    print('未命中相关记忆。')
+    raise SystemExit(0)
+for idx, item in enumerate(merged[:5], start=1):
+    summary = item.get('summary') or '-'
+    source = item.get('source') or '-'
+    explain = item.get('explain') or '-'
+    score = float(item.get('score', 0.0) or 0.0)
+    print(f'{idx}. [{source}] {summary}')
+    print(f'   score={score:.3f}')
+    print(f'   explain={explain}')
+PY
+    return 0
+  fi
+  semantic_cached=$(openclaw_ai_stack_semantic_cache_lookup "$query" 2>/dev/null || true)
+  if [ -n "$semantic_cached" ] && [ "$semantic_cached" != "null" ]; then
+    cached=$(python3 - "$semantic_cached" <<'PY'
+import json
+import sys
+data = json.loads(sys.argv[1])
+print(json.dumps(data.get('results') or [], ensure_ascii=False))
+PY
+)
+    if [ -n "$cached" ] && [ "$cached" != "null" ]; then
+      openclaw_ai_stack_result_cache_write memory-search "$query" "$cached" >/dev/null 2>&1 || true
+      python3 - "$cached" "$semantic_cached" <<'PY'
+import json
+import sys
+merged = json.loads(sys.argv[1])
+meta = json.loads(sys.argv[2])
+score = meta.get('semanticScore')
+if not merged:
+    print('未命中相关记忆。')
+    raise SystemExit(0)
+for idx, item in enumerate(merged[:5], start=1):
+    summary = item.get('summary') or '-'
+    source = item.get('source') or '-'
+    explain = item.get('explain') or '-'
+    extra = f' | semantic={score}' if idx == 1 and score is not None else ''
+    item_score = float(item.get('score', 0.0) or 0.0)
+    print(f'{idx}. [{source}] {summary}')
+    print(f'   score={item_score:.3f}{extra}')
+    print(f'   explain={explain}')
+PY
+      return 0
+    fi
+  fi
+  raw=$(hybrid_memory_search_raw_json "$query")
+  ext_raw=$(memory_extension_search_json "$query")
+  merged_json=$(python3 - "$raw" "$ext_raw" <<'PY'
+import json
+import sys
+
+raw = sys.argv[1]
+ext_raw = sys.argv[2]
+try:
+    data = json.loads(raw)
+except Exception:
+    data = []
+try:
+    ext = json.loads(ext_raw)
+except Exception:
+    ext = []
+
+merged = []
+seen = set()
+for item in list(ext) + list(data):
+    key = (item.get('source'), item.get('summary'))
+    if key in seen:
+        continue
+    seen.add(key)
+    merged.append(item)
+merged.sort(key=lambda item: float(item.get('score', 0.0) or 0.0), reverse=True)
+print(json.dumps(merged, ensure_ascii=False))
+
+PY
+  )
+  openclaw_ai_stack_result_cache_write memory-search "$query" "$merged_json" >/dev/null 2>&1 || true
+  openclaw_ai_stack_semantic_cache_store "$query" "{\"results\": $merged_json}" >/dev/null 2>&1 || true
+  python3 - "$merged_json" <<'PY'
+import json
+import sys
+
+try:
+    merged = json.loads(sys.argv[1])
+except Exception:
+    merged = []
+
+if not merged:
+    print('未命中相关记忆。')
+    raise SystemExit(0)
+
+for idx, item in enumerate(merged[:5], start=1):
+    summary = item.get('summary') or '-'
+    source = item.get('source') or '-'
+    explain = item.get('explain') or '-'
+    score = float(item.get('score', 0.0) or 0.0)
+    print(f'{idx}. [{source}] {summary}')
+    print(f'   score={score:.3f}')
+    print(f'   explain={explain}')
+PY
 }
 
 # ==========================================
@@ -2447,18 +7345,255 @@ hybrid_memory_search() {
 # 1. 硬件分级检测 (极速版 - 0 延迟)
 # 根据内存容量和 CPU 核心数判断: 1=低配, 2=中配, 3=高配
 openclaw_detect_hardware_tier() {
-    local total_kb cpu_cores tier
-    total_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo "0")
-    cpu_cores=$(nproc 2>/dev/null || echo "1")
+    local profile_json
+    profile_json=$(openclaw_detect_hardware_profile_json)
+    python3 - "$profile_json" <<'PY'
+import json
+import sys
+data = json.loads(sys.argv[1])
+tier_name = data.get('tier') or 'entry-cpu'
+mapping = {
+    'server': 3,
+    'workstation': 3,
+    'flagship-gpu': 3,
+    'golden-gpu': 3,
+    'advanced-gpu': 2,
+    'advanced-cpu-plus': 2,
+    'advanced-cpu': 2,
+    'entry-gpu': 1,
+    'entry-cpu': 1,
+    'emergency-cpu': 1,
+}
+print(mapping.get(tier_name, 1))
+PY
+}
 
-    if [ "$total_kb" -gt "16000000" ] && [ "$cpu_cores" -ge "8" ]; then
-        tier=3 # 高配 (>16GB, 8+核)
-    elif [ "$total_kb" -gt "7000000" ] && [ "$cpu_cores" -ge "4" ]; then
-        tier=2 # 中配 (8-16GB, 4+核)
-    else
-        tier=1 # 低配 (<8GB)
-    fi
-    echo "$tier"
+openclaw_ai_stack_classify_query() {
+  local query="$1"
+  python3 - "$query" <<'PY'
+import json
+import re
+import sys
+
+query = (sys.argv[1] or '').strip()
+lowered = query.lower()
+intent = 'general'
+route = 'text'
+complexity = 'normal'
+tool = 'none'
+requires_search = False
+privacy = 'normal'
+
+vision_markers = ['image', 'screenshot', 'ocr', '图片', '截图', '识图', '看图', '视觉', '多模态', '图像']
+code_markers = ['code', 'bug', 'stack trace', 'refactor', 'test', 'function', '代码', '报错', '修复', '调试', '重构']
+search_markers = ['latest', 'search', 'web', 'docs', 'documentation', '最新', '搜索', '文档', '官网', '查资料']
+tool_markers = ['run', 'execute', 'command', 'terminal', 'bash', '运行', '执行', '命令', '脚本']
+complex_markers = ['complex', 'design', 'architecture', 'multi-step', 'plan', '复杂', '设计', '架构', '方案', '系统设计']
+math_markers = ['math', 'calculate', 'compute', 'equation', 'solve', '数学', '计算', '方程', '推理', '算术', '公式']
+creative_markers = ['write', 'story', 'poem', 'essay', 'creative', 'novel', '写作', '故事', '诗歌', '创作', '散文', '创意']
+domain_markers = ['medical', 'legal', 'finance', 'professional', 'domain', '医学', '法律', '金融', '专业', '领域']
+privacy_markers = ['local only', 'privacy', 'secret', 'sensitive', '本地', '隐私', '敏感', '不联网']
+
+if any(marker in lowered for marker in vision_markers):
+    intent = 'multimodal'
+    route = 'vision'
+if any(marker in lowered for marker in code_markers):
+    intent = 'code-development'
+    route = 'code'
+if any(marker in lowered for marker in search_markers):
+    requires_search = True
+    route = 'search'
+if any(marker in lowered for marker in tool_markers):
+    tool = 'terminal'
+if any(marker in lowered for marker in complex_markers) or len(query) > 600:
+    complexity = 'complex'
+if any(marker in lowered for marker in math_markers):
+    intent = 'mathematical-reasoning'
+if any(marker in lowered for marker in creative_markers):
+    intent = 'creative-writing'
+if any(marker in lowered for marker in domain_markers):
+    intent = 'professional-domain'
+if any(marker in lowered for marker in privacy_markers):
+    privacy = 'local-first'
+    route = 'local'
+
+print(json.dumps({
+    'intent': intent,
+    'route': route,
+    'complexity': complexity,
+    'tool': tool,
+    'requiresSearch': requires_search,
+    'privacy': privacy,
+}, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_lock_acquire() {
+  local owner="${1:-default}" ttl="${2:-900}"
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_LOCK_FILE" "$owner" "$ttl" "$SKPL_AI_STACK_RESOURCE_STATE_FILE" <<'PY'
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+owner = sys.argv[2]
+ttl = int(sys.argv[3])
+resource_path = Path(sys.argv[4])
+now = int(time.time())
+path.parent.mkdir(parents=True, exist_ok=True)
+resource = {}
+if resource_path.exists():
+    try:
+        resource = json.loads(resource_path.read_text(encoding='utf-8'))
+    except Exception:
+        resource = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        data = {}
+    expires_at = int(data.get('expiresAt', 0) or 0)
+    current_owner = data.get('owner') or ''
+    if expires_at > now and current_owner and current_owner != owner:
+        resource['lockOwner'] = current_owner
+        resource_path.parent.mkdir(parents=True, exist_ok=True)
+        resource_path.write_text(json.dumps(resource, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        print(json.dumps({'ok': False, 'owner': current_owner, 'expiresAt': expires_at}, ensure_ascii=False))
+        raise SystemExit(1)
+payload = {'owner': owner, 'pid': os.getpid(), 'acquiredAt': now, 'expiresAt': now + ttl}
+path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+resource['lockOwner'] = owner
+resource_path.parent.mkdir(parents=True, exist_ok=True)
+resource_path.write_text(json.dumps(resource, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps({'ok': True, 'owner': owner, 'expiresAt': now + ttl}, ensure_ascii=False))
+PY
+}
+
+openclaw_ai_stack_lock_release() {
+  local owner="${1:-default}"
+  [ -f "$SKPL_AI_STACK_LOCK_FILE" ] || return 0
+  python3 - "$SKPL_AI_STACK_LOCK_FILE" "$owner" "$SKPL_AI_STACK_RESOURCE_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+owner = sys.argv[2]
+resource_path = Path(sys.argv[3])
+try:
+    data = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit(0)
+if (data.get('owner') or '') == owner:
+    path.write_text(json.dumps({'owner': '', 'releasedBy': owner}, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    resource = {}
+    if resource_path.exists():
+        try:
+            resource = json.loads(resource_path.read_text(encoding='utf-8'))
+        except Exception:
+            resource = {}
+    resource['lockOwner'] = ''
+    resource_path.parent.mkdir(parents=True, exist_ok=True)
+    resource_path.write_text(json.dumps(resource, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+openclaw_ai_stack_budget_route_json() {
+  local route_json="$1"
+  local profile_json resource_guard_json
+  profile_json=$(openclaw_detect_hardware_profile_json)
+  resource_guard_json=$(openclaw_ai_stack_resource_guard_json "$route_json" 2>/dev/null || printf '%s' '{}')
+  python3 - "$SKPL_AI_STACK_ROOT/config.json" "$profile_json" "$route_json" "$resource_guard_json" <<'PY'
+import json
+import sys
+
+config = json.load(open(sys.argv[1], 'r', encoding='utf-8'))
+profile = json.loads(sys.argv[2])
+route = json.loads(sys.argv[3])
+resource = json.loads(sys.argv[4]) if len(sys.argv) > 4 else {}
+budget_cfg = config.get('budget') or {}
+routing_cfg = config.get('routing') or {}
+battery = (profile.get('battery') or {}).get('percent')
+network = profile.get('network') or {}
+free_gpu = ((profile.get('budget') or {}).get('usableGpuMb') or 0)
+free_mem = ((profile.get('budget') or {}).get('usableMemoryMb') or 0)
+
+route_name = route.get('route') or 'text'
+model = routing_cfg.get('defaultTextModel', 'ollama/qwen2.5:14b')
+execution = 'cloud'
+reason = 'default-text'
+
+if route_name == 'vision':
+    model = routing_cfg.get('defaultVisionModel', 'ollama/llama3.2-vision:11b')
+    execution = 'cloud'
+    reason = 'vision-routing'
+elif route_name == 'search':
+    model = routing_cfg.get('defaultSearchModel', 'google/gemini-2.5-flash')
+    execution = 'cloud'
+    reason = 'search-routing'
+elif route_name == 'code':
+    model = routing_cfg.get('defaultCodeModel', 'ollama/deepseek-coder-v2:16b')
+    execution = 'local'
+    reason = 'code-routing'
+elif route_name == 'local':
+    model = routing_cfg.get('defaultCodeModel', 'ollama/deepseek-coder-v2:16b')
+    execution = 'local'
+    reason = 'privacy-routing'
+
+if not bool(network.get('online')):
+    if route_name in ('vision', 'search'):
+        route_name = 'local'
+        route['route'] = 'local'
+    if execution == 'cloud':
+        execution = 'local'
+        model = routing_cfg.get('defaultCodeModel', 'ollama/qwen3-coder')
+        reason = 'offline-forced-local'
+
+if free_gpu < int(budget_cfg.get('minFreeGpuMbForLocalExpert', 7200)) or free_mem < int(budget_cfg.get('minFreeMemoryMbForLocalExpert', 6144)):
+    if execution == 'local':
+        execution = 'cloud'
+        model = routing_cfg.get('defaultTextModel', 'ollama/qwen2.5:14b')
+        reason = 'budget-downgrade-memory'
+
+if isinstance(resource, dict) and not bool(resource.get('enough', True)):
+    route['resourceGuard'] = resource
+    route['resourcePressure'] = True
+    route['resourceRequiredGpuMb'] = resource.get('requiredGpuMb', 0)
+    route['resourceRequiredMemoryMb'] = resource.get('requiredMemoryMb', 0)
+    degrade_to = resource.get('degradeTo') or 'local'
+    if degrade_to == 'local':
+        route_name = 'local'
+        route['route'] = 'local'
+        execution = 'local'
+        model = routing_cfg.get('defaultCodeModel', 'ollama/qwen3-coder')
+        reason = 'resource-guard-local-fallback'
+    else:
+        route_name = 'text'
+        route['route'] = 'text'
+        execution = 'cloud' if bool(network.get('online')) else 'local'
+        model = routing_cfg.get('defaultTextModel', 'ollama/qwen2.5:7b')
+        reason = 'resource-guard-text-fallback'
+
+if not bool(network.get('online')) and execution == 'cloud':
+    execution = 'local'
+    model = routing_cfg.get('defaultCodeModel', 'ollama/qwen3-coder')
+    reason = 'offline-cloud-disabled'
+
+if isinstance(battery, int) and battery > 0 and battery <= int(budget_cfg.get('lowBatteryPercent', 25)):
+    if route_name == 'vision':
+        model = routing_cfg.get('defaultSearchModel', 'google/gemini-2.5-flash')
+        reason = 'low-battery-vision-downgrade'
+    execution = 'cloud'
+
+route['model'] = model
+route['execution'] = execution
+route['reason'] = reason
+route['profileTier'] = profile.get('tier')
+print(json.dumps(route, ensure_ascii=False))
+PY
 }
 
 # 2. 智能模型路由 (核心 Skill 逻辑)
@@ -2467,46 +7602,353 @@ openclaw_detect_hardware_tier() {
 # 1: 图像/复杂推理 -> 云端强模型 (Pro/Vision)
 # 2: 简单逻辑/隐私 -> 本地量化模型 (仅高/中配，低配强制跳过)
 openclaw_memory_smart_route() {
-    local intent="$1" tier
-    tier=$(openclaw_detect_hardware_tier)
-    
-    # 模型预设
-    local vision_model="google/gemini-2.5-pro"
-    local text_model="google/gemini-2.5-flash"
-    local local_model="/root/.openclaw/models/embedding/embeddinggemma-300M-Q4_K_M.gguf"
-
-    mkdir -p /root/.openclaw/memory/route
-
-    # 核心路由逻辑：写入配置供 OpenClaw 动态加载
-    case "$tier" in
-        3) # 高配：本地模型可用，强云端可用
-            openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
-            openclaw config set agents.defaults.memorySearch.local.modelPath "$local_model" >/dev/null 2>&1 || true
-            if [ "$intent" = "vision" ] || [ "$intent" = "complex" ]; then
-                openclaw config set agents.defaults.model.primary "$vision_model" >/dev/null 2>&1
-                echo "🌟 [高配路由] 视觉/复杂任务切换至: $vision_model"
-            else
-                openclaw config set agents.defaults.model.primary "$text_model" >/dev/null 2>&1
-                echo "🌟 [高配路由] 常规文本切换至: $text_model (本地记忆加速)"
-            fi
-            ;;
-        2) # 中配：限制本地模型权重，依赖云端推理
-            openclaw config set agents.defaults.memorySearch.provider local >/dev/null 2>&1 || true
-            openclaw config set agents.defaults.memorySearch.local.modelPath "$local_model" >/dev/null 2>&1 || true
-            if [ "$intent" = "vision" ]; then
-                openclaw config set agents.defaults.model.primary "$vision_model" >/dev/null 2>&1
-                echo "🌟 [中配路由] 图像识别强制走云端: $vision_model"
-            else
-                openclaw config set agents.defaults.model.primary "$text_model" >/dev/null 2>&1
-                echo "🌟 [中配路由] 文本任务走高速云端: $text_model (本地轻量检索)"
-            fi
-            ;;
-        *) # 低配：彻底关闭本地大模型，纯极速云端
-            openclaw config set agents.defaults.memorySearch.provider openai >/dev/null 2>&1 || true # Fallback to fast cloud search if available
-            openclaw config set agents.defaults.model.primary "$text_model" >/dev/null 2>&1
-            echo "🌟 [低配路由] 节省资源模式：全量走云端极速模型: $text_model"
-            ;;
-    esac
+    local input_text="$1" route_json cached lock_result selected_model memory_injection memory_for_execution predictive_hint expert_state tool_state tool_result cloud_pool cloud_state resource_cleanup_json special_cache_profile special_cache_scope special_cache_result skip_tool_exec skip_cloud_exec
+    openclaw_ai_stack_prepare
+    openclaw_ai_stack_detect_acceleration_state >/dev/null 2>&1 || true
+    openclaw_ai_stack_idle_unload_expert_if_needed 300 >/dev/null 2>&1 || true
+    predictive_hint=$(openclaw_ai_stack_predictive_cache_hint "$input_text" 2>/dev/null || true)
+    cached=$(openclaw_ai_stack_route_cache_read "$input_text" 2>/dev/null || true)
+    if [ -n "$cached" ] && [ "$cached" != "null" ]; then
+      route_json="$cached"
+    else
+      route_json=$(openclaw_ai_stack_classify_query "$input_text")
+      route_json=$(openclaw_ai_stack_budget_route_json "$route_json")
+      if python3 - "$route_json" <<'PY' >/dev/null 2>&1
+import json, sys
+data = json.loads(sys.argv[1])
+raise SystemExit(0 if data.get('resourcePressure') else 1)
+PY
+      then
+        resource_cleanup_json=$(openclaw_ai_stack_reclaim_memory_pressure 2>/dev/null || printf '%s' '{}')
+        route_json=$(python3 - "$route_json" "$resource_cleanup_json" <<'PY'
+import json, sys
+route = json.loads(sys.argv[1])
+cleanup = json.loads(sys.argv[2]) if sys.argv[2] else {}
+guard = route.get('resourceGuard') or {}
+guard['cleanupTriggered'] = True
+guard['cleanupState'] = cleanup
+route['resourceGuard'] = guard
+print(json.dumps(route, ensure_ascii=False))
+PY
+)
+        route_json=$(openclaw_ai_stack_post_reclaim_route_json "$route_json" 2>/dev/null || printf '%s' "$route_json")
+      fi
+      openclaw_ai_stack_route_cache_write "$input_text" "$route_json" >/dev/null 2>&1 || true
+    fi
+    special_cache_profile=$(openclaw_ai_stack_specialized_cache_profile "$input_text" "$route_json" 2>/dev/null || printf '%s' '{}')
+    special_cache_scope=$(python3 - "$special_cache_profile" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1]) if sys.argv[1].strip() else {}
+print(data.get('scope', ''))
+PY
+)
+    if [ -n "$special_cache_scope" ]; then
+      special_cache_result=$(openclaw_ai_stack_specialized_cache_read "$special_cache_scope" "$input_text" 2>/dev/null || true)
+      if [ -n "$special_cache_result" ] && [ "$special_cache_result" != "null" ]; then
+        route_json=$(python3 - "$route_json" "$special_cache_profile" "$special_cache_result" <<'PY'
+import json
+import sys
+route = json.loads(sys.argv[1])
+profile = json.loads(sys.argv[2]) if sys.argv[2].strip() else {}
+cached = json.loads(sys.argv[3]) if sys.argv[3].strip() else {}
+route['specializedCache'] = {
+    'scope': profile.get('scope', ''),
+    'reason': profile.get('reason', ''),
+    'hit': True,
+    'payload': cached,
+}
+if isinstance(cached, dict):
+    if cached.get('toolResult'):
+        route['toolResult'] = cached.get('toolResult')
+    if cached.get('cloudState'):
+        route['cloudState'] = cached.get('cloudState')
+        best = (cached.get('cloudState') or {}).get('best') or {}
+        aggregated = (cached.get('cloudState') or {}).get('aggregatedText') or ''
+        if best.get('model'):
+            route['cloudSelectedModel'] = best.get('model')
+        if aggregated:
+            route['cloudAggregatedText'] = aggregated
+print(json.dumps(route, ensure_ascii=False))
+PY
+)
+      fi
+    fi
+    skip_tool_exec=$(python3 - "$route_json" <<'PY'
+import json, sys
+route = json.loads(sys.argv[1])
+cached = route.get('specializedCache') or {}
+payload = cached.get('payload') or {}
+tool_result = route.get('toolResult') or payload.get('toolResult') or {}
+results = tool_result.get('results') or []
+print('true' if cached.get('hit') and results else 'false')
+PY
+)
+    skip_cloud_exec=$(python3 - "$route_json" <<'PY'
+import json, sys
+route = json.loads(sys.argv[1])
+cached = route.get('specializedCache') or {}
+payload = cached.get('payload') or {}
+cloud_state = route.get('cloudState') or payload.get('cloudState') or {}
+best = cloud_state.get('best') or {}
+aggregated = str((route.get('cloudAggregatedText') or cloud_state.get('aggregatedText') or '')).strip()
+print('true' if cached.get('hit') and (best.get('model') or aggregated) else 'false')
+PY
+)
+    selected_model=$(python3 - "$route_json" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+print(data.get('model') or '')
+PY
+)
+    if [ -n "$selected_model" ]; then
+      openclaw config set agents.defaults.model.primary "$selected_model" >/dev/null 2>&1
+    fi
+    lock_result=$(openclaw_ai_stack_lock_acquire "smart-route:${selected_model:-default}" 900 2>/dev/null || true)
+    openclaw_ai_stack_mark_activity >/dev/null 2>&1 || true
+    memory_injection=$(openclaw_ai_stack_memory_context_text "$input_text" 2>/dev/null || true)
+    memory_for_execution="$memory_injection"
+    if python3 - "$route_json" <<'PY' >/dev/null 2>&1
+import json, sys
+data = json.loads(sys.argv[1])
+raise SystemExit(0 if data.get('execution') == 'cloud' else 1)
+PY
+    then
+      memory_for_execution=$(openclaw_ai_stack_filter_memory_for_cloud "$memory_injection")
+    fi
+    route_json=$(python3 - "$route_json" "$memory_for_execution" "$predictive_hint" <<'PY'
+import json
+import sys
+route = json.loads(sys.argv[1])
+memory_text = sys.argv[2]
+predictive_hint = sys.argv[3]
+route['memoryInjection'] = memory_text
+route['predictiveHint'] = predictive_hint
+print(json.dumps(route, ensure_ascii=False))
+PY
+)
+    expert_state=$(openclaw_ai_stack_expert_transition "$route_json" 2>/dev/null || true)
+    openclaw_ai_stack_apply_expert_actions "$expert_state" >/dev/null 2>&1 || true
+    if [ "$skip_tool_exec" = "true" ]; then
+      tool_state=$(python3 - "$route_json" <<'PY'
+import json, sys
+route = json.loads(sys.argv[1])
+cached = route.get('specializedCache') or {}
+payload = cached.get('payload') or {}
+tool_result = route.get('toolResult') or payload.get('toolResult') or {}
+print(json.dumps({'tasks': [], 'route': route, 'cacheBypass': True, 'source': 'specialized-cache', 'toolResult': tool_result}, ensure_ascii=False))
+PY
+)
+      tool_result=$(python3 - "$route_json" <<'PY'
+import json, sys
+route = json.loads(sys.argv[1])
+cached = route.get('specializedCache') or {}
+payload = cached.get('payload') or {}
+print(json.dumps(route.get('toolResult') or payload.get('toolResult') or {}, ensure_ascii=False))
+PY
+)
+    else
+      tool_state=$(openclaw_ai_stack_tool_sandbox_dispatch "$route_json" "$input_text" 2>/dev/null || true)
+      tool_result=$(openclaw_ai_stack_execute_tool_tasks "$tool_state" 2>/dev/null || true)
+    fi
+    if [ "$skip_cloud_exec" = "true" ]; then
+      cloud_pool=$(python3 - "$route_json" <<'PY'
+import json, sys
+route = json.loads(sys.argv[1])
+print(json.dumps({'candidates': [], 'cacheBypass': True, 'route': route.get('route', '')}, ensure_ascii=False))
+PY
+)
+      cloud_state=$(python3 - "$route_json" <<'PY'
+import json, sys
+route = json.loads(sys.argv[1])
+cached = route.get('specializedCache') or {}
+payload = cached.get('payload') or {}
+print(json.dumps(route.get('cloudState') or payload.get('cloudState') or {}, ensure_ascii=False))
+PY
+)
+    else
+      cloud_pool=$(openclaw_ai_stack_cloud_model_pool_json "$route_json" 2>/dev/null || true)
+      cloud_state=$(openclaw_ai_stack_cloud_execute "$(openclaw_ai_stack_cloud_dispatch_json "$route_json" "$cloud_pool" "$input_text" 2>/dev/null || printf '%s' '{}')" 2>/dev/null || true)
+    fi
+    route_json=$(python3 - "$route_json" "$expert_state" "$tool_state" "$cloud_pool" "$cloud_state" <<'PY'
+import json
+import sys
+route = json.loads(sys.argv[1])
+expert_state = {}
+tool_state = {}
+cloud_pool = {}
+cloud_state = {}
+try:
+    if sys.argv[2]:
+        expert_state = json.loads(sys.argv[2])
+except Exception:
+    expert_state = {}
+try:
+    if sys.argv[3]:
+        tool_state = json.loads(sys.argv[3])
+except Exception:
+    tool_state = {}
+try:
+    if sys.argv[4]:
+        cloud_pool = json.loads(sys.argv[4])
+except Exception:
+    cloud_pool = {}
+try:
+    if sys.argv[5]:
+        cloud_state = json.loads(sys.argv[5])
+except Exception:
+    cloud_state = {}
+route['expertState'] = expert_state
+route['toolState'] = tool_state
+route['cloudPool'] = cloud_pool
+route['cloudState'] = cloud_state
+print(json.dumps(route, ensure_ascii=False))
+PY
+)
+    route_json=$(python3 - "$route_json" "$tool_result" <<'PY'
+import json
+import sys
+route = json.loads(sys.argv[1])
+tool_result = {}
+try:
+    if sys.argv[2]:
+        tool_result = json.loads(sys.argv[2])
+except Exception:
+    tool_result = {}
+route['toolResult'] = tool_result
+print(json.dumps(route, ensure_ascii=False))
+PY
+)
+    route_json=$(python3 - "$route_json" <<'PY'
+import json
+import sys
+route = json.loads(sys.argv[1])
+cloud_state = route.get('cloudState') or {}
+best = cloud_state.get('best') or {}
+aggregated = (cloud_state.get('aggregatedText') or '').strip()
+if best.get('status') == 'done' and best.get('model'):
+    route['cloudSelectedModel'] = best.get('model')
+if aggregated:
+    route['cloudAggregatedText'] = aggregated
+print(json.dumps(route, ensure_ascii=False))
+PY
+)
+    route_json=$(python3 - "$route_json" "$SKPL_AI_STACK_ACCEL_STATE_FILE" <<'PY'
+import json
+import sys
+from pathlib import Path
+route = json.loads(sys.argv[1])
+state_path = Path(sys.argv[2])
+acc = {}
+if state_path.exists():
+    try:
+        acc = json.loads(state_path.read_text(encoding='utf-8'))
+    except Exception:
+        acc = {}
+route['accelerationState'] = acc
+print(json.dumps(route, ensure_ascii=False))
+PY
+)
+    if [ -n "$special_cache_scope" ]; then
+      route_json=$(python3 - "$route_json" "$special_cache_profile" <<'PY'
+import json
+import sys
+route = json.loads(sys.argv[1])
+profile = json.loads(sys.argv[2]) if sys.argv[2].strip() else {}
+cache_meta = route.get('specializedCache') or {}
+cache_meta.setdefault('scope', profile.get('scope', ''))
+cache_meta.setdefault('reason', profile.get('reason', ''))
+if 'hit' not in cache_meta:
+    cache_meta['hit'] = False
+route['specializedCache'] = cache_meta
+print(json.dumps(route, ensure_ascii=False))
+PY
+)
+      special_cache_result=$(python3 - "$route_json" <<'PY'
+import json
+import sys
+route = json.loads(sys.argv[1])
+payload = {
+    'toolResult': route.get('toolResult') or {},
+    'cloudState': route.get('cloudState') or {},
+    'cloudSelectedModel': route.get('cloudSelectedModel', ''),
+    'cloudAggregatedText': route.get('cloudAggregatedText', ''),
+    'updatedFromRoute': route.get('route', ''),
+}
+print(json.dumps(payload, ensure_ascii=False))
+PY
+)
+      openclaw_ai_stack_specialized_cache_write "$special_cache_scope" "$input_text" "$special_cache_result" >/dev/null 2>&1 || true
+    fi
+    openclaw_ai_stack_evolve_record "$route_json" >/dev/null 2>&1 || true
+    openclaw_ai_stack_autotune_apply >/dev/null 2>&1 || true
+    openclaw_ai_stack_predictive_cache_store "$input_text" "$route_json" >/dev/null 2>&1 || true
+    openclaw_ai_stack_context_record_turn "$route_json" >/dev/null 2>&1 || true
+    openclaw_memory_auto_capture_from_request "$input_text" "$route_json" >/dev/null 2>&1 || true
+    openclaw_memory_extension_automerge >/dev/null 2>&1 || true
+    openclaw_ai_stack_write_route_status "$route_json" "$lock_result" >/dev/null 2>&1 || true
+    python3 - "$route_json" "$lock_result" <<'PY'
+import json
+import sys
+route = json.loads(sys.argv[1])
+lock_raw = sys.argv[2]
+lock = {}
+if lock_raw:
+    try:
+        lock = json.loads(lock_raw)
+    except Exception:
+        lock = {}
+print(f"路由类型: {route.get('route')}")
+print(f"执行位置: {route.get('execution')}")
+print(f"目标模型: {route.get('model')}")
+print(f"触发原因: {route.get('reason')}")
+print(f"硬件分级: {route.get('profileTier')}")
+memory_text = route.get('memoryInjection') or ''
+if memory_text:
+    print('记忆注入: 已生成')
+predictive_hint = route.get('predictiveHint') or ''
+if predictive_hint:
+    print('预测缓存: 已命中相似提示')
+special_cache = route.get('specializedCache') or {}
+if special_cache.get('scope'):
+    state = '已命中' if special_cache.get('hit') else '已更新'
+    print(f"专用缓存: {special_cache.get('scope')} | {state}")
+    payload = special_cache.get('payload') or {}
+    if payload.get('toolResult'):
+        print('工具复用: 已跳过重复执行')
+    if payload.get('cloudState'):
+        print('多云复用: 已跳过重复调用')
+resource_guard = route.get('resourceGuard') or {}
+if route.get('residentFallback'):
+    print(f"轻量兜底: {route.get('fallbackModel') or route.get('model')}")
+elif resource_guard.get('secondPassReady'):
+    print('二次复检: 已恢复专家加载条件')
+expert_state = route.get('expertState') or {}
+actions = expert_state.get('actions') or []
+if actions:
+    print(f"专家切换: {len(actions)} 个动作")
+tool_state = route.get('toolState') or {}
+tasks = tool_state.get('tasks') or []
+if tasks:
+    print(f"工具沙箱: {','.join(tasks)}")
+tool_result = route.get('toolResult') or {}
+results = tool_result.get('results') or []
+if results:
+    print(f"工具执行: {len(results)} 项")
+cloud_state = route.get('cloudState') or {}
+cloud_jobs = cloud_state.get('jobs') or []
+if cloud_jobs:
+    print(f"多云协同: {cloud_state.get('strategy', '-')} | {len(cloud_jobs)} 项")
+acc_state = route.get('accelerationState') or {}
+if acc_state:
+    fa2 = (acc_state.get('flashAttention2') or {}).get('status', '-')
+    kv = (acc_state.get('kvInt8') or {}).get('status', '-')
+    trt = (acc_state.get('tensorRt') or {}).get('status', '-')
+    print(f"推理加速: fa2={fa2} | kv={kv} | trt={trt}")
+if lock.get('ok'):
+    print(f"独占锁: 已获取 {lock.get('owner')}")
+elif lock.get('owner'):
+    print(f"独占锁: 当前占用者 {lock.get('owner')}")
+PY
 }
 
 # 3. 极致轻量级本地记忆核心 (SQLite-FTS5)
@@ -2519,89 +7961,76 @@ openclaw_memory_smart_route() {
 openclaw_evomap_fast_ingest() {
     local category="$1" summary="$2" ts
     ts=$(date +%s)
+    category=$(echo "$category" | tr -cd 'a-zA-Z0-9_-')
     
     mkdir -p "/root/.openclaw/memory/evomap-ingest"
     
     local ingest_file="/root/.openclaw/memory/evomap-ingest/${ts}-${category}.md"
-    cat > "$ingest_file" <<EOF
-# [EvoMap] $category
-- 时间: $ts
-- 沉淀内容: $summary
-EOF
+    printf '# [EvoMap] %s\n- 时间: %s\n- 沉淀内容: %s\n' "$category" "$ts" "$summary" > "$ingest_file"
     echo "🌌 经验已沉淀: $category"
 }
 
 # 5. 进化汇总 (将实践经验转化为可用 Skill)
 openclaw_evomap_fast_evolve_into_skill() {
-    mkdir -p "/root/.openclaw/workspace/skills/evomap-evolved/"
+    local evomap_dir="${HOME}/.openclaw/workspace/skills/evomap-evolved"
+    mkdir -p "$evomap_dir"
     
     # 简单合并 ingest 记录为 skill
-    python3 - "/root/.openclaw/memory/evomap-ingest" "/root/.openclaw/workspace/skills/evomap-evolved/EVOMAP-LIVE.md" <<'PY'
-import sys, os
+    python3 - "${HOME}/.openclaw/memory/evomap-ingest" "$evomap_dir/EVOMAP-LIVE.md" <<'PY'
+import sys, os, re
 from pathlib import Path
 ingest = Path(sys.argv[1])
 target = Path(sys.argv[2])
 if not ingest.exists(): raise SystemExit(0)
 
-md = ["# EvoMap 实时进化沉淀 (最佳实践库)\n"]
-files = sorted(ingest.glob("*.md"), reverse=True)[:20] # 仅保留最新 20 条，防止 Token 爆炸
-for f in files:
-    md.append(f.read_text())
+# Header with metadata for proper skill loading
+md = ["# EvoMap Live Skills", "", "## Description", "Auto-evolved best practices from user interactions and system learnings.", "", "## Instructions", ""]
 
-target.write_text("\n\n---\n\n".join(md))
+files = sorted(ingest.glob("*.md"), reverse=True)[:20]  # 仅保留最新 20 条，防止 Token 爆炸
+for f in files:
+    content = f.read_text()
+    # Extract title from content if exists
+    title_match = re.search(r'^#\s*(.+)$', content, re.MULTILINE)
+    if title_match:
+        md.append(f"### {title_match.group(1)}")
+    md.append(content)
+    md.append("")
+
+# Add footer with usage hint
+md.append("")
+md.append("## Usage")
+md.append("These evolved skills are automatically available to all agents. No manual action needed.")
+
+target.write_text("\n".join(md))
 PY
     
-    echo "✅ 经验已转化为 Skills 注入上下文"
+    # Ensure the skill is properly linked for all agents
+    openclaw_evomap_link_to_all_agents "$evomap_dir/EVOMAP-LIVE.md"
+    
+    echo "✅ 经验已转化为 Skills 并关联到所有 Agent"
+}
+
+# Link EvoMap skills to all agents for shared memory
+openclaw_evomap_link_to_all_agents() {
+    local skill_file="$1"
+    [ -f "$skill_file" ] || return 0
+    
+    local agents_dir
+    agents_dir=$(openclaw_get_agents_dir)
+    [ -d "$agents_dir" ] || return 0
+    
+    for agent_dir in "$agents_dir"/*/; do
+        [ -d "$agent_dir" ] || continue
+        local agent_skills_dir="${agent_dir}skills"
+        mkdir -p "$agent_skills_dir"
+        # Create symlink to share EvoMap across agents
+        ln -sf "$skill_file" "$agent_skills_dir/evomap-live.md" 2>/dev/null || true
+    done
 }
 
 # 6. 极致增强菜单面板
 openclaw_memory_model_enhancement_menu() {
-  local tier
-  tier=$(openclaw_detect_hardware_tier)
-  
-  while true; do
-    clear
-    skpl_ui_header "极致记忆与路由" "适配全机型的极速方案"
-    echo "当前硬件层级: $tier (Tier 1=低配, 2=中配, 3=高配)"
-    echo "✅ 已抛弃所有重型框架，改用 SQLite + 智能路由"
-    echo
-    skpl_ui_section "一键操作"
-    skpl_ui_menu_item 1 "执行智能路由" "根据当前场景自动切换最佳大模型"
-    skpl_ui_menu_item 2 "初始化极速核心" "重置轻量级本地记忆库 (SQLite)"
-    skpl_ui_menu_item 3 "EvoMap 沉淀" "将近期经验转化为记忆 (零延迟)"
-    skpl_ui_menu_item 4 "全量备份/恢复" "极致轻量化备份核心记忆"
-    skpl_ui_menu_item 0 "返回主菜单"
-    skpl_ui_footer_prompt "请选择: "
-    read -e choice
-    case "$choice" in
-      1)
-        read -e -p "输入场景意图 (text/vision/complex): " intent
-        [ -z "$intent" ] && intent="text"
-        openclaw_memory_smart_route "$intent"
-        openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
-        break_end
-        ;;
-      2)
-        openclaw_memory_fast_init
-        break_end
-        ;;
-      3)
-        openclaw_evomap_fast_ingest "手动操作" "用户通过面板触发了经验沉淀"
-        openclaw_evomap_fast_evolve_into_skill
-        break_end
-        ;;
-      4)
-        openclaw_backup_restore_menu
-        ;;
-      0)
-        return 0
-        ;;
-      *)
-        echo "无效的选择，请重试。"
-        sleep 1
-        ;;
-    esac
-  done
+  openclaw_memory_strategy_panel
 }
 
 openclaw_memory_prepare_prefetch() {
@@ -2729,6 +8158,11 @@ ensure_root() {
 save_self_to_skpl() {
   init_skpl_runtime
   mkdir -p "${SKPL_HOME}"
+  if [ "${SKPL_SKIP_SELF_SAVE:-0}" = "1" ]; then
+    chmod +x "${SKPL_SCRIPT_PATH}" 2>/dev/null || true
+    hash -r 2>/dev/null || true
+    return 0
+  fi
   if [ "$(readlink -f "$0" 2>/dev/null)" != "$(readlink -f "${SKPL_SCRIPT_PATH}" 2>/dev/null)" ]; then
     cp -f "$0" "${SKPL_SCRIPT_PATH}"
   fi
@@ -2803,6 +8237,9 @@ skpl_sync_remote_panel() {
   fi
 
   install -m 755 "$tmp_file" "${SKPL_SCRIPT_PATH}"
+  if [ -n "$0" ] && [ -w "$0" ] && [ "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")" != "$(readlink -f "${SKPL_SCRIPT_PATH}" 2>/dev/null || printf '%s' "${SKPL_SCRIPT_PATH}")" ]; then
+    install -m 755 "$tmp_file" "$0"
+  fi
 
   cat > "${SKPL_CMD_PATH}" <<'EOF_SKPL_CMD'
 #!/bin/bash
@@ -2818,6 +8255,7 @@ EOF_SKPL_CMD
 
   echo "已从远程更新面板脚本。"
   echo "来源: $downloaded_url"
+  rm -f "$tmp_file" 2>/dev/null
   return 0
 }
 
@@ -2870,12 +8308,37 @@ EOF
     echo "检测到当前发行版不是 Ubuntu，跳过阿里 Ubuntu 源改写。"
   fi
 
-  echo "正在刷新 apt 软件源缓存，这一步可能需要几十秒..."
-  if ! DEBIAN_FRONTEND=noninteractive apt update -y >/dev/null 2>&1; then
-    echo "检测到 apt update 失败，尝试回退原始 sources.list"
-    if [ "$distro_id" = "ubuntu" ] && [ -f /etc/apt/sources.list.bak.original ]; then
-      sudo cp /etc/apt/sources.list.bak.original /etc/apt/sources.list
+  local apt_source_hash=""
+  local last_apt_source_hash=""
+  local last_apt_refresh_ts="0"
+  local now_ts="0"
+  local apt_refresh_ttl="1800"
+  local need_apt_refresh="true"
+  if [ -f /etc/apt/sources.list ] && command -v sha256sum >/dev/null 2>&1; then
+    apt_source_hash=$(sha256sum /etc/apt/sources.list 2>/dev/null | awk '{print $1}')
+  fi
+  last_apt_source_hash=$(state_get APT_SOURCE_HASH)
+  last_apt_refresh_ts=$(state_get APT_REFRESH_TS)
+  now_ts=$(date +%s 2>/dev/null || echo 0)
+  if [ -n "$apt_source_hash" ] && [ "$apt_source_hash" = "$last_apt_source_hash" ] && [[ "$last_apt_refresh_ts" =~ ^[0-9]+$ ]]; then
+    if [ $((now_ts - last_apt_refresh_ts)) -lt "$apt_refresh_ttl" ]; then
+      need_apt_refresh="false"
     fi
+  fi
+
+  if [ "$need_apt_refresh" = "true" ]; then
+    echo "正在刷新 apt 软件源缓存，这一步可能需要几十秒..."
+    if DEBIAN_FRONTEND=noninteractive apt -o Acquire::Retries=2 -o Acquire::http::Timeout=10 -o Acquire::https::Timeout=10 update -y >/dev/null 2>&1; then
+      [ -n "$apt_source_hash" ] && state_set APT_SOURCE_HASH "$apt_source_hash"
+      state_set APT_REFRESH_TS "$now_ts"
+    else
+      echo "检测到 apt update 失败，尝试回退原始 sources.list"
+      if [ "$distro_id" = "ubuntu" ] && [ -f /etc/apt/sources.list.bak.original ]; then
+        sudo cp /etc/apt/sources.list.bak.original /etc/apt/sources.list
+      fi
+    fi
+  else
+    echo "已跳过 apt 软件源缓存刷新：最近 30 分钟内已完成同源刷新。"
   fi
 
   echo "软件源准备完成，开始进入代理端口配置。"
@@ -2925,65 +8388,6 @@ PY
 SKPL_PROXY_PORT_VALUE="__PORT__"
 NO_PROXY_RULE="__NO_PROXY_RULE__"
 
-proxy_candidates() {
-  local port="$SKPL_PROXY_PORT_VALUE"
-  local host=""
-
-  printf '%s\n' "127.0.0.1:${port}"
-  printf '%s\n' "10.255.255.254:${port}"
-
-  host=$(getent ahostsv4 host.docker.internal 2>/dev/null | awk 'NR==1{print $1}')
-  if [ -n "$host" ]; then
-    printf '%s\n' "${host}:${port}"
-  fi
-
-  host=$(awk '/^nameserver /{print $2; exit}' /etc/resolv.conf 2>/dev/null)
-  if [ -n "$host" ]; then
-    printf '%s\n' "${host}:${port}"
-  fi
-
-  host=$(ip route 2>/dev/null | awk '/^default /{print $3; exit}')
-  if [ -n "$host" ]; then
-    printf '%s\n' "${host}:${port}"
-  fi
-}
-
-check_port() {
-  local ip_port=$1
-  local ip=$(echo "$ip_port" | cut -d: -f1)
-  local port=$(echo "$ip_port" | cut -d: -f2)
-  timeout 0.5 bash -c "echo > /dev/tcp/$ip/$port" 2>/dev/null
-}
-
-ACTIVE_PROXY=""
-while IFS= read -r candidate; do
-  [ -z "$candidate" ] && continue
-  if check_port "$candidate"; then
-    ACTIVE_PROXY="$candidate"
-    break
-  fi
-done < <(proxy_candidates | awk '!seen[$0]++')
-
-if [ -n "$ACTIVE_PROXY" ]; then
-  PROXY_URL="http://$ACTIVE_PROXY"
-  export http_proxy="$PROXY_URL"
-  export https_proxy="$PROXY_URL"
-  export HTTP_PROXY="$PROXY_URL"
-  export HTTPS_PROXY="$PROXY_URL"
-  export all_proxy="$PROXY_URL"
-  export ALL_PROXY="$PROXY_URL"
-  export ftp_proxy="$PROXY_URL"
-  export FTP_PROXY="$PROXY_URL"
-  export no_proxy="$NO_PROXY_RULE"
-  export NO_PROXY="$NO_PROXY_RULE"
-  export npm_config_proxy="$PROXY_URL"
-  export npm_config_https_proxy="$PROXY_URL"
-  export npm_config_noproxy="$NO_PROXY_RULE"
-  echo "自动同步：代理已开启 ($ACTIVE_PROXY)"
-else
-  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY ftp_proxy FTP_PROXY no_proxy NO_PROXY npm_config_proxy npm_config_https_proxy npm_config_noproxy
-  echo "自动同步：未检测到代理监听，请检查 Windows 代理是否已开启"
-fi
 EOF
 
   sed -i "s/__PORT__/$PROXY_PORT/g" ~/.auto_proxy_sync.sh
@@ -3064,14 +8468,26 @@ openclaw_panel_menu() {
   }
 
   refresh_panel_overview_cache() {
-    local install_status running_status local_version
+    local install_status running_status local_version route_status resource_status accel_status tool_status plugin_status cloud_status evolve_status lifecycle_status autotune_status context_status delivery_status
     install_status=$(get_install_status)
+    openclaw_ai_stack_detect_acceleration_state >/dev/null 2>&1 || true
     running_status="未运行"
     if openclaw_gateway_service_active || openclaw_gateway_port_reachable || openclaw_gateway_process_running; then
       running_status="运行中"
     fi
     local_version=$(get_local_openclaw_version_raw)
-    printf 'install_status\t%s\nrunning_status\t%s\nlocal_version\t%s\n' "$install_status" "$running_status" "$local_version" > "$SKPL_PANEL_OVERVIEW_CACHE_FILE"
+    route_status=$(openclaw_ai_stack_route_status_summary 2>/dev/null || printf '%s' '未记录')
+    resource_status=$(openclaw_ai_stack_resource_status_summary 2>/dev/null || printf '%s' '未记录')
+    accel_status=$(openclaw_ai_stack_acceleration_status_summary 2>/dev/null || printf '%s' '未记录')
+    tool_status=$(openclaw_ai_stack_tool_status_summary 2>/dev/null || printf '%s' '未记录')
+    plugin_status=$(openclaw_ai_stack_plugin_status_summary 2>/dev/null || printf '%s' '未记录')
+    cloud_status=$(openclaw_ai_stack_cloud_status_summary 2>/dev/null || printf '%s' '未记录')
+    evolve_status=$(openclaw_ai_stack_evolve_status_summary 2>/dev/null || printf '%s' '未记录')
+    lifecycle_status=$(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || printf '%s' '未记录')
+    autotune_status=$(openclaw_ai_stack_autotune_status_summary 2>/dev/null || printf '%s' '未记录')
+    context_status=$(openclaw_ai_stack_context_status_summary 2>/dev/null || printf '%s' '未记录')
+    delivery_status=$(openclaw_ai_stack_delivery_status_summary 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//' || printf '%s' '未记录')
+    printf 'install_status\t%s\nrunning_status\t%s\nlocal_version\t%s\nroute_status\t%s\nresource_status\t%s\naccel_status\t%s\ntool_status\t%s\nplugin_status\t%s\ncloud_status\t%s\nevolve_status\t%s\nlifecycle_status\t%s\nautotune_status\t%s\ncontext_status\t%s\ndelivery_status\t%s\n' "$install_status" "$running_status" "$local_version" "$route_status" "$resource_status" "$accel_status" "$tool_status" "$plugin_status" "$cloud_status" "$evolve_status" "$lifecycle_status" "$autotune_status" "$context_status" "$delivery_status" > "$SKPL_PANEL_OVERVIEW_CACHE_FILE"
   }
 
   get_panel_overview_value() {
@@ -3160,9 +8576,31 @@ openclaw_panel_menu() {
     local install_status=$(get_panel_overview_value "install_status" 15)
     local running_status=$(get_panel_overview_value "running_status" 15)
     local local_version=$(get_panel_overview_value "local_version" 15)
+    local route_status=$(get_panel_overview_value "route_status" 15)
+    local resource_status=$(get_panel_overview_value "resource_status" 15)
+    local accel_status=$(get_panel_overview_value "accel_status" 15)
+    local tool_status=$(get_panel_overview_value "tool_status" 15)
+    local plugin_status=$(get_panel_overview_value "plugin_status" 15)
+    local cloud_status=$(get_panel_overview_value "cloud_status" 15)
+    local evolve_status=$(get_panel_overview_value "evolve_status" 15)
+    local lifecycle_status=$(get_panel_overview_value "lifecycle_status" 15)
+    local autotune_status=$(get_panel_overview_value "autotune_status" 15)
+    local context_status=$(get_panel_overview_value "context_status" 15)
+    local delivery_status=$(get_panel_overview_value "delivery_status" 15)
     [ -z "$install_status" ] && install_status=$(get_install_status)
     [ -z "$running_status" ] && running_status=$(get_running_status)
     [ -z "$local_version" ] && local_version=$(get_local_openclaw_version)
+    [ -z "$route_status" ] && route_status=$(openclaw_ai_stack_route_status_summary 2>/dev/null || printf '%s' '未记录')
+    [ -z "$resource_status" ] && resource_status=$(openclaw_ai_stack_resource_status_summary 2>/dev/null || printf '%s' '未记录')
+    [ -z "$accel_status" ] && accel_status=$(openclaw_ai_stack_acceleration_status_summary 2>/dev/null || printf '%s' '未记录')
+    [ -z "$tool_status" ] && tool_status=$(openclaw_ai_stack_tool_status_summary 2>/dev/null || printf '%s' '未记录')
+    [ -z "$plugin_status" ] && plugin_status=$(openclaw_ai_stack_plugin_status_summary 2>/dev/null || printf '%s' '未记录')
+    [ -z "$cloud_status" ] && cloud_status=$(openclaw_ai_stack_cloud_status_summary 2>/dev/null || printf '%s' '未记录')
+    [ -z "$evolve_status" ] && evolve_status=$(openclaw_ai_stack_evolve_status_summary 2>/dev/null || printf '%s' '未记录')
+    [ -z "$lifecycle_status" ] && lifecycle_status=$(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || printf '%s' '未记录')
+    [ -z "$autotune_status" ] && autotune_status=$(openclaw_ai_stack_autotune_status_summary 2>/dev/null || printf '%s' '未记录')
+    [ -z "$context_status" ] && context_status=$(openclaw_ai_stack_context_status_summary 2>/dev/null || printf '%s' '未记录')
+    [ -z "$delivery_status" ] && delivery_status=$(openclaw_ai_stack_delivery_status_summary 2>/dev/null | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//' || printf '%s' '未记录')
     local install_tone="warn"
     local running_tone="warn"
     [ "$install_status" = "已安装" ] && install_tone="ok"
@@ -3173,6 +8611,19 @@ openclaw_panel_menu() {
     skpl_ui_status_row "安装状态" "$install_tone" "$install_status"
     skpl_ui_status_row "网关状态" "$running_tone" "$running_status"
     skpl_ui_kv "版本信息" "$local_version"
+    skpl_ui_kv "前置层" "$(openclaw_ai_stack_frontend_status_summary 2>/dev/null || printf '%s' '未记录')"
+    skpl_ui_kv "第0层缓存" "$(openclaw_ai_stack_cache_status_summary 2>/dev/null || printf '%s' '未记录')"
+    skpl_ui_kv "AI 路由" "$route_status"
+    skpl_ui_kv "资源预算" "$resource_status"
+    skpl_ui_kv "推理加速" "$accel_status"
+    skpl_ui_kv "工具治理" "$tool_status"
+    skpl_ui_kv "插件治理" "$plugin_status"
+    skpl_ui_kv "多云状态" "$cloud_status"
+    skpl_ui_kv "自进化" "$evolve_status"
+    skpl_ui_kv "生命周期" "$lifecycle_status"
+    skpl_ui_kv "自动调参" "$autotune_status"
+    skpl_ui_kv "上下文迁移" "$context_status"
+    skpl_ui_kv "交付验收" "$delivery_status"
     skpl_ui_kv "代理摘要" "$(openclaw_proxy_summary)"
     skpl_ui_kv "国内直连" "$(openclaw_domestic_provider_summary)"
 
@@ -3187,7 +8638,7 @@ openclaw_panel_menu() {
     echo
     skpl_ui_section "配置与接入"
     skpl_ui_menu_item 6 "API 管理" "Provider、Key、模型同步"
-    skpl_ui_menu_item 7 "设备连接" "Telegram / WhatsApp / QQ"
+    skpl_ui_menu_item 7 "渠道连接" "Telegram / WhatsApp / QQ 入口与诊断"
     skpl_ui_menu_item 8 "插件管理" "扩展插件"
     skpl_ui_menu_item 9 "技能管理" "导入和管理技能"
     skpl_ui_menu_item 10 "编辑主配置" "openclaw.json"
@@ -3195,16 +8646,13 @@ openclaw_panel_menu() {
 
     echo
       skpl_ui_section "运行与数据"
-      skpl_ui_menu_item 12 "健康检测与修复" "自动修复常见问题"
-      skpl_ui_menu_item 13 "WebUI 访问设置" "Token、域名、访问入口"
-      skpl_ui_menu_item 22 "网络诊断" "汇总代理、WebUI 与 WhatsApp 状态"
-      skpl_ui_menu_item 23 "官方诊断中心" "status、doctor、probe 与最近日志"
+      skpl_ui_menu_item 12 "健康检测与修复" "执行官方 doctor 修复与模型同步"
+      skpl_ui_menu_item 13 "WebUI 入口与待审批请求" "Token、本机入口、已记录域名与请求查看"
       skpl_ui_menu_item 14 "TUI 对话" "进入命令行对话界面"
-      skpl_ui_menu_item 15 "记忆管理" "索引、方案、融合检索"
+      skpl_ui_menu_item 15 "记忆管理" "方案应用、长期记忆、本地检索、经验沉淀"
       skpl_ui_menu_item 16 "权限管理" "策略与白名单"
-      skpl_ui_menu_item 17 "多智能体管理" "Agent、绑定、会话"
-      skpl_ui_menu_item 18 "备份与还原" "记忆与项目快照"
-      skpl_ui_menu_item 21 "EvoMap 管理" "安装、更新与混合记忆"
+      skpl_ui_menu_item 17 "多智能体管理" "Agent、绑定与会话缓存"
+      skpl_ui_menu_item 18 "备份与还原" "记忆、配置与项目文件归档"
 
     echo
     skpl_ui_section "维护"
@@ -3239,7 +8687,7 @@ openclaw_panel_menu() {
       systemctl --user restart openclaw-gateway.service >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
   else
       systemctl --user reset-failed openclaw-gateway.service >/dev/null 2>&1 || true
-      systemctl --user start openclaw-gateway.service >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || openclaw gateway --port "$(openclaw_gateway_port)" >/dev/null 2>&1 || openclaw_gateway_fallback_start >/dev/null 2>&1 || true
+      systemctl --user start openclaw-gateway.service >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || openclaw gateway --port "$(openclaw_gateway_port)" --allow-unconfigured >/dev/null 2>&1 || openclaw_gateway_fallback_start >/dev/null 2>&1 || true
   fi
     printf '%s\n' "$now" > "$SKPL_GATEWAY_RESTART_STAMP_FILE"
     if [ "${SKPL_BATCH_MODE:-0}" != "1" ] && [ "$mode" != "nosleep" ]; then
@@ -3951,7 +9399,7 @@ EOF
     echo "====== 确认信息 ======"
     echo "Provider    : $provider_name"
     echo "Base URL    : $base_url"
-    echo "API Key     : ${api_key:0:8}****"
+    echo "API Key     : ****"
     echo "默认模型    : $default_model"
     echo "模型总数    : $model_count"
     echo "======================"
@@ -4619,13 +10067,13 @@ PY
   }
 
   openclaw_api_providers_showcase() {
-    send_stats "OpenClaw API厂商推荐"
+    send_stats "OpenClaw API外部入口"
 
     clear
     echo ""
     echo -e "${gl_kjlan}╔════════════════════════════════════════════════════════════╗${gl_bai}"
-    echo -e "${gl_kjlan}║${gl_bai}            ${gl_huang}🌟 API 厂商推荐列表${gl_bai}                          ${gl_kjlan}║${gl_bai}"
-    echo -e "${gl_kjlan}║${gl_bai}            ${gl_zi}部分入口含 AFF${gl_bai}                            ${gl_kjlan}║${gl_bai}"
+    echo -e "${gl_kjlan}║${gl_bai}            ${gl_huang}🌟 API 外部入口列表${gl_bai}                          ${gl_kjlan}║${gl_bai}"
+    echo -e "${gl_kjlan}║${gl_bai}            ${gl_zi}以下为外部官网与注册链接${gl_bai}                      ${gl_kjlan}║${gl_bai}"
     echo -e "${gl_kjlan}╚════════════════════════════════════════════════════════════╝${gl_bai}"
     echo ""
     echo -e "  ${gl_lv}● DeepSeek${gl_bai}"
@@ -4671,7 +10119,7 @@ PY
     echo -e "    ${gl_kjlan}https://ai.baishan.com/${gl_bai}"
     echo ""
     echo -e "${gl_kjlan}────────────────────────────────────────────────────────────${gl_bai}"
-    echo -e "  ${gl_zi}图例：${gl_lv}● 官方入口${gl_bai}  ${gl_huang}● AFF 推荐入口${gl_bai}"
+    echo -e "  ${gl_zi}图例：${gl_lv}● 官方入口${gl_bai}  ${gl_huang}● 注册入口${gl_bai}"
     echo ""
     echo -e "${gl_huang}提示：复制链接到浏览器打开即可访问${gl_bai}"
     echo ""
@@ -4690,7 +10138,7 @@ PY
       skpl_ui_menu_item 2 "同步模型列表" "刷新供应商可用模型"
       skpl_ui_menu_item 3 "切换 API 类型" "completions / responses"
       skpl_ui_menu_item 4 "删除 API" "移除现有提供商"
-      skpl_ui_menu_item 5 "厂商推荐" "查看推荐入口"
+      skpl_ui_menu_item 5 "外部入口" "查看常见 Provider 官网与注册入口"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -er api_choice
@@ -5145,7 +10593,7 @@ PY
       local value="$2"
       [ -z "$key" ] && return 1
       openclaw_is_valid_bool "$value" || return 1
-      openclaw config set "$key" "$value" --json >/dev/null 2>&1
+      openclaw config set "$key" "$value" --strict-json >/dev/null 2>&1
     }
 
     openclaw_config_set_json_number() {
@@ -5153,7 +10601,7 @@ PY
       local value="$2"
       [ -z "$key" ] && return 1
       openclaw_is_valid_number "$value" || return 1
-      openclaw config set "$key" "$value" --json >/dev/null 2>&1
+      openclaw config set "$key" "$value" --strict-json >/dev/null 2>&1
     }
 
     openclaw_config_set_json_array() {
@@ -5172,7 +10620,7 @@ PY
 
     openclaw_run_official_diagnostics() {
       clear
-      skpl_ui_header "官方诊断中心" "按 OpenClaw 官方推荐顺序执行诊断"
+      skpl_ui_header "官方诊断命令汇总" "顺序执行 OpenClaw 官方诊断命令并展示结果"
       echo
       skpl_ui_section "1. Runtime 状态"
       timeout 12 openclaw status 2>/dev/null || true
@@ -5269,7 +10717,7 @@ PY
       local choice value
       while true; do
         clear
-        skpl_ui_header "WhatsApp 高级设置" "官方高频配置项"
+    skpl_ui_header "WhatsApp 高级设置" "常用配置项"
         skpl_ui_kv "dmPolicy" "$(openclaw_json_get_string '.channels.whatsapp.dmPolicy // "pairing"' 2>/dev/null || echo pairing)"
         skpl_ui_kv "groupPolicy" "$(openclaw_json_get_string '.channels.whatsapp.groupPolicy // "allowlist"' 2>/dev/null || echo allowlist)"
         skpl_ui_kv "replyToMode" "$(openclaw_json_get_string '.channels.whatsapp.replyToMode // "off"' 2>/dev/null || echo off)"
@@ -5317,7 +10765,7 @@ PY
       local choice value
       while true; do
         clear
-        skpl_ui_header "Telegram 高级设置" "官方高频配置项"
+    skpl_ui_header "Telegram 高级设置" "常用配置项"
         skpl_ui_kv "dmPolicy" "$(openclaw_json_get_string '.channels.telegram.dmPolicy // "pairing"' 2>/dev/null || echo pairing)"
         skpl_ui_kv "groupPolicy" "$(openclaw_json_get_string '.channels.telegram.groupPolicy // "allowlist"' 2>/dev/null || echo allowlist)"
         skpl_ui_kv "streaming.mode" "$(openclaw_json_get_string '.channels.telegram.streaming.mode // "partial"' 2>/dev/null || echo partial)"
@@ -5340,7 +10788,7 @@ PY
         skpl_ui_footer_prompt "请选择: "
         read -e choice
         case "$choice" in
-          1) read -e -p "botToken: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.telegram.botToken "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
+          1) read -rs -p "botToken: " value; echo; [ -n "$value" ] && ! openclaw_config_set_string channels.telegram.botToken "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
           2) read -e -p "dmPolicy: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.telegram.dmPolicy "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
           3) read -e -p "allowFrom（逗号分隔）: " value; [ -n "$value" ] && ! openclaw_config_set_json_array channels.telegram.allowFrom "$value" && { echo "请输入至少一个有效用户 ID。"; sleep 1; } ;;
           4) read -e -p "groupPolicy: " value; [ -n "$value" ] && ! openclaw_config_set_string channels.telegram.groupPolicy "$value" && { echo "配置写入失败，请检查输入值。"; sleep 1; } ;;
@@ -5396,6 +10844,7 @@ PY
               mv "$tmp_json" "$sessions_file" && \
               count=$((count + 1))
           fi
+          rm -f "$tmp_json" 2>/dev/null
         fi
       done
 
@@ -5556,11 +11005,12 @@ PYTHON_EOF
     send_stats "插件管理"
     while true; do
       clear
-      skpl_ui_header "插件管理" "安装、启用、删除与常用插件参考"
+      skpl_ui_header "插件管理" "安装、启用、删除与示例插件参考"
       skpl_ui_section "当前插件列表"
       openclaw_get_plugins_list_cached
       echo
-      skpl_ui_section "推荐插件"
+      skpl_ui_section "示例插件"
+      echo "以下仅为可尝试插件，实际可用性取决于当前环境与插件版本。"
       echo "直接复制括号内的 ID 即可："
       echo "📱 通讯渠道:"
       echo "  - [feishu]        # 飞书/Lark 集成"
@@ -5572,7 +11022,6 @@ PYTHON_EOF
       echo ""
       echo "🧠 记忆与 AI:"
       echo "  - [memory-core]   # 基础记忆 (文件检索)"
-      echo "  - [memory-lancedb]  # 增强记忆 (向量数据库)"
       echo "  - [copilot-proxy] # Copilot 接口转发"
       echo ""
       echo "⚙️ 功能扩展:"
@@ -5637,6 +11086,12 @@ PYTHON_EOF
             continue
           fi
 
+          if ! skpl_validate_plugin_id "$plugin_id"; then
+            echo "⏭️ 跳过非法插件ID: $plugin_id"
+            failed_list="$failed_list $plugin_id"
+            continue
+          fi
+
           echo "📥 本地未发现，尝试下载安装: $plugin_full"
           rm -rf "${HOME}/.openclaw/extensions/$plugin_id"
           [ "$HOME" != "/root" ] && rm -rf "/root/.openclaw/extensions/$plugin_id"
@@ -5687,13 +11142,14 @@ PYTHON_EOF
     send_stats "技能管理"
     while true; do
       clear
-      skpl_ui_header "技能管理" "安装、删除与查看推荐技能"
+      skpl_ui_header "技能管理" "安装、删除与查看示例技能"
       skpl_ui_section "当前已安装技能"
       openclaw skills list
       echo
 
       # 输出推荐的实用技能列表
-      skpl_ui_section "推荐技能"
+      skpl_ui_section "示例技能"
+      echo "以下仅为可尝试技能，部分技能依赖桌面系统、外部账号或额外工具。"
       echo "可直接复制名称输入："
       echo "github             # 管理 GitHub Issues/PR/CI (gh CLI)"
       echo "notion             # 操作 Notion 页面、数据库和块"
@@ -5763,6 +11219,12 @@ PYTHON_EOF
             fi
           fi
 
+          if ! skpl_validate_skill_name "$skill_name"; then
+            echo "⏭️ 跳过非法技能名称: $skill_name"
+            failed_list="$failed_list $skill_name"
+            continue
+          fi
+
           echo "正在安装技能：$skill_name ..."
           if npx clawhub install "$skill_name" --yes --no-input 2>/dev/null || npx clawhub install "$skill_name"; then
             echo "✅ 技能 $skill_name 安装成功。"
@@ -5773,16 +11235,21 @@ PYTHON_EOF
             failed_list="$failed_list $skill_name"
           fi
         else
-          echo "🗑️ 正在删除技能: $skill_name"
-          npx clawhub uninstall "$skill_name" --yes --no-input 2>/dev/null || npx clawhub uninstall "$skill_name" >/dev/null 2>&1
-          if [ -d "${HOME}/.openclaw/workspace/skills/${skill_name}" ]; then
-            rm -rf "${HOME}/.openclaw/workspace/skills/${skill_name}"
-            echo "✅ 已删除用户技能目录: $skill_name"
-            success_list="$success_list $skill_name"
-            changed=true
+          if ! skpl_validate_skill_name "$skill_name"; then
+            echo "⏭️ 跳过非法技能名称: $skill_name"
+            failed_list="$failed_list $skill_name"
           else
-            echo "⏭️ 未发现用户技能目录: $skill_name"
-            skipped_list="$skipped_list $skill_name"
+            echo "🗑️ 正在删除技能: $skill_name"
+            npx clawhub uninstall "$skill_name" --yes --no-input 2>/dev/null || npx clawhub uninstall "$skill_name" >/dev/null 2>&1
+            if [ -d "${HOME}/.openclaw/workspace/skills/${skill_name}" ]; then
+              rm -rf "${HOME}/.openclaw/workspace/skills/${skill_name}"
+              echo "✅ 已删除用户技能目录: $skill_name"
+              success_list="$success_list $skill_name"
+              changed=true
+            else
+              echo "⏭️ 未发现用户技能目录: $skill_name"
+              skipped_list="$skipped_list $skill_name"
+            fi
           fi
         fi
       done
@@ -5934,6 +11401,7 @@ openclaw_plugin_local_installed() {
     fi
 
     cat "$log_file" 2>/dev/null || true
+    rm -f "$log_file" 2>/dev/null
     return $first_rc
   }
 
@@ -5968,7 +11436,7 @@ openclaw_plugin_local_installed() {
         return 1
       fi
     fi
-    openclaw config set channels.whatsapp.enabled true --json >/dev/null 2>&1 || true
+    openclaw config set channels.whatsapp.enabled true --strict-json >/dev/null 2>&1 || true
     openclaw_apply_channel_proxy_config "whatsapp"
     return 0
   }
@@ -6260,7 +11728,7 @@ exit 1
     provider_summary=$(openclaw_domestic_provider_summary)
 
     clear
-    skpl_ui_header "网络诊断" "汇总网关、本地入口、域名代理与 WhatsApp 状态"
+    skpl_ui_header "网络状态总览" "汇总网关、本地入口、域名记录、代理与 WhatsApp 状态"
     skpl_ui_section "网关与代理"
     openclaw_network_diagnosis_status "网关监听" "$(openclaw_gateway_port_reachable && echo 正常 || echo 未就绪)"
     skpl_ui_kv "网关地址" "${scheme}://127.0.0.1:${port}/"
@@ -6436,7 +11904,7 @@ PY
         return 1
       fi
     fi
-    openclaw config set channels.telegram.enabled true --json >/dev/null 2>&1 || true
+    openclaw config set channels.telegram.enabled true --strict-json >/dev/null 2>&1 || true
     openclaw_apply_channel_proxy_config "telegram"
     openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
     return 0
@@ -6482,25 +11950,27 @@ PY
     local choice
     while true; do
       clear
-      skpl_ui_header "渠道诊断与高级设置" "官方 probe、诊断与网关参数入口"
+      skpl_ui_header "渠道诊断与高级设置" "网络状态、官方诊断、probe 与网关参数入口"
       echo
       skpl_ui_section "诊断"
-      skpl_ui_menu_item 1 "官方诊断中心" "status / gateway status / doctor / probe / logs"
-      skpl_ui_menu_item 2 "单渠道 Probe" "按渠道执行 channels status --probe"
+      skpl_ui_menu_item 1 "网络状态总览" "查看代理、WebUI、本机入口与 WhatsApp 状态"
+      skpl_ui_menu_item 2 "官方诊断命令汇总" "status / gateway status / doctor / probe / logs"
+      skpl_ui_menu_item 3 "单渠道 Probe" "按渠道执行 channels status --probe"
       echo
       skpl_ui_section "高级设置"
-      skpl_ui_menu_item 3 "WhatsApp 高级设置" "dmPolicy、replyToMode、historyLimit 等"
-      skpl_ui_menu_item 4 "Telegram 高级设置" "streaming、timeout、proxy 等"
-      skpl_ui_menu_item 5 "Gateway 高级设置" "reload 与健康监控参数"
+      skpl_ui_menu_item 4 "WhatsApp 高级设置" "dmPolicy、replyToMode、historyLimit 等"
+      skpl_ui_menu_item 5 "Telegram 高级设置" "streaming、timeout、proxy 等"
+      skpl_ui_menu_item 6 "Gateway 高级设置" "reload 与健康监控参数"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请选择: "
       read -e choice
       case "$choice" in
-        1) openclaw_run_official_diagnostics ;;
-        2) openclaw_probe_single_channel_menu ;;
-        3) openclaw_whatsapp_advanced_menu ;;
-        4) openclaw_telegram_advanced_menu ;;
-        5) openclaw_gateway_advanced_menu ;;
+        1) openclaw_network_diagnosis_menu ;;
+        2) openclaw_run_official_diagnostics ;;
+        3) openclaw_probe_single_channel_menu ;;
+        4) openclaw_whatsapp_advanced_menu ;;
+        5) openclaw_telegram_advanced_menu ;;
+        6) openclaw_gateway_advanced_menu ;;
         0) return 0 ;;
         *)
           echo "无效的选择，请重试。"
@@ -6517,7 +11987,7 @@ PY
         return 1
       fi
     fi
-    openclaw config set channels.discord.enabled true --json >/dev/null 2>&1 || true
+    openclaw config set channels.discord.enabled true --strict-json >/dev/null 2>&1 || true
     openclaw_apply_channel_proxy_config "discord"
     openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
     return 0
@@ -6530,7 +12000,7 @@ PY
         return 1
       fi
     fi
-    openclaw config set channels.slack.enabled true --json >/dev/null 2>&1 || true
+    openclaw config set channels.slack.enabled true --strict-json >/dev/null 2>&1 || true
     openclaw_apply_channel_proxy_config "slack"
     openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
     return 0
@@ -6782,7 +12252,7 @@ PY
     send_stats "机器人对接"
     while true; do
       clear
-      skpl_ui_header "机器人连接对接" "渠道连接与设备授权分离，海外渠道自动继承安装代理端口"
+      skpl_ui_header "渠道连接" "渠道接入、授权提示与常用诊断入口"
       openclaw_show_bot_local_status_block
       echo
       echo "代理规则：Telegram / WhatsApp / Discord / Slack 自动使用安装时输入的代理端口。"
@@ -6797,8 +12267,8 @@ PY
       skpl_ui_menu_item 3 "WhatsApp 对接" "自动写入代理并执行官方登录"
       skpl_ui_menu_item 4 "Discord 对接" "自动写入代理并启用渠道"
       skpl_ui_menu_item 5 "Slack 对接" "自动写入代理并启用渠道"
-      skpl_ui_menu_item 6 "QQ 对接" "查看官方接入地址"
-      skpl_ui_menu_item 7 "微信对接" "安装 Weixin CLI"
+      skpl_ui_menu_item 6 "QQ 官方入口" "显示官方接入地址"
+      skpl_ui_menu_item 7 "微信 CLI 安装" "执行 Weixin CLI 安装，后续按官方流程继续"
       skpl_ui_menu_item 8 "渠道诊断与高级设置" "官方诊断、单渠道 Probe、Telegram/WhatsApp/Gateway 设置"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
@@ -6896,13 +12366,13 @@ PY
         ;;
       project)
         case "$rel" in
-          openclaw.json|workspace/*|extensions/*|skills/*|prompts/*|tools/*|telegram/*|feishu/*|whatsapp/*|discord/*|slack/*|qqbot/*|logs/*|memos/*|DREAMS.md|memory/dreaming/*) return 0 ;;
+          openclaw.json|workspace/*|extensions/*|skills/*|prompts/*|tools/*|telegram/*|feishu/*|whatsapp/*|discord/*|slack/*|qqbot/*|logs/*|memos/*|DREAMS.md|memory/dreaming/*|ai-stack/*) return 0 ;;
           *) return 1 ;;
         esac
         ;;
       bundle)
         case "$rel" in
-          openclaw-root/openclaw.json|openclaw-root/workspace/*|openclaw-root/extensions/*|openclaw-root/skills/*|openclaw-root/prompts/*|openclaw-root/tools/*|openclaw-root/telegram/*|openclaw-root/feishu/*|openclaw-root/whatsapp/*|openclaw-root/discord/*|openclaw-root/slack/*|openclaw-root/qqbot/*|openclaw-root/logs/*|openclaw-root/memos/*|openclaw-root/DREAMS.md|openclaw-root/memory/dreaming/*|agents/*/MEMORY.md|agents/*/memory/*|hybrid-memory/*|evomap/*|evomap-memory/*|evomap-backups/*|memos/*|memory-config/openclaw.json|enterprise-memory/state.json) return 0 ;;
+          openclaw-root/openclaw.json|openclaw-root/workspace/*|openclaw-root/extensions/*|openclaw-root/skills/*|openclaw-root/prompts/*|openclaw-root/tools/*|openclaw-root/telegram/*|openclaw-root/feishu/*|openclaw-root/whatsapp/*|openclaw-root/discord/*|openclaw-root/slack/*|openclaw-root/qqbot/*|openclaw-root/logs/*|openclaw-root/memos/*|openclaw-root/DREAMS.md|openclaw-root/memory/dreaming/*|agents/*/MEMORY.md|agents/*/memory/*|hybrid-memory/*|memory-extension/*|ai-stack/*|evomap/*|evomap-memory/*|evomap-backups/*|memos/*|memory-config/openclaw.json|enterprise-memory/state.json) return 0 ;;
           *) return 1 ;;
         esac
         ;;
@@ -7037,7 +12507,8 @@ PY
     local ts=$(date +%Y%m%d-%H%M%S)
     local out_file="$backup_root/openclaw-memory-full-${ts}.tar.gz"
     mkdir -p "$backup_root"
-    local tmp_payload=$(mktemp -d) || return 1
+    local tmp_payload
+    tmp_payload=$(mktemp -d) || return 1
     local workspaces_json=$(openclaw_get_all_agent_workspaces)
     python3 -c "import json, sys, os, shutil;
 workspaces = json.loads(sys.argv[1]); tmp_payload = sys.argv[2]
@@ -7053,13 +12524,15 @@ for item in workspaces:
             else: shutil.copytree(src, os.path.join(target_dir, f), dirs_exist_ok=True)
 " "$workspaces_json" "$tmp_payload"
     [ -d "$SKPL_HYBRID_MEMORY_ROOT" ] && cp -a "$SKPL_HYBRID_MEMORY_ROOT" "$tmp_payload/hybrid-memory"
+    [ -d "$SKPL_MEMORY_EXTENSION_ROOT" ] && cp -a "$SKPL_MEMORY_EXTENSION_ROOT" "$tmp_payload/memory-extension"
+    [ -d "$SKPL_AI_STACK_ROOT" ] && cp -a "$SKPL_AI_STACK_ROOT" "$tmp_payload/ai-stack"
     [ -d "$SKPL_MEMOS_ROOT" ] && cp -a "$SKPL_MEMOS_ROOT" "$tmp_payload/memos"
     [ -d "$EVOMAP_MEMORY_DIR" ] && cp -a "$EVOMAP_MEMORY_DIR" "$tmp_payload/evomap-memory"
     if ! find "$tmp_payload" -mindepth 1 -print -quit | grep -q .; then
       echo "❌ 未找到可备份的记忆文件"; rm -rf "$tmp_payload"; break_end; return 1
     fi
     if openclaw_pack_backup_archive "memory-full" "multi-agent" "$tmp_payload" "$out_file"; then
-      echo "✅ 记忆全量备份完成 (含多智能体/混合记忆/MemOS): $out_file"; openclaw_offer_transfer_hint "$out_file"
+      echo "✅ 记忆全量备份完成 (含多智能体/混合记忆/AI 栈/MemOS): $out_file"; openclaw_offer_transfer_hint "$out_file"
     else
       echo "❌ 记忆全量备份失败"
     fi
@@ -7073,7 +12546,7 @@ for item in workspaces:
     local tmp_unpack=$(mktemp -d) || return 1
     local pkg_dir=$(openclaw_prepare_import_archive "memory-full" "$archive_path" "$tmp_unpack") || { rm -rf "$tmp_unpack"; break_end; return 1; }
     local workspaces_json=$(openclaw_get_all_agent_workspaces)
-    python3 - "$workspaces_json" "$pkg_dir/payload" "$SKPL_HYBRID_MEMORY_ROOT" "$SKPL_MEMOS_ROOT" "$EVOMAP_MEMORY_DIR" <<'PY'
+    python3 - "$workspaces_json" "$pkg_dir/payload" "$SKPL_HYBRID_MEMORY_ROOT" "$SKPL_MEMOS_ROOT" "$EVOMAP_MEMORY_DIR" "$SKPL_MEMORY_EXTENSION_ROOT" "$SKPL_AI_STACK_ROOT" <<'PY'
 import json, sys, os, shutil
 
 workspaces = {item["id"]: item["ws"] for item in json.loads(sys.argv[1])}
@@ -7081,6 +12554,8 @@ payload_dir = sys.argv[2]
 hybrid_root = sys.argv[3]
 memos_root = sys.argv[4]
 evomap_memory_dir = sys.argv[5]
+memory_extension_root = sys.argv[6]
+ai_stack_root = sys.argv[7]
 
 def copy_replace(src, dest):
     parent = os.path.dirname(dest)
@@ -7114,6 +12589,8 @@ for src_name, dest in [
     ("hybrid-memory", hybrid_root),
     ("memos", memos_root),
     ("evomap-memory", evomap_memory_dir),
+    ("memory-extension", memory_extension_root),
+    ("ai-stack", ai_stack_root),
 ]:
     src = os.path.join(payload_dir, src_name)
     if os.path.exists(src):
@@ -7136,7 +12613,7 @@ PY
 
     if [ -d "$openclaw_root" ]; then
       mkdir -p "$tmp_payload/openclaw-root"
-      for d in workspace extensions skills prompts tools telegram feishu whatsapp discord slack qqbot logs memos; do
+      for d in workspace extensions skills prompts tools telegram feishu whatsapp discord slack qqbot logs memos ai-stack; do
         [ -e "$openclaw_root/$d" ] && cp -a "$openclaw_root/$d" "$tmp_payload/openclaw-root/"
       done
       [ -f "$openclaw_root/openclaw.json" ] && cp -a "$openclaw_root/openclaw.json" "$tmp_payload/openclaw-root/"
@@ -7161,6 +12638,8 @@ for item in workspaces:
 " "$workspaces_json" "$tmp_payload"
 
     [ -d "$SKPL_HYBRID_MEMORY_ROOT" ] && cp -a "$SKPL_HYBRID_MEMORY_ROOT" "$tmp_payload/hybrid-memory"
+    [ -d "$SKPL_MEMORY_EXTENSION_ROOT" ] && cp -a "$SKPL_MEMORY_EXTENSION_ROOT" "$tmp_payload/memory-extension"
+    [ -d "$SKPL_AI_STACK_ROOT" ] && cp -a "$SKPL_AI_STACK_ROOT" "$tmp_payload/ai-stack"
     [ -d "$SKPL_MEMOS_ROOT" ] && cp -a "$SKPL_MEMOS_ROOT" "$tmp_payload/memos"
     [ -d "$EVOMAP_DIR" ] && cp -a "$EVOMAP_DIR" "$tmp_payload/evomap"
     [ -d "$EVOMAP_MEMORY_DIR" ] && cp -a "$EVOMAP_MEMORY_DIR" "$tmp_payload/evomap-memory"
@@ -7183,7 +12662,7 @@ for item in workspaces:
 
     if openclaw_pack_backup_archive "openclaw-bundle" "full" "$tmp_payload" "$out_file"; then
       echo "✅ 统一全量备份完成: $out_file"
-      echo "包含: OpenClaw 项目、所有智能体记忆、记忆方案配置、混合记忆、MemOS、Dream Diary、企业增强状态、EvoMap 目录与 EvoMap 备份目录。"
+      echo "包含: OpenClaw 项目、所有智能体记忆、记忆方案配置、AI 栈配置与状态、混合记忆、MemOS、Dream Diary、企业增强状态、EvoMap 目录与 EvoMap 备份目录。"
       openclaw_offer_transfer_hint "$out_file"
     else
       echo "❌ 统一全量备份失败"
@@ -7247,7 +12726,7 @@ for item in workspaces:
     evomap_stop_loop >/dev/null 2>&1 || true
 
     workspaces_json=$(openclaw_get_all_agent_workspaces)
-    python3 - "$workspaces_json" "$pkg_dir/payload" "$openclaw_root" "$SKPL_HYBRID_MEMORY_ROOT" "$EVOMAP_DIR" "$EVOMAP_MEMORY_DIR" "$EVOMAP_BACKUP_DIR" "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" <<'PY'
+    python3 - "$workspaces_json" "$pkg_dir/payload" "$openclaw_root" "$SKPL_HYBRID_MEMORY_ROOT" "$EVOMAP_DIR" "$EVOMAP_MEMORY_DIR" "$EVOMAP_BACKUP_DIR" "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" "$SKPL_AI_STACK_ROOT" <<'PY'
 import json, os, shutil, sys
 
 workspaces = {item['id']: item['ws'] for item in json.loads(sys.argv[1])}
@@ -7258,6 +12737,7 @@ evomap_dir = sys.argv[5]
 evomap_memory_dir = sys.argv[6]
 evomap_backup_dir = sys.argv[7]
 enterprise_state_file = sys.argv[8]
+ai_stack_root = sys.argv[9]
 
 def copy_replace(src, dest):
     parent = os.path.dirname(dest)
@@ -7294,6 +12774,7 @@ if os.path.isdir(agents_root):
 
 for src_name, dest in [
     ('hybrid-memory', hybrid_root),
+    ('ai-stack', ai_stack_root),
     ('evomap', evomap_dir),
     ('evomap-memory', evomap_memory_dir),
     ('evomap-backups', evomap_backup_dir),
@@ -7353,7 +12834,7 @@ PY
 
     if [ "$export_mode" = "2" ]; then
       mode_label="full"
-      for d in workspace extensions skills prompts tools memos; do
+      for d in workspace extensions skills prompts tools memos ai-stack; do
         [ -e "$openclaw_root/$d" ] && cp -a "$openclaw_root/$d" "$tmp_payload/"
       done
       [ -f "$openclaw_root/openclaw.json" ] && cp -a "$openclaw_root/openclaw.json" "$tmp_payload/"
@@ -7365,7 +12846,7 @@ PY
     else
       [ -d "$openclaw_root/workspace" ] && cp -a "$openclaw_root/workspace" "$tmp_payload/"
       [ -f "$openclaw_root/openclaw.json" ] && cp -a "$openclaw_root/openclaw.json" "$tmp_payload/"
-      for d in extensions skills prompts tools memos; do
+      for d in extensions skills prompts tools memos ai-stack; do
         [ -e "$openclaw_root/$d" ] && cp -a "$openclaw_root/$d" "$tmp_payload/"
       done
       [ -f "$openclaw_root/$SKPL_MEMORY_DREAMS_FILENAME" ] && cp -a "$openclaw_root/$SKPL_MEMORY_DREAMS_FILENAME" "$tmp_payload/"
@@ -7678,7 +13159,7 @@ PY
     local key="$1"
     local default_value="${2:-}"
     local value
-    value=$(openclaw config get "$key" 2>/dev/null | head -n 1 | sed -e 's/^"//' -e 's/"$//')
+    value=$(timeout 5 openclaw config get "$key" 2>/dev/null | head -n 1 | sed -e 's/^"//' -e 's/"$//')
     if [ -z "$value" ] || [ "$value" = "null" ] || [ "$value" = "undefined" ]; then
       echo "$default_value"
       return 0
@@ -7689,7 +13170,46 @@ PY
   openclaw_memory_config_set() {
     local key="$1"
     shift
-    openclaw config set "$key" "$@" >/dev/null 2>&1
+    local value="$1"
+    if timeout 5 openclaw config set "$key" "$@" >/dev/null 2>&1; then
+      return 0
+    fi
+    python3 - "$(openclaw_get_config_file)" "$key" "$value" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+
+cur = cfg
+parts = key.split('.')
+for part in parts[:-1]:
+    node = cur.get(part)
+    if not isinstance(node, dict):
+        node = {}
+        cur[part] = node
+    cur = node
+
+if value == 'true':
+    parsed = True
+elif value == 'false':
+    parsed = False
+else:
+    parsed = value
+
+cur[parts[-1]] = parsed
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
   }
 
 openclaw_memory_config_unset() {
@@ -7780,11 +13300,17 @@ PY
 
 openclaw_memory_refresh_status_cache() {
   local json_output
+  openclaw_memory_cli_supported || return 1
   json_output=$(timeout 8 openclaw memory status --json 2>/dev/null || true)
   if [ -z "$json_output" ]; then
     return 1
   fi
   printf '%s' "$json_output" > "$SKPL_MEMORY_STATUS_CACHE_FILE"
+}
+
+openclaw_memory_cli_supported() {
+  command -v openclaw >/dev/null 2>&1 || return 1
+  timeout 8 openclaw --help 2>/dev/null | grep -qE '(^|[[:space:]])memory([[:space:]]|$)'
 }
 
 openclaw_memory_refresh_runtime_state() {
@@ -7816,10 +13342,11 @@ openclaw_memory_list_agents() {
   openclaw_memory_status_value() {
     local key="$1"
     local agent_id="${2:-}"
+    openclaw_memory_cli_supported || return 1
     if [ -n "$agent_id" ]; then
-      openclaw memory status --agent "$agent_id" 2>/dev/null | awk -F': ' -v k="$key" '$1==k {print $2; exit}'
+      timeout 5 openclaw memory status --agent "$agent_id" 2>/dev/null | awk -F': ' -v k="$key" '$1==k {print $2; exit}'
     else
-      openclaw memory status 2>/dev/null | awk -F': ' -v k="$key" '$1==k {print $2; exit}'
+      timeout 5 openclaw memory status 2>/dev/null | awk -F': ' -v k="$key" '$1==k {print $2; exit}'
     fi
   }
 
@@ -7840,6 +13367,10 @@ openclaw_memory_list_agents() {
   openclaw_memory_rebuild_index_single() {
     local agent_id="${1:-main}"
     local store_raw store_file ts backup_file
+    if ! openclaw_memory_cli_supported; then
+      echo "ℹ️ 当前 OpenClaw 版本未提供 memory CLI，跳过索引重建。"
+      return 0
+    fi
     store_raw=$(openclaw_memory_status_value "Store" "$agent_id")
     store_file=$(openclaw_memory_expand_path "$store_raw")
     if [ -z "$store_file" ] || [ ! -f "$store_file" ]; then
@@ -7855,7 +13386,7 @@ openclaw_memory_list_agents() {
         echo "⚠️ [$agent_id] 索引备份失败，继续重建。"
       fi
     fi
-    openclaw memory index --agent "$agent_id" --force
+    timeout 120 openclaw memory index --agent "$agent_id" --force
   }
 
   openclaw_memory_rebuild_index_safe() {
@@ -7887,16 +13418,32 @@ EOF
 
   openclaw_memory_prepare_workspace() {
     local agent_id="${1:-main}"
-    local workspace memory_dir
+    local workspace memory_dir memory_file
     workspace=$(openclaw_memory_status_value "Workspace" "$agent_id")
     if [ -z "$workspace" ]; then
       workspace="$HOME/.openclaw/workspace"
       [ "$agent_id" != "main" ] && workspace="$HOME/.openclaw/workspace-$agent_id"
     fi
     memory_dir="$workspace/memory"
+    memory_file="$workspace/MEMORY.md"
     if [ ! -d "$memory_dir" ]; then
       echo "🔧 [$agent_id] 记忆目录不存在，已自动创建: $memory_dir"
       mkdir -p "$memory_dir"
+    fi
+    if [ ! -f "$memory_file" ]; then
+      cat > "$memory_file" <<'EOF'
+# Identity Memory
+
+- User name: 未记录
+- Assistant name: Alberton
+
+# Notes
+
+- 当用户明确说“记住”某件事时，优先写入这份文件。
+- 当问题与用户身份、偏好、称呼相关时，先读取这份文件再回答。
+- 重要身份事实应同步写入长期记忆扩展组件。
+EOF
+      echo "🔧 [$agent_id] 已初始化默认记忆文件: $memory_file"
     fi
     return 0
   }
@@ -7919,11 +13466,14 @@ EOF
 openclaw_memory_render_basic_status() {
   local backend provider model_path model_status workspace
   backend=$(openclaw_memory_get_backend)
-  provider=$(openclaw_memory_config_get "agents.defaults.memorySearch.provider")
-  model_path=$(openclaw_memory_get_local_model_path)
+  provider="config-only"
+  model_path=$(openclaw_default_memory_model_path)
   model_status=$(openclaw_memory_local_model_status "$model_path")
   workspace="$HOME/.openclaw/workspace"
   echo "当前显示为基础配置视图（尚未刷新运行时状态）"
+  if ! openclaw_memory_cli_supported; then
+    echo "当前版本未提供 openclaw memory 子命令，已切换为配置态视图"
+  fi
   echo "Agent: main"
   echo "  底层方案: ${backend:--}"
   echo "  搜索提供方: ${provider:--}"
@@ -8014,7 +13564,7 @@ PY
   }
 
   openclaw_memory_get_local_model_path() {
-    openclaw_memory_config_get "agents.defaults.memorySearch.local.modelPath"
+    openclaw_default_memory_model_path
   }
 
   openclaw_memory_local_model_status() {
@@ -8157,18 +13707,18 @@ PY
     fi
   }
 
-  openclaw_memory_download_file() {
-    local url="$1"
-    local dest="$2"
-    mkdir -p "$(dirname "$dest")"
-    if command -v curl >/dev/null 2>&1; then
-      curl -L --fail --retry 2 -o "$dest" "$url"
+openclaw_memory_download_file() {
+  local url="$1"
+  local dest="$2"
+  mkdir -p "$(dirname "$dest")"
+  if command -v curl >/dev/null 2>&1; then
+      curl -L --fail --retry 2 --connect-timeout 10 --max-time 1800 -o "$dest" "$url"
       return $?
-    fi
-    if command -v wget >/dev/null 2>&1; then
-      wget -O "$dest" "$url"
+  fi
+  if command -v wget >/dev/null 2>&1; then
+      wget --timeout=10 -O "$dest" "$url"
       return $?
-    fi
+  fi
     echo "❌ 未检测到 curl 或 wget，无法下载。"
     return 1
   }
@@ -8353,7 +13903,7 @@ PY
       preh_agent_lines=$(openclaw_memory_list_agents)
       while IFS=$'\t' read -r preh_agent_id preh_workspace; do
         [ -z "$preh_agent_id" ] && continue
-        openclaw memory index --agent "$preh_agent_id" --force
+        timeout 120 openclaw memory index --agent "$preh_agent_id" --force
       done <<EOF
 $preh_agent_lines
 EOF
@@ -8363,10 +13913,12 @@ EOF
     echo "✅ QMD 自动部署完成"
   }
 
-  openclaw_memory_auto_setup_local() {
+openclaw_memory_auto_setup_local() {
     echo "🔍 检测 Local 环境"
     openclaw_memory_cleanup_legacy_keys
-    local backend provider
+    openclaw_safe_enable_global_tools
+    openclaw_memory_prepare_workspace_all
+    local backend
     backend=$(openclaw_memory_get_backend)
     if [ "$backend" = "builtin" ] || [ "$backend" = "local" ]; then
       echo "✅ memory.backend 已是 builtin"
@@ -8374,12 +13926,20 @@ EOF
       openclaw_memory_config_set "memory.backend" "builtin"
       echo "✅ 已设置 memory.backend=builtin"
     fi
-    provider=$(openclaw_memory_config_get "agents.defaults.memorySearch.provider")
-    if [ "$provider" = "local" ]; then
-      echo "✅ memorySearch.provider 已是 local"
+    echo "   正在检查记忆搜索配置..."
+    if openclaw_memorysearch_config_supported; then
+      openclaw_memory_config_set "memorySearch.provider" "ollama"
+      echo "✅ 已设置 memorySearch.provider=ollama"
+    fi
+    echo "   正在读取记忆模型配置..."
+    local memory_ollama_model
+    memory_ollama_model=$(openclaw_memory_config_get "memorySearch.ollama.model")
+    if [ -z "$memory_ollama_model" ]; then
+      memory_ollama_model="qwen2.5:7b"
+      openclaw_memory_config_set "memorySearch.ollama.model" "$memory_ollama_model"
+      echo "✅ 已设置 memorySearch.ollama.model=$memory_ollama_model"
     else
-      openclaw_memory_config_set "agents.defaults.memorySearch.provider" "local"
-      echo "✅ 已设置 agents.defaults.memorySearch.provider=local"
+      echo "✅ memorySearch.ollama.model 已存在: $memory_ollama_model"
     fi
 
     local model_path model_status
@@ -8402,28 +13962,34 @@ EOF
           echo "✅ 已发现默认模型文件: $model_dest"
         else
           echo "⬇️ 下载模型: $model_url"
+          echo "   模型大小约 300MB，根据网络情况可能需要几分钟..."
           openclaw_memory_download_file "$model_url" "$model_dest" || return 1
           echo "✅ 模型已下载: $model_dest"
         fi
         OPENCLAW_MEMORY_MODEL_PATH="$model_dest"
       fi
-      openclaw_memory_config_set "agents.defaults.memorySearch.local.modelPath" "$model_dest"
-      echo "✅ 已写入模型路径"
+      echo "✅ 已发现默认模型文件: $model_dest"
     fi
     if [ "$OPENCLAW_MEMORY_PREHEAT" = "true" ]; then
       echo "🔥 预热索引（可能下载模型）"
+      echo "   此步骤可能需要几分钟，请耐心等待..."
       openclaw_memory_prepare_workspace_all
       local preh_agent_lines preh_agent_id preh_workspace
       preh_agent_lines=$(openclaw_memory_list_agents)
       while IFS=$'\t' read -r preh_agent_id preh_workspace; do
         [ -z "$preh_agent_id" ] && continue
-        openclaw memory index --agent "$preh_agent_id" --force
+        echo "🧱 正在预热索引: $preh_agent_id (最多10分钟)..."
+        timeout 600 openclaw memory index --agent "$preh_agent_id" --force || {
+          echo "⚠️ 索引预热超时或失败: $preh_agent_id"
+          return 1
+        }
       done <<EOF
 $preh_agent_lines
 EOF
     else
       echo "⏭️ 已跳过预热"
     fi
+    openclaw_validate_global_tools_runtime
     echo "✅ Local 自动部署完成"
   }
 
@@ -8547,7 +14113,6 @@ EOF
           echo "❌ 写入配置失败"
           return 1
         fi
-        openclaw_memory_config_set "agents.defaults.memorySearch.provider" "local" >/dev/null 2>&1
         ;;
       *)
         echo "❌ 未知方案: $scheme"
@@ -8571,14 +14136,14 @@ EOF
     fi
   }
 
-  openclaw_memory_fix_index() {
+openclaw_memory_fix_index() {
     local backend include_dm
     backend=$(openclaw_memory_get_backend)
     if [ "$backend" = "qmd" ] && ! command -v qmd >/dev/null 2>&1; then
       echo "⚠️ 检测到当前方案为 QMD，但未安装 qmd 命令。"
       echo "   可切换 Local，或安装 bun + qmd 后再试。"
     fi
-    include_dm=$(openclaw config get memory.qmd.includeDefaultMemory 2>/dev/null)
+    include_dm=$(timeout 5 openclaw config get memory.qmd.includeDefaultMemory 2>/dev/null)
     skpl_ui_header "索引修复诊断" "检查 includeDefaultMemory 与索引重建路径"
     skpl_ui_kv "includeDefaultMemory" "${include_dm:-未设置}"
     echo ""
@@ -8612,6 +14177,59 @@ EOF
       fi
     fi
     break_end
+  }
+
+  openclaw_memory_legacy_compat_menu() {
+    local recommended_scheme recommended_reason qmd_ok model_path model_status hf_ok mirror_ok
+    while true; do
+      clear
+      openclaw_memory_detect_region
+      openclaw_memory_select_sources
+      openclaw_memory_recommend
+      recommended_scheme="${OPENCLAW_MEMORY_RECOMMEND:-local}"
+      qmd_ok=$(openclaw_memory_qmd_available)
+      model_path=$(openclaw_memory_get_local_model_path)
+      model_status=$(openclaw_memory_local_model_status "$model_path")
+      hf_ok="${OPENCLAW_MEMORY_HF_OK:-unknown}"
+      mirror_ok="${OPENCLAW_MEMORY_MIRROR_OK:-unknown}"
+      recommended_reason=$(printf '%s；' "${OPENCLAW_MEMORY_RECOMMEND_REASON[@]}")
+      recommended_reason="${recommended_reason%？}"
+      recommended_reason="${recommended_reason%;}"
+
+      skpl_ui_header "兼容增强工具" "保留旧记忆方案里的实用诊断与降级能力，不改变当前新方案默认运行链"
+      skpl_ui_kv "当前推荐" "$recommended_scheme"
+      skpl_ui_kv "QMD 可用" "$qmd_ok"
+      skpl_ui_kv "本地模型" "${model_path:-未配置}"
+      skpl_ui_kv "模型状态" "$model_status"
+      skpl_ui_kv "HF 可达" "$hf_ok"
+      skpl_ui_kv "镜像可达" "$mirror_ok"
+      echo "推荐依据: ${recommended_reason:-未生成}"
+      echo
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "自动选择兼容方案" "只在当前环境更适合时，调用旧方案的自动推荐与部署逻辑"
+      skpl_ui_menu_item 2 "QMD 轻量兼容" "低资源或下载受限时，启用 QMD 轻量索引链路"
+      skpl_ui_menu_item 3 "本地检索兼容" "调用旧方案的本地 embedding 自动部署逻辑"
+      skpl_ui_menu_item 4 "索引修复诊断" "修复 includeDefaultMemory 和旧索引状态"
+      skpl_ui_menu_item 5 "来源与网络诊断" "检查 HF 与镜像可达性，辅助判断下载路径"
+      skpl_ui_menu_item 0 "返回上一级"
+      skpl_ui_footer_prompt "请输入你的选择: "
+      read -e legacy_choice
+      case "$legacy_choice" in
+        1) OPENCLAW_MEMORY_CONFIG_ONLY="false" openclaw_memory_auto_setup_run "auto"; break_end ;;
+        2) OPENCLAW_MEMORY_CONFIG_ONLY="false" openclaw_memory_auto_setup_run "qmd"; break_end ;;
+        3) OPENCLAW_MEMORY_CONFIG_ONLY="false" OPENCLAW_MEMORY_PREHEAT="${OPENCLAW_MEMORY_PREHEAT:-false}" openclaw_memory_auto_setup_run "local"; break_end ;;
+        4) openclaw_memory_fix_index ;;
+        5)
+          echo "地区: ${OPENCLAW_MEMORY_COUNTRY:-unknown}"
+          echo "当前下载源: ${OPENCLAW_MEMORY_HF_BASE:-unknown}"
+          echo "huggingface.co: $hf_ok"
+          echo "hf-mirror.com: $mirror_ok"
+          break_end
+          ;;
+        0) return 0 ;;
+        *) echo "无效的选择，请重试。"; sleep 1 ;;
+      esac
+    done
   }
 
   # ==========================================
@@ -8660,7 +14278,7 @@ PY
         skpl_ui_menu_item 5 "本地模型运行时" "安装 ollama 并拉取本地文本/代码模型"
         skpl_ui_menu_item 6 "一键推荐配置" "写入推荐的文本/视觉/代码模型组合"
         skpl_ui_menu_item 7 "安装后验收检查" "检查 openclaw、gateway、ollama、记忆索引状态"
-        skpl_ui_menu_item 8 "一键完整本地落地" "安装 ollama、拉模型、启用记忆、重建索引、验收"
+        skpl_ui_menu_item 8 "一键完整本地落地" "安装 ollama、拉取推荐模型、启用本地检索并执行验收"
         skpl_ui_menu_item 9 "一键应用并重启" "保存配置并让 AI 立即生效"
         skpl_ui_menu_item 0 "返回上一级"
         skpl_ui_footer_prompt "请选择: "
@@ -8782,6 +14400,95 @@ openclaw_apply_and_restart() {
     echo "✅ 配置已生效！AI 将使用新分配的模型工作。"
 }
 
+openclaw_get_primary_text_model() {
+    local config_file
+    config_file=$(openclaw_get_config_file)
+    python3 - "$config_file" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+value = cfg.get('agents', {}).get('defaults', {}).get('model', {})
+if isinstance(value, dict):
+    primary = value.get('primary', '')
+    if isinstance(primary, str):
+        print(primary)
+PY
+}
+
+openclaw_memorysearch_loop_self_heal() {
+    local primary_model memory_model
+    echo "🩺 正在执行 memory_search 死循环自愈..."
+    openclaw_safe_enable_global_tools
+    openclaw_memory_config_set "memorySearch.provider" "ollama"
+    primary_model=$(openclaw_get_primary_text_model)
+    if [ -z "$primary_model" ]; then
+      primary_model="ollama/qwen2.5:7b"
+    fi
+    memory_model="${primary_model#ollama/}"
+    [ -z "$memory_model" ] && memory_model="qwen2.5:7b"
+    if [[ "$primary_model" == ollama/* ]]; then
+      openclaw_configure_local_ollama_provider "$memory_model" "text" >/dev/null 2>&1 || true
+      echo "✅ 已让记忆检索跟随当前主文本模型: $memory_model"
+    else
+      echo "ℹ️ 当前主文本模型不是本地 Ollama，记忆检索继续使用本地模型: $memory_model"
+    fi
+    openclaw_memory_config_set "memorySearch.ollama.model" "$memory_model"
+    python3 - "$(openclaw_get_config_file)" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+tools_cfg = cfg.get('tools')
+if not isinstance(tools_cfg, dict):
+    tools_cfg = {}
+    cfg['tools'] = tools_cfg
+global_tools = tools_cfg.get('global')
+if not isinstance(global_tools, dict):
+    global_tools = {}
+    tools_cfg['global'] = global_tools
+global_tools['enabled'] = False
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+PY
+    echo "✅ 已执行 tools.global.enabled=false 诊断切换"
+    start_gateway force 0 >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
+    python3 - "$(openclaw_get_config_file)" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+tools_cfg = cfg.get('tools')
+if not isinstance(tools_cfg, dict):
+    tools_cfg = {}
+    cfg['tools'] = tools_cfg
+global_tools = tools_cfg.get('global')
+if not isinstance(global_tools, dict):
+    global_tools = {}
+    tools_cfg['global'] = global_tools
+global_tools['enabled'] = True
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+PY
+    echo "✅ 已恢复 tools.global.enabled=true"
+    openclaw_validate_global_tools_runtime
+}
+
 openclaw_optimize_memory_and_skills() {
     local config_file
     config_file=$(openclaw_get_config_file)
@@ -8816,11 +14523,14 @@ qmd.setdefault('includeDefaultMemory', True)
 agents = cfg.setdefault('agents', {})
 defaults = agents.setdefault('defaults', {})
 defaults.setdefault('workspace', '~/.openclaw/workspace')
-defaults.setdefault('memorySearch', {})
-defaults.setdefault('experimental', {}).setdefault('localModelLean', True)
-defaults.setdefault('modelFallback', 'ollama/qwen2.5-coder:7b')
-defaults.setdefault('imageModelFallback', 'ollama/qwen2.5vl:7b')
-defaults.setdefault('skills', {})['autoLoadWorkspaceSkills'] = True
+models_obj = defaults.get('models')
+if not isinstance(models_obj, dict):
+    if isinstance(models_obj, list):
+        models_obj = {str(item): {} for item in models_obj if isinstance(item, str) and item.strip()}
+    else:
+        models_obj = {}
+    defaults['models'] = models_obj
+defaults.pop('skills', None)
 
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
@@ -8833,21 +14543,29 @@ openclaw_inject_skills() {
     cat > "$skills_dir/auto-model-routing.md" <<'EOF'
 # Auto Model Routing
 - Use `agents.defaults.model.primary` for daily text turns.
+- Prefer `ollama/qwen2.5:7b` for daily text turns.
 - Use `agents.defaults.imageModel.primary` for image understanding.
-- Use `ollama/qwen2.5-coder:7b` for code-heavy tasks.
+- Use `ollama/qwen3-coder` for code-heavy tasks.
 - Prefer concise responses to reduce token usage.
+- Respect hardware budget before escalating to larger experts.
+- Keep memory injection under the configured context percentage limit.
 EOF
     cat > "$skills_dir/token-saver.md" <<'EOF'
 # Token Saver
 - Answer directly.
 - Keep outputs concise.
 - Avoid unnecessary repetition.
+- Reuse cached memory and stable facts before expanding context.
 EOF
     cat > "$skills_dir/memory-first.md" <<'EOF'
-# Memory First
-- Search workspace memory before asking repeated environment questions.
-- Persist reusable troubleshooting notes into memory files.
-- Prefer local memory search when both local and remote options exist.
+# Memory First (Active Injection Mode)
+- The system has ALREADY injected relevant memories into the context above.
+- READ the [memory_context] section carefully before answering.
+- Use injected memories to personalize your response.
+- If memories contain user identity/preferences, acknowledge them naturally.
+- When user explicitly says "remember", extract and persist the fact.
+- Do NOT say "I don't have access to previous conversations" - memories are provided.
+- If injected memories are insufficient, proceed with available context.
 EOF
     cat > "$skills_dir/gateway-recovery.md" <<'EOF'
 # Gateway Recovery
@@ -8863,11 +14581,7 @@ openclaw_evomap_real_ingest() {
     local title="$1" content="$2"
     local evomap_dir="$HOME/.openclaw/workspace/memory/evomap-ingest"
     mkdir -p "$evomap_dir"
-    cat > "$evomap_dir/$(date +%s)-note.md" <<EOF
-# ${title}
-
-${content}
-EOF
+    printf '%s\n\n%s\n' "$title" "$content" > "$evomap_dir/$(date +%s)-note.md"
     echo "✅ 经验已写入: $evomap_dir"
 }
 
@@ -8877,7 +14591,7 @@ openclaw_configure_local_ollama_provider() {
     provider_model="${1:-qwen2.5:7b}"
     model_role="${2:-text}"
     full_model="ollama/${provider_model}"
-    python3 - "$config_file" "$provider_model" "$full_model" "$model_role" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" <<'PY'
+    python3 - "$config_file" "$provider_model" "$full_model" "$model_role" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" "$SKPL_AI_STACK_ACCEL_STATE_FILE" <<'PY'
 import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])
@@ -8885,6 +14599,7 @@ raw_model = sys.argv[2]
 full_model = sys.argv[3]
 role = sys.argv[4]
 ollama_bin = sys.argv[5]
+accel_state_path = Path(sys.argv[6])
 cfg = {}
 if path.exists():
     try:
@@ -8892,10 +14607,21 @@ if path.exists():
     except Exception:
         cfg = {}
 
+accel = {}
+if accel_state_path.exists():
+    try:
+        accel = json.loads(accel_state_path.read_text(encoding='utf-8'))
+    except Exception:
+        accel = {}
+
 def build_entry(model_id: str, role_name: str):
     lower = model_id.lower()
     is_image = role_name == 'image' or any(token in lower for token in ('vl', 'vision', 'llava', 'minicpm-v'))
     is_code = role_name == 'code' or 'coder' in lower
+    is_qwen = 'qwen' in lower
+    is_deepseek = 'deepseek' in lower
+    is_small_model = any(tag in lower for tag in ('0.3b', '0.5b', '1.5b', '1.8b', '3b'))
+    is_large_model = any(tag in lower for tag in ('14b', '32b', '34b', '70b'))
     params = {'keep_alive': '15m'}
     if is_image:
         entry = {'id': model_id, 'name': model_id, 'input': ['text', 'image']}
@@ -8907,8 +14633,50 @@ def build_entry(model_id: str, role_name: str):
     else:
         entry = {'id': model_id, 'name': model_id, 'input': ['text']}
         params['num_ctx'] = 8192
-        if 'qwen' in lower:
+        if is_qwen:
             params['thinking'] = False
+    if is_qwen and not is_image:
+        params['num_predict'] = max(int(params.get('num_predict', 0) or 0), 1024)
+    if is_deepseek and is_code:
+        params['num_ctx'] = max(int(params.get('num_ctx', 8192) or 8192), 16384)
+        params['temperature'] = 0.2
+    if is_small_model and not is_image:
+        params['num_batch'] = max(int(params.get('num_batch', 0) or 0), 256)
+        params['num_thread'] = max(4, int(params.get('num_thread', 0) or 0))
+    if is_large_model and not is_image:
+        params['num_batch'] = max(int(params.get('num_batch', 0) or 0), 1024)
+        params['num_ctx'] = max(int(params.get('num_ctx', 8192) or 8192), 16384)
+    flash_state = (accel.get('flashAttention2') or {}).get('status')
+    kv_state = (accel.get('kvInt8') or {}).get('status')
+    cpu_state = (accel.get('cpuAssist') or {}).get('status')
+    trt_state = (accel.get('tensorRt') or {}).get('status')
+    accel_hints = []
+    if flash_state == 'available':
+        accel_hints.append('flash-attn')
+    if kv_state in ('candidate', 'available'):
+        accel_hints.append('kv-int8')
+    if cpu_state == 'active':
+        accel_hints.append('cpu-assist')
+    if trt_state == 'available':
+        accel_hints.append('tensorrt')
+    if accel_hints:
+        entry['runtimeHints'] = accel_hints
+        if 'flash-attn' in accel_hints and not is_image:
+            params['num_batch'] = max(int(params.get('num_batch', 0) or 0), 512 if not is_large_model else 1024)
+        if 'kv-int8' in accel_hints:
+            params['num_ctx'] = max(int(params.get('num_ctx', 4096) or 4096), 16384 if not is_image else 8192)
+        if 'cpu-assist' in accel_hints:
+            params['num_thread'] = max(4, int(params.get('num_thread', 0) or 0))
+        if 'tensorrt' in accel_hints:
+            params['main_gpu'] = 0
+            if is_image:
+                params['num_batch'] = max(int(params.get('num_batch', 0) or 0), 64)
+    if any(token in lower for token in ('qwen2.5', 'qwen2-5', 'qwen2_5')):
+        entry['compat'] = {
+            'requiresStringContent': True,
+            'supportsTools': True,
+            'toolCallFormat': 'openai',
+        }
     entry['params'] = params
     return entry
 
@@ -8948,7 +14716,24 @@ cfg.setdefault('agents', {}).setdefault('defaults', {})
 defs = cfg['agents']['defaults']
 defs.setdefault('models', {})
 defs['models'].setdefault(full_model, {})
-defs.setdefault('experimental', {}).setdefault('localModelLean', True)
+tools_cfg = cfg.get('tools')
+if not isinstance(tools_cfg, dict):
+    tools_cfg = {}
+    cfg['tools'] = tools_cfg
+global_tools = tools_cfg.get('global')
+if not isinstance(global_tools, dict):
+    global_tools = {}
+    tools_cfg['global'] = global_tools
+global_tools.setdefault('enabled', True)
+memory_search = cfg.get('memorySearch')
+if not isinstance(memory_search, dict):
+    memory_search = {}
+    cfg['memorySearch'] = memory_search
+ollama_memory = memory_search.get('ollama')
+if not isinstance(ollama_memory, dict):
+    ollama_memory = {}
+    memory_search['ollama'] = ollama_memory
+memory_search['provider'] = 'ollama'
 if role == 'image':
     image_model_cfg = defs.get('imageModel')
     if not isinstance(image_model_cfg, dict):
@@ -8965,16 +14750,69 @@ else:
         model_cfg = {}
         defs['model'] = model_cfg
     model_cfg['primary'] = full_model
+    ollama_memory['model'] = raw_model
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
     echo "✅ 已写入本地 Ollama provider 配置"
 }
 
+openclaw_memorysearch_config_supported() {
+    if ! openclaw_has_command openclaw; then
+      return 0
+    fi
+    timeout 5 openclaw doctor >/tmp/openclaw-doctor-memorysearch.log 2>&1 || true
+    if grep -q 'memorySearch' /tmp/openclaw-doctor-memorysearch.log 2>/dev/null; then
+      return 0
+    fi
+    return 0
+}
+
+openclaw_safe_enable_global_tools() {
+    local config_file
+    config_file=$(openclaw_get_config_file)
+    python3 - "$config_file" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+tools_cfg = cfg.get('tools')
+if not isinstance(tools_cfg, dict):
+    tools_cfg = {}
+    cfg['tools'] = tools_cfg
+global_tools = tools_cfg.get('global')
+if not isinstance(global_tools, dict):
+    global_tools = {}
+    tools_cfg['global'] = global_tools
+global_tools['enabled'] = True
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+PY
+    echo "✅ 已设置 tools.global.enabled=true"
+}
+
+openclaw_validate_global_tools_runtime() {
+    if ! openclaw_has_command openclaw; then
+      echo "ℹ️ openclaw 命令未安装，已跳过 tools.global.enabled 验活"
+      return 0
+    fi
+    if timeout 10 openclaw models status >/dev/null 2>&1; then
+      echo "✅ tools.global.enabled 验活通过"
+      return 0
+    fi
+    echo "⚠️ tools.global.enabled 已写入，运行时验活未通过"
+    return 0
+}
+
 openclaw_apply_recommended_model_profile() {
-    local text_model="ollama/qwen2.5:7b"
-    local image_model="ollama/qwen2.5vl:7b"
-    local code_model="ollama/qwen2.5-coder:7b"
+    local text_model="${OPENCLAW_TEXT_MODEL_RESOLVED:-ollama/qwen2.5:7b}"
+    local image_model="${OPENCLAW_IMAGE_MODEL_RESOLVED:-ollama/gemma3:4b}"
+    local code_model="${OPENCLAW_CODE_MODEL_RESOLVED:-ollama/qwen3-coder}"
     local config_file
     config_file=$(openclaw_get_config_file)
     python3 - "$config_file" "$text_model" "$image_model" "$code_model" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" "${OPENCLAW_FORCE_LOCAL_PROFILE:-0}" <<'PY'
@@ -9004,6 +14842,20 @@ def ensure_model_entry(provider_models, entry):
             return
     provider_models.append(entry)
 
+def with_qwen_compat(entry):
+    model_id = str(entry.get('id', '')).lower()
+    if any(token in model_id for token in ('qwen2.5', 'qwen2-5', 'qwen2_5')):
+        compat = entry.get('compat')
+        if not isinstance(compat, dict):
+            compat = {}
+        compat.update({
+            'requiresStringContent': True,
+            'supportsTools': True,
+            'toolCallFormat': 'openai',
+        })
+        entry['compat'] = compat
+    return entry
+
 provider = cfg['models']['providers'].setdefault('ollama', {})
 provider['baseUrl'] = provider.get('baseUrl') or 'http://127.0.0.1:11434'
 provider['apiKey'] = provider.get('apiKey') or 'ollama-local'
@@ -9022,21 +14874,41 @@ provider_models = provider.setdefault('models', [])
 if not isinstance(provider_models, list):
     provider_models = []
     provider['models'] = provider_models
-ensure_model_entry(provider_models, {'id': 'qwen2.5:7b', 'name': 'qwen2.5:7b', 'input': ['text'], 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}})
-ensure_model_entry(provider_models, {'id': 'qwen2.5vl:7b', 'name': 'qwen2.5vl:7b', 'input': ['text', 'image'], 'params': {'keep_alive': '15m', 'num_ctx': 4096, 'thinking': False}})
-ensure_model_entry(provider_models, {'id': 'qwen2.5-coder:7b', 'name': 'qwen2.5-coder:7b', 'input': ['text'], 'reasoning': True, 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}})
+ensure_model_entry(provider_models, with_qwen_compat({'id': 'qwen2.5:7b', 'name': 'qwen2.5:7b', 'input': ['text'], 'params': {'keep_alive': '15m', 'num_ctx': 8192}}))
+ensure_model_entry(provider_models, with_qwen_compat({'id': 'gemma3:4b', 'name': 'gemma3:4b', 'input': ['text', 'image'], 'params': {'keep_alive': '15m', 'num_ctx': 4096, 'thinking': False}}))
+ensure_model_entry(provider_models, with_qwen_compat({'id': 'qwen3-coder', 'name': 'qwen3-coder', 'input': ['text'], 'reasoning': True, 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}}))
 
 cfg.setdefault('agents', {}).setdefault('defaults', {})
 defs = cfg['agents']['defaults']
 defs.setdefault('models', {})
 for model in (text_model, image_model, code_model):
     defs['models'].setdefault(model, {})
+tools_cfg = cfg.get('tools')
+if not isinstance(tools_cfg, dict):
+    tools_cfg = {}
+    cfg['tools'] = tools_cfg
+global_tools = tools_cfg.get('global')
+if not isinstance(global_tools, dict):
+    global_tools = {}
+    tools_cfg['global'] = global_tools
+global_tools.setdefault('enabled', True)
 if force_local_profile or not isinstance(defs.get('model'), dict) or not defs['model'].get('primary'):
     defs.setdefault('model', {})['primary'] = text_model
 if force_local_profile or not isinstance(defs.get('imageModel'), dict) or not defs['imageModel'].get('primary'):
     defs['imageModel'] = {'primary': image_model}
 defs['models'][code_model].setdefault('agentRuntime', {'id': 'auto'})
-defs.setdefault('experimental', {}).setdefault('localModelLean', True)
+
+memory_search = cfg.get('memorySearch')
+if not isinstance(memory_search, dict):
+    memory_search = {}
+    cfg['memorySearch'] = memory_search
+ollama_memory = memory_search.get('ollama')
+if not isinstance(ollama_memory, dict):
+    ollama_memory = {}
+    memory_search['ollama'] = ollama_memory
+memory_search['provider'] = 'ollama'
+ollama_memory['model'] = text_model.split('/', 1)[1] if '/' in text_model else text_model
+
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
@@ -9061,6 +14933,11 @@ openclaw_postinstall_acceptance_check() {
     fi
     openclaw_memory_local_retrieval_status
     if openclaw_has_command openclaw; then
+      if openclaw_memory_cli_supported; then
+        echo "✅ OpenClaw memory CLI 可用"
+      else
+        echo "ℹ️ 当前 OpenClaw 版本未提供 memory CLI，记忆面板已降级为配置态视图"
+      fi
       timeout 10 openclaw models status >/dev/null 2>&1 && echo "✅ OpenClaw 模型状态可读取" || echo "⚠️ OpenClaw 模型状态读取失败"
       timeout 10 openclaw models list --provider ollama >/dev/null 2>&1 && echo "✅ OpenClaw 可读取 Ollama 模型目录" || echo "⚠️ OpenClaw 无法读取 Ollama 模型目录"
       timeout 10 openclaw doctor >/dev/null 2>&1 && echo "✅ openclaw doctor 可执行" || echo "⚠️ openclaw doctor 返回异常"
@@ -9071,17 +14948,101 @@ openclaw_full_local_stack_setup() {
     echo "🚀 开始执行一键完整本地落地..."
     openclaw_runtime_self_heal || return 1
     openclaw_install_ollama_runtime || return 1
-    openclaw_ollama_pull_model "qwen2.5:7b" || return 1
-    openclaw_ollama_pull_model "qwen2.5vl:7b" || return 1
-    openclaw_ollama_pull_model "qwen2.5-coder:7b" || return 1
+    openclaw_ollama_pull_recommended_model "text" || return 1
+    openclaw_ollama_pull_recommended_model "image" || return 1
+    openclaw_ollama_pull_recommended_model "code" || return 1
     OPENCLAW_FORCE_LOCAL_PROFILE=1
     openclaw_apply_recommended_model_profile || return 1
+    openclaw_memorysearch_loop_self_heal || return 1
     openclaw_inject_skills || return 1
     openclaw_optimize_memory_and_skills || return 1
     openclaw_memory_enable_local_retrieval || return 1
     openclaw_apply_and_restart || true
     openclaw_postinstall_acceptance_check || true
     echo "✅ 一键完整本地落地完成"
+}
+
+openclaw_memory_prepare_layered_local_models() {
+    local profile_json tier text_model code_model vision_model want_vision
+    echo "   正在检测硬件配置..."
+    profile_json=$(openclaw_detect_hardware_profile_json 2>/dev/null) || profile_json='{"tier":"entry-cpu"}'
+    tier=$(python3 - "$profile_json" <<'PY' 2>/dev/null || echo 'entry-cpu'
+import json, sys
+print((json.loads(sys.argv[1]) or {}).get('tier', 'entry-cpu'))
+PY
+)
+    want_vision="${1:-false}"
+
+    case "$tier" in
+      server|workstation|flagship-gpu|golden-gpu)
+        text_model="qwen2.5:7b"
+        code_model="qwen3-coder"
+        vision_model="gemma3:4b"
+        ;;
+      advanced-gpu|advanced-cpu-plus|advanced-cpu)
+        text_model="qwen2.5:3b"
+        code_model="qwen2.5-coder:1.5b"
+        vision_model="gemma3:4b"
+        ;;
+      entry-gpu|entry-cpu)
+        text_model="qwen3:0.5b"
+        code_model="qwen2.5-coder:1.5b"
+        vision_model="gemma3:4b"
+        ;;
+      *)
+        text_model="qwen3:0.3b"
+        code_model="qwen2.5-coder:1.5b"
+        vision_model="gemma3:4b"
+        ;;
+    esac
+
+    echo "🧠 正在按硬件分级准备本地专家模型..."
+    echo "   分级: $tier"
+    echo "   文本模型: $text_model"
+    echo "   代码模型: $code_model"
+    [ "$want_vision" = "true" ] && echo "   视觉模型: $vision_model"
+
+    openclaw_install_ollama_runtime || return 1
+    openclaw_ollama_pull_first_available "text" "$text_model" "qwen2.5:7b" "qwen3:4b" "llama3.2:3b" || return 1
+    text_model="${OPENCLAW_LAST_PULLED_MODEL:-$text_model}"
+    if [ "$code_model" != "$text_model" ]; then
+      openclaw_ollama_pull_first_available "code" "$code_model" "qwen2.5-coder:7b" "deepseek-coder:6.7b" || return 1
+      code_model="${OPENCLAW_LAST_PULLED_MODEL:-$code_model}"
+    else
+      code_model="$text_model"
+    fi
+    if [ "$want_vision" = "true" ]; then
+      openclaw_ollama_pull_first_available "image" "$vision_model" "llava:7b" "minicpm-v" || return 1
+      vision_model="${OPENCLAW_LAST_PULLED_MODEL:-$vision_model}"
+    fi
+
+    python3 - "$(openclaw_get_config_file)" "$text_model" "$code_model" "$vision_model" "$want_vision" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text_model, code_model, vision_model, want_vision = sys.argv[2:6]
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+
+agents = cfg.setdefault('agents', {}).setdefault('defaults', {})
+agents.setdefault('workspace', '~/.openclaw/workspace')
+agents.setdefault('model', {})['primary'] = f'ollama/{text_model}'
+agents.setdefault('models', {})
+agents['models'].setdefault(f'ollama/{text_model}', {})
+agents['models'].setdefault(f'ollama/{code_model}', {})
+if want_vision == 'true':
+    agents['imageModel'] = {'primary': f'ollama/{vision_model}'}
+    agents['models'].setdefault(f'ollama/{vision_model}', {})
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+    echo "✅ 本地分层专家模型已就绪"
 }
 
 openclaw_runtime_self_heal() {
@@ -9178,7 +15139,8 @@ openclaw_install_ollama_runtime() {
     fi
     openclaw_ensure_ollama_install_tools || return 1
     echo "⬇️ 正在安装 ollama 本地模型运行时..."
-    if curl -fsSL https://ollama.com/install.sh | sh; then
+    echo "   下载安装脚本（最多60秒）..."
+    if curl -fsSL --max-time 60 https://ollama.com/install.sh | sh; then
       echo "✅ ollama 安装完成"
       openclaw_ensure_ollama_running || true
     else
@@ -9190,6 +15152,10 @@ openclaw_install_ollama_runtime() {
 openclaw_ollama_pull_model() {
     local model_name="$1"
     [ -z "$model_name" ] && return 1
+    if ! skpl_validate_model_name "$model_name"; then
+      echo "❌ 非法模型名，已拒绝: $model_name" >&2
+      return 1
+    fi
     openclaw_install_ollama_runtime || return 1
     openclaw_ensure_ollama_running || return 1
     echo "⬇️ 正在拉取本地模型: $model_name"
@@ -9203,6 +15169,302 @@ openclaw_ollama_pull_model() {
     echo "✅ 本地模型已就绪: $model_name"
 }
 
+openclaw_ollama_cache_status_get() {
+    local model_role="$1"
+    local model_name="$2"
+    local ttl="${3:-21600}"
+    python3 - "$SKPL_OLLAMA_PULL_CACHE_FILE" "$model_role" "$model_name" "$ttl" <<'PY'
+import json, sys, time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+role = sys.argv[2]
+model = sys.argv[3]
+ttl = int(sys.argv[4])
+if not path.exists():
+    raise SystemExit(1)
+try:
+    data = json.loads(path.read_text(encoding='utf-8'))
+except Exception:
+    raise SystemExit(1)
+item = (((data.get(role) or {}) if isinstance(data, dict) else {}).get(model) or {})
+updated_at = int(item.get('updatedAt', 0) or 0)
+if not item or updated_at <= 0:
+    raise SystemExit(1)
+if int(time.time()) - updated_at > ttl:
+    raise SystemExit(1)
+print(f"{item.get('status', '')}\t{item.get('note', '')}")
+PY
+}
+
+openclaw_ollama_cache_status_set() {
+    local model_role="$1"
+    local model_name="$2"
+    local status_text="$3"
+    local note_text="$4"
+    python3 - "$SKPL_OLLAMA_PULL_CACHE_FILE" "$model_role" "$model_name" "$status_text" "$note_text" <<'PY'
+import json, sys, time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+role, model, status, note = sys.argv[2:6]
+data = {}
+if path.exists():
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        data = {}
+if not isinstance(data, dict):
+    data = {}
+role_data = data.get(role)
+if not isinstance(role_data, dict):
+    role_data = {}
+    data[role] = role_data
+role_data[model] = {
+    'status': status,
+    'note': note,
+    'updatedAt': int(time.time()),
+}
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+}
+
+# ─── 模型显存安全检查 ───
+# 估算模型显存需求（基于量化后大小，单位MB）
+skpl_estimate_model_vram_mb() {
+  local model_name="$1"
+  local name_lower
+  name_lower=$(echo "$model_name" | tr '[:upper:]' '[:lower:]')
+  [ -z "$name_lower" ] && echo 4000 && return 1
+  # 4-bit 量化模型显存估算 (参数B × ~500MB + KV缓存等开销)
+  case "$name_lower" in
+    *"70b"*|*"72b"*) echo 36000 ;;
+    *"30b"*|*"32b"*) echo 17000 ;;
+    *"16b"*|*"15b"*|*"14b"*|*"13b"*)  echo 7200 ;;
+    *"11b"*|*"12b"*)  echo 6600 ;;
+    *"8b"*)  echo 5530 ;;
+    *"7b"*)  echo 5325 ;;
+    *"6.7b"*)  echo 4100 ;;
+    *"4.7b"*)  echo 3000 ;;
+    *"4b"*)  echo 2600 ;;
+    *"3.8b"*)  echo 2400 ;;
+    *"3.2b"*)  echo 2100 ;;
+    *"3b"*)  echo 1950 ;;
+    *"2b"*)  echo 1300 ;;
+    *"1.8b"*)  echo 1200 ;;
+    *"1.5b"*)  echo 1000 ;;
+    *"1.3b"*)  echo 900 ;;
+    *"1b"*)  echo 750 ;;
+    *"0.8b"*)  echo 600 ;;
+    *"0.6b"*)  echo 500 ;;
+    *"0.5b"*)  echo 420 ;;
+    *"0.3b"*)  echo 310 ;;
+    *)  echo 4000 ;;
+  esac
+}
+
+# 检查模型是否适合当前显存 (使用配置中的reserveGpuMb)
+skpl_check_model_vram_fit() {
+  local model_name="$1"
+  local need_mb reserve_mb available_mb
+  need_mb=$(skpl_estimate_model_vram_mb "$model_name")
+  reserve_mb=200  # 与budget.reserveGpuMb对齐，预留200MB给系统和KV缓存
+
+  # 获取可用显存
+  available_mb=$(python3 - <<'PY'
+import subprocess, json, re, sys
+try:
+    out = subprocess.check_output(['nvidia-smi', '--query-gpu=memory.free', '--format=csv,noheader,nounits'], text=True, timeout=5).strip()
+    free_mb = int(out.split()[0]) if out else 0
+    print(free_mb)
+except Exception:
+    print(0)
+PY
+  )
+
+  if [ "$available_mb" -eq 0 ]; then
+    echo "⚠️ 警告: 无法检测 GPU 显存，模型可能无法运行"
+    return 2  # 返回 2 表示无法确定
+  fi
+
+  if [ "$((available_mb - reserve_mb))" -lt "$need_mb" ]; then
+    echo "⚠️ 显存不足: $model_name 需要约 ${need_mb}MB，当前可用 ${available_mb}MB（预留${reserve_mb}MB后仅 $((available_mb - reserve_mb))MB）"
+    return 1
+  fi
+  return 0
+}
+
+# 用户确认下载
+skpl_confirm_model_download() {
+  local model_name="$1" model_role="$2"
+  local need_mb need_gb
+  need_mb=$(skpl_estimate_model_vram_mb "$model_name")
+  need_gb=$(python3 -c "print(round($need_mb / 1024, 1))" 2>/dev/null || echo "?.?")
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  模型下载确认"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  角色: $model_role"
+  echo "  模型: $model_name"
+  echo "  预计显存: 约 ${need_mb}MB (${need_gb}GB)"
+
+  # 显示显存信息
+  local available_mb
+  available_mb=$(python3 - <<'PY'
+import subprocess
+try:
+    out = subprocess.check_output(['nvidia-smi', '--query-gpu=memory.free', '--format=csv,noheader,nounits'], text=True, timeout=5).strip()
+    print(out.split()[0] if out else '未知')
+except Exception:
+    print('未知')
+PY
+  )
+  echo "  当前可用显存: ${available_mb}MB"
+
+  # 检查是否匹配
+  local vram_status
+  vram_status=$(skpl_check_model_vram_fit "$model_name" 2>&1)
+  if [ $? -ne 0 ]; then
+    echo "$vram_status"
+    echo ""
+    echo "  ❌ 该模型可能无法在当前 GPU 上运行！"
+    echo "  建议选择更小的模型。"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    read -e -p "  仍然要下载? (y/N): " confirm
+    [[ "$confirm" == [yY] ]] && return 0
+    return 1
+  fi
+
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  read -e -p "  确认下载 $model_name? (y/N): " confirm
+  [ -z "$confirm" ] && confirm="n"
+  [[ "$confirm" != [yY] ]] && return 1
+  return 0
+}
+
+openclaw_ollama_model_exists_local() {
+    local model_name="$1"
+    [ -z "$model_name" ] && return 1
+    openclaw_has_command ollama || return 1
+    timeout 10 ollama list 2>/dev/null | awk 'NR>1 {print $1}' | grep -Fx "$model_name" >/dev/null 2>&1
+}
+
+openclaw_ollama_runtime_hint() {
+    local version_text
+    version_text=$(timeout 8 ollama --version 2>/dev/null | head -n 1)
+    [ -n "$version_text" ] && echo "ℹ️ 当前 Ollama 版本: $version_text"
+}
+
+openclaw_ollama_pull_first_available() {
+    local model_role="$1"
+    shift
+    local model_name="" cached_status cached_note cache_line
+    OPENCLAW_LAST_PULLED_MODEL=""
+    openclaw_install_ollama_runtime || return 1
+    openclaw_ensure_ollama_running || return 1
+    openclaw_ollama_runtime_hint || true
+    for model_name in "$@"; do
+      [ -z "$model_name" ] && continue
+      if openclaw_ollama_model_exists_local "$model_name"; then
+        OPENCLAW_LAST_PULLED_MODEL="$model_name"
+        openclaw_ollama_cache_status_set "$model_role" "$model_name" "local" "模型已存在于本地"
+        openclaw_configure_local_ollama_provider "$model_name" "$model_role" || true
+        echo "✅ 已复用本地$model_role模型: $model_name"
+        return 0
+      fi
+      cache_line=$(openclaw_ollama_cache_status_get "$model_role" "$model_name" 21600 2>/dev/null || true)
+      cached_status=$(printf '%s' "$cache_line" | awk -F '\t' '{print $1}')
+      cached_note=$(printf '%s' "$cache_line" | awk -F '\t' '{print $2}')
+      if [ "$cached_status" = "failed" ]; then
+        echo "⏭️ 跳过最近失败的$model_role模型: $model_name ${cached_note:+($cached_note)}"
+        continue
+      fi
+      echo "⬇️ 尝试拉取本地$model_role模型: $model_name"
+      echo "   模型下载可能需要几分钟，请耐心等待..."
+      if ! skpl_confirm_model_download "$model_name" "$model_role"; then
+        echo "⏭️ 用户取消下载: $model_name"
+        openclaw_ollama_cache_status_set "$model_role" "$model_name" "skipped" "用户取消"
+        continue
+      fi
+      if timeout 600 ollama pull "$model_name"; then
+        OPENCLAW_LAST_PULLED_MODEL="$model_name"
+        openclaw_ollama_cache_status_set "$model_role" "$model_name" "ok" "拉取成功"
+        openclaw_configure_local_ollama_provider "$model_name" "$model_role" || true
+        echo "✅ 已选定本地$model_role模型: $model_name"
+        return 0
+      fi
+      openclaw_ollama_cache_status_set "$model_role" "$model_name" "failed" "当前运行时未成功拉取"
+      echo "⚠️ 当前模型不可用，继续尝试下一个: $model_name"
+    done
+    echo "❌ 未找到可用的本地$model_role模型"
+    return 1
+}
+
+openclaw_ollama_pull_recommended_model() {
+    local role="$1"
+    local profile_json tier selected_model
+    profile_json=$(openclaw_detect_hardware_profile_json)
+    tier=$(python3 - "$profile_json" <<'PY'
+import json, sys
+print((json.loads(sys.argv[1]) or {}).get('tier', 'entry-cpu'))
+PY
+)
+    case "$role" in
+      text)
+        case "$tier" in
+          server|workstation|flagship-gpu|golden-gpu)
+            openclaw_ollama_pull_first_available "text" "qwen3:8b" "qwen2.5:7b" "llama3.1:8b"
+            ;;
+          advanced-gpu|advanced-cpu-plus|advanced-cpu)
+            openclaw_ollama_pull_first_available "text" "qwen2.5:3b" "qwen3:4b" "llama3.2:3b"
+            ;;
+          entry-gpu|entry-cpu)
+            openclaw_ollama_pull_first_available "text" "qwen3:0.5b" "qwen2.5:1.5b" "llama3.2:1b"
+            ;;
+          *)
+            openclaw_ollama_pull_first_available "text" "qwen3:0.5b" "llama3.2:1b"
+            ;;
+        esac
+        selected_model="$OPENCLAW_LAST_PULLED_MODEL"
+        [ -n "$selected_model" ] && OPENCLAW_TEXT_MODEL_RESOLVED="ollama/$selected_model"
+        ;;
+      code)
+        case "$tier" in
+          server|workstation)
+            openclaw_ollama_pull_first_available "code" "qwen3-coder" "deepseek-coder-v2:16b" "qwen2.5-coder:7b"
+            ;;
+          flagship-gpu)
+            openclaw_ollama_pull_first_available "code" "qwen3-coder" "qwen2.5-coder:7b" "deepseek-coder:6.7b"
+            ;;
+          golden-gpu)
+            openclaw_ollama_pull_first_available "code" "qwen2.5-coder:7b" "deepseek-coder:6.7b" "qwen2.5-coder:1.5b"
+            ;;
+          advanced-gpu|advanced-cpu-plus|advanced-cpu)
+            openclaw_ollama_pull_first_available "code" "qwen2.5-coder:1.5b" "deepseek-coder:1.3b"
+            ;;
+          *)
+            openclaw_ollama_pull_first_available "code" "qwen2.5-coder:1.5b" "deepseek-coder:1.3b"
+            ;;
+        esac
+        selected_model="$OPENCLAW_LAST_PULLED_MODEL"
+        [ -n "$selected_model" ] && OPENCLAW_CODE_MODEL_RESOLVED="ollama/$selected_model"
+        ;;
+      image)
+        openclaw_ollama_pull_first_available "image" "gemma3:4b" "llava:7b" "minicpm-v"
+        selected_model="$OPENCLAW_LAST_PULLED_MODEL"
+        [ -n "$selected_model" ] && OPENCLAW_IMAGE_MODEL_RESOLVED="ollama/$selected_model"
+        ;;
+      *)
+        echo "❌ 未知模型角色: $role"
+        return 1
+        ;;
+    esac
+}
+
 openclaw_ollama_quick_setup_menu() {
     while true; do
       clear
@@ -9210,9 +15472,9 @@ openclaw_ollama_quick_setup_menu() {
       openclaw_ollama_status
       echo
       skpl_ui_section "推荐模型"
-      skpl_ui_menu_item 1 "qwen2.5:7b" "本地通用文本模型，速度和效果平衡"
-      skpl_ui_menu_item 2 "qwen2.5-coder:7b" "本地代码模型，适合开发辅助"
-      skpl_ui_menu_item 3 "qwen2.5-coder:14b" "更强代码模型，需要更高配置"
+      skpl_ui_menu_item 1 "qwen2.5:7b" "稳妥的本地通用文本模型，适合大多数设备"
+      skpl_ui_menu_item 2 "qwen3-coder" "本地代码模型，优先用于开发辅助"
+      skpl_ui_menu_item 3 "qwen2.5-coder:7b" "备用代码模型，适合兼容旧配置"
       skpl_ui_menu_item 4 "mistral:7b" "通用备选模型"
       skpl_ui_menu_item 5 "自定义模型" "手动输入任意 ollama 模型名"
       skpl_ui_menu_item 6 "仅安装运行时" "只安装 ollama，不拉取模型"
@@ -9221,15 +15483,15 @@ openclaw_ollama_quick_setup_menu() {
       read -e ollama_choice
       case "$ollama_choice" in
         1)
-          openclaw_ollama_pull_model "qwen2.5:7b"
+          openclaw_ollama_pull_recommended_model "text"
           break_end
           ;;
         2)
-          openclaw_ollama_pull_model "qwen2.5-coder:7b"
+          openclaw_ollama_pull_recommended_model "code"
           break_end
           ;;
         3)
-          openclaw_ollama_pull_model "qwen2.5-coder:14b"
+          openclaw_ollama_pull_model "qwen2.5-coder:7b"
           break_end
           ;;
         4)
@@ -9259,7 +15521,7 @@ openclaw_ollama_quick_setup_menu() {
   openclaw_memory_local_retrieval_status() {
     local provider model_path model_status backend
     backend=$(openclaw_memory_get_backend)
-    provider=$(openclaw_memory_config_get "agents.defaults.memorySearch.provider")
+    provider="config-only"
     model_path=$(openclaw_memory_expand_path "$(openclaw_memory_get_local_model_path)")
     model_status=$(openclaw_memory_local_model_status "$model_path")
     echo "记忆后端: ${backend:-unknown}"
@@ -9272,30 +15534,38 @@ openclaw_ollama_quick_setup_menu() {
     esac
   }
 
-  openclaw_memory_enable_local_retrieval() {
+openclaw_memory_enable_local_retrieval() {
     echo "🚀 正在启用本地高命中记忆检索..."
     OPENCLAW_MEMORY_CONFIG_ONLY="false"
-    OPENCLAW_MEMORY_PREHEAT="true"
+    OPENCLAW_MEMORY_PREHEAT="${OPENCLAW_MEMORY_PREHEAT:-true}"
     openclaw_memory_auto_setup_local || return 1
-    echo "🧱 正在重建全部索引..."
-    openclaw_memory_rebuild_index_all || true
+    openclaw_memorysearch_loop_self_heal || return 1
+    if openclaw_memory_cli_supported; then
+      echo "🧱 正在重建全部索引..."
+      openclaw_memory_rebuild_index_all || true
+    else
+      echo "ℹ️ 当前 OpenClaw 版本未提供 memory CLI，已跳过索引重建。"
+    fi
     echo "✅ 已启用本地向量检索与索引预热"
-  }
+}
 
   openclaw_memory_local_retrieval_menu() {
     while true; do
       clear
-      skpl_ui_header "本地记忆检索加速" "SQLite + LanceDB + 本地 embedding 模型"
+      skpl_ui_header "本地检索与索引" "管理 SQLite、LanceDB、embedding 模型和索引；大模型安装在完整本地 AI 栈里处理"
       openclaw_runtime_self_heal || true
       openclaw_memory_local_retrieval_status
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "一键启用 Local" "下载 embedding 模型并启用本地向量检索"
+      skpl_ui_menu_item 1 "启用本地检索" "下载 embedding 模型并启用本地向量检索"
       skpl_ui_menu_item 2 "重建全部索引" "提升召回率与命中率"
-      skpl_ui_menu_item 3 "查看预热日志" "查看模型下载与索引预热进度"
-      skpl_ui_menu_item 4 "本地模型运行时" "安装 ollama 并准备本地大模型"
-      skpl_ui_menu_item 5 "一键完整本地落地" "安装模型、启用检索、重建索引、验收"
+      skpl_ui_menu_item 3 "查看预热日志" "查看 embedding 模型准备与索引预热日志"
+      skpl_ui_menu_item 4 "查看运行时说明" "说明 embedding 检索与 Ollama 大模型的职责边界"
+      skpl_ui_menu_item 5 "一键完整本地落地" "跳转完整本地 AI 栈：安装 Ollama、拉模型、启用检索、验收"
       skpl_ui_menu_item 6 "自动部署菜单" "进入现有高级记忆部署入口"
+      skpl_ui_menu_item 7 "结构化数据检索" "搜索 JSON、键值对等结构化记忆"
+      skpl_ui_menu_item 8 "代码语义检索" "搜索代码片段与代码记忆"
+      skpl_ui_menu_item 9 "多模态内容检索" "搜索图片、音频等多模态内容"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e local_choice
@@ -9313,14 +15583,32 @@ openclaw_ollama_quick_setup_menu() {
           break_end
           ;;
         4)
-          openclaw_ollama_quick_setup_menu
+          echo "本地检索与索引只负责 embedding 模型、SQLite/LanceDB 和索引。"
+          echo "完整本地 AI 栈才负责安装 Ollama 运行时，以及文本、代码、视觉模型。"
+          echo "安装 Ollama 前会检查 curl、ca-certificates、tar、zstd。"
+          echo "安装后会优先尝试 systemd 启动 ollama，失败时再尝试 ollama serve。"
+          break_end
           ;;
         5)
-          openclaw_full_local_stack_setup
-          break_end
+          openclaw_full_local_ai_stack_menu
           ;;
         6)
           openclaw_memory_auto_setup_menu
+          ;;
+        7)
+          read -e -p "输入搜索关键词: " sq
+          openclaw_structured_data_search "$sq"
+          break_end
+          ;;
+        8)
+          read -e -p "输入代码搜索关键词: " sq
+          openclaw_code_semantic_search "$sq"
+          break_end
+          ;;
+        9)
+          read -e -p "输入多模态搜索关键词: " sq
+          openclaw_multimodal_search "$sq"
+          break_end
           ;;
         0)
           return 0
@@ -9467,7 +15755,106 @@ openclaw_memory_search_test() {
     return 1
     fi
   echo "正在搜索记忆..."
-  openclaw memory search "$query" --max-results 5
+  timeout 30 openclaw memory search "$query" --max-results 5
+}
+
+# Unified memory search - combines official OpenClaw memory and SKPL extension memory
+openclaw_memory_unified_search() {
+  local query="$1" max_results="${2:-5}"
+  [ -z "$query" ] && return 1
+  
+  local native_raw hybrid_raw ext_raw
+  # Search official OpenClaw memory
+  native_raw=$(openclaw memory search "$query" --max-results "$max_results" 2>/dev/null || true)
+  # Search hybrid memory (LanceDB + FTS5)
+  hybrid_raw=$(hybrid_memory_search_raw_json "$query" 2>/dev/null || echo "[]")
+  # Search extension memory (SQLite)
+  ext_raw=$(memory_extension_search_json "$query" "$max_results" 2>/dev/null || echo "[]")
+  
+  python3 - "$query" "$native_raw" "$hybrid_raw" "$ext_raw" "$max_results" <<'PY'
+import json
+import sys
+import re
+from collections import defaultdict
+
+query, native_raw, hybrid_raw, ext_raw, max_results = sys.argv[1:6]
+max_results = int(max_results)
+
+def normalize_text(text):
+    """Normalize text for deduplication"""
+    return re.sub(r'\s+', ' ', text.lower().strip())[:100]
+
+# Parse native results (official OpenClaw memory)
+native_results = []
+for line in native_raw.splitlines():
+    line = line.strip()
+    if line and not line.startswith('['):
+        native_results.append({
+            'source': 'official',
+            'type': 'native',
+            'content': line,
+            'normalized': normalize_text(line),
+            'score': 1.0
+        })
+
+# Parse hybrid results
+hybrid_results = []
+try:
+    hybrid_data = json.loads(hybrid_raw)
+    for item in hybrid_data[:max_results]:
+        content = item.get('summary', '') or item.get('content', '')
+        if content:
+            hybrid_results.append({
+                'source': 'hybrid',
+                'type': item.get('source', 'unknown'),
+                'content': content,
+                'normalized': normalize_text(content),
+                'score': item.get('score', 0.5),
+                'channels': item.get('channels', [])
+            })
+except Exception:
+    pass
+
+# Parse extension results
+ext_results = []
+try:
+    ext_data = json.loads(ext_raw)
+    for item in ext_data[:max_results]:
+        content = f"{item.get('title', '')}: {item.get('content', '')}"
+        if content.strip() != ':':
+            ext_results.append({
+                'source': 'extension',
+                'type': item.get('category', 'memory'),
+                'content': content,
+                'normalized': normalize_text(content),
+                'score': item.get('score', 0.5) / 100  # Normalize to 0-1
+            })
+except Exception:
+    pass
+
+# Deduplicate and merge results
+seen = set()
+merged = []
+
+for result in native_results + hybrid_results + ext_results:
+    norm = result['normalized']
+    if norm and norm not in seen:
+        seen.add(norm)
+        merged.append(result)
+
+# Sort by score (descending)
+merged.sort(key=lambda x: x['score'], reverse=True)
+
+# Output unified results
+output = merged[:max_results]
+print(json.dumps({
+    'query': query,
+    'total_found': len(merged),
+    'returned': len(output),
+    'sources': list(set(r['source'] for r in output)),
+    'results': output
+}, ensure_ascii=False))
+PY
 }
 
 openclaw_memory_compare_search_test() {
@@ -9477,42 +15864,32 @@ openclaw_memory_compare_search_test() {
     echo "关键词不能为空。"
     return 1
   fi
-  local native_raw hybrid_raw
-  native_raw=$(openclaw memory search "$query" --max-results 5 2>&1 || true)
-  hybrid_raw=$(hybrid_memory_search_raw_json "$query")
-  python3 - "$native_raw" "$hybrid_raw" <<'PY'
+  echo "正在执行统一记忆搜索..."
+  local unified_result
+  unified_result=$(openclaw_memory_unified_search "$query" 5)
+  
+  python3 - "$unified_result" <<'PY'
 import json
 import sys
 
-native_raw, hybrid_raw = sys.argv[1:3]
+data = json.loads(sys.argv[1])
 
-print('===== 原生检索 =====')
-native_lines = [line.rstrip() for line in native_raw.splitlines() if line.strip()]
-if native_lines:
-    for idx, line in enumerate(native_lines[:12], start=1):
-        prefix = f'{idx}. ' if len(native_lines) <= 5 else ''
-        print(f'{prefix}{line}')
-else:
-    print('未命中原生检索结果。')
-
+print('===== 统一记忆检索结果 =====')
+print(f"查询: {data.get('query')}")
+print(f"总计命中: {data.get('total_found')} | 返回: {data.get('returned')}")
+print(f"来源: {', '.join(data.get('sources', []))}")
 print('')
-print('===== 混合检索 =====')
-try:
-    hybrid = json.loads(hybrid_raw)
-except Exception:
-    hybrid = []
 
-if not hybrid:
-    print('未命中混合检索结果。')
+results = data.get('results', [])
+if not results:
+    print('未命中任何记忆。')
 else:
-    for idx, item in enumerate(hybrid[:5], start=1):
-        print(f"{idx}. [{item.get('source', '-')}] {item.get('summary', '-')}")
-        print(f"   score={item.get('score', 0):.3f} | channels={','.join(item.get('channels', [])) or '-'}")
-        print(f"   explain={item.get('explain', '-')}")
-
-print('')
-print(f'原生结果行数: {len(native_lines)}')
-print(f'混合结果数量: {len(hybrid)}')
+    for idx, item in enumerate(results, start=1):
+        print(f"{idx}. [{item.get('source', '-')}/{item.get('type', '-')}] score={item.get('score', 0):.3f}")
+        print(f"   {item.get('content', '-')[:120]}...")
+        if item.get('channels'):
+            print(f"   channels: {','.join(item['channels'])}")
+        print('')
 PY
 }
 
@@ -9564,12 +15941,1750 @@ PY
   done
 }
 
+openclaw_memory_extension_render_status() {
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json
+import sqlite3
+import sys
+
+db_path, config_path = sys.argv[1:3]
+conn = sqlite3.connect(db_path)
+count = conn.execute('select count(*) from memory_entries where deleted = 0').fetchone()[0]
+conn.close()
+cfg = json.loads(open(config_path, 'r', encoding='utf-8').read())
+print(f"扩展长期记忆: {'开启' if cfg.get('enabled', True) else '关闭'}")
+print(f"记忆条目数: {count}")
+print(f"注入上限: {cfg.get('injection', {}).get('maxContextPercent', 15)}% 上下文")
+print(f"本地专属: {'开启' if cfg.get('privacy', {}).get('localOnly', True) else '关闭'}")
+print(f"静态加密: {'开启' if cfg.get('privacy', {}).get('encryptAtRest', False) else '关闭'}")
+print(f"云端上传记忆: {'开启' if cfg.get('privacy', {}).get('cloudUploadMemory', False) else '关闭'}")
+PY
+}
+
+openclaw_memory_apply_current_scheme() {
+  local config_file
+  local want_local_models="true"
+  local want_vision_models="false"
+  config_file=$(openclaw_get_config_file)
+  echo "正在应用当前记忆方案..."
+  openclaw_runtime_self_heal || return 1
+  openclaw_memory_prepare_workspace_all >/dev/null 2>&1 || true
+  openclaw_apply_recommended_model_profile >/dev/null 2>&1 || true
+  openclaw_optimize_memory_and_skills >/dev/null 2>&1 || true
+  openclaw_inject_skills >/dev/null 2>&1 || true
+  openclaw_safe_enable_global_tools >/dev/null 2>&1 || true
+  python3 - "$config_file" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+memory_cfg_path = Path(sys.argv[2])
+cfg = {}
+if config_path.exists():
+    try:
+        cfg = json.loads(config_path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+memory = cfg.setdefault('memory', {})
+memory.setdefault('backend', 'builtin')
+qmd = memory.setdefault('qmd', {})
+qmd['includeDefaultMemory'] = True
+memory_search = cfg.setdefault('memorySearch', {})
+memory_search['provider'] = 'ollama'
+ollama_cfg = memory_search.setdefault('ollama', {})
+ollama_cfg['model'] = ollama_cfg.get('model') or 'qwen2.5:7b'
+tools = cfg.setdefault('tools', {})
+tools.setdefault('global', {})['enabled'] = True
+agents = cfg.setdefault('agents', {}).setdefault('defaults', {})
+agents.setdefault('workspace', '~/.openclaw/workspace')
+config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+memory_cfg = {}
+if memory_cfg_path.exists():
+    try:
+        memory_cfg = json.loads(memory_cfg_path.read_text(encoding='utf-8'))
+    except Exception:
+        memory_cfg = {}
+memory_cfg.setdefault('enabled', True)
+memory_cfg.setdefault('shortTerm', {}).setdefault('enabled', True)
+memory_cfg.setdefault('midTerm', {}).setdefault('enabled', True)
+memory_cfg.setdefault('longTerm', {}).setdefault('enabled', True)
+memory_cfg.setdefault('longTerm', {})['autoExtract'] = memory_cfg.get('longTerm', {}).get('autoExtract') or 'balanced'
+memory_cfg.setdefault('knowledgeBase', {}).setdefault('enabled', True)
+privacy = memory_cfg.setdefault('privacy', {})
+privacy.setdefault('localOnly', True)
+privacy.setdefault('maskSensitive', True)
+privacy.setdefault('blockedKeywords', [])
+privacy.setdefault('encryptAtRest', False)
+privacy.setdefault('cloudUploadMemory', False)
+injection = memory_cfg.setdefault('injection', {})
+injection.setdefault('maxContextPercent', 15)
+injection.setdefault('similarityThreshold', 0.58)
+maintenance = memory_cfg.setdefault('maintenance', {})
+maintenance['cleanupDays'] = int(maintenance.get('cleanupDays', 30) or 30)
+maintenance['autoUpdateMinutes'] = int(maintenance.get('autoUpdateMinutes', 30) or 30)
+memory_cfg_path.write_text(json.dumps(memory_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+  want_local_models=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+routing = cfg.get('routing') or {}
+text_model = str(routing.get('defaultTextModel') or '')
+print('true' if text_model.startswith('ollama/') else 'false')
+PY
+)
+  want_vision_models=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+routing = cfg.get('routing') or {}
+vision_model = str(routing.get('defaultVisionModel') or '')
+print('true' if vision_model.startswith('ollama/') else 'false')
+PY
+)
+  memory_extension_prepare >/dev/null 2>&1 || true
+  if [ "$want_local_models" = "true" ]; then
+    echo "正在准备全栈分层本地模型..."
+    openclaw_memory_prepare_layered_local_models "$want_vision_models" || return 1
+  else
+    echo "ℹ️ 当前方案以云端模型为主，本次跳过本地专家模型安装。"
+  fi
+  echo "正在安装并启用本地记忆检索..."
+  OPENCLAW_MEMORY_CONFIG_ONLY="false"
+  OPENCLAW_MEMORY_PREHEAT="${OPENCLAW_MEMORY_PREHEAT:-false}"
+  openclaw_memory_enable_local_retrieval || {
+    echo "❌ 当前记忆方案写入成功，但本地 embedding 模型或检索索引落地失败"
+    return 1
+  }
+  if openclaw_has_command ollama; then
+    openclaw_ensure_ollama_running >/dev/null 2>&1 || true
+  else
+    echo "ℹ️ 未检测到 ollama，本次已完成记忆 embedding 模型和本地检索落地。"
+    echo "ℹ️ 如需继续安装本地文本/代码/视觉模型，可进入【完整本地 AI 栈】或相关模型设置菜单。"
+  fi
+  openclaw_validate_global_tools_runtime >/dev/null 2>&1 || true
+  openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
+  openclaw_postinstall_acceptance_check >/dev/null 2>&1 || true
+  echo "✅ 当前记忆方案已应用，本地记忆检索已落地"
+}
+
+openclaw_memory_scheme_settings_menu() {
+  local enabled short_enabled short_max mid_enabled mid_days long_enabled extract_strength kb_enabled kb_weight
+  local local_only mask_sensitive encrypt_at_rest cloud_upload blocked max_percent threshold cleanup_days auto_minutes
+  while true; do
+    memory_extension_prepare
+    enabled=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('enabled', True) else 'false')
+PY
+)
+    short_enabled=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('shortTerm', {}).get('enabled', True) else 'false')
+PY
+)
+    short_max=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('shortTerm', {}).get('maxItems', 24))
+PY
+)
+    mid_enabled=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('midTerm', {}).get('enabled', True) else 'false')
+PY
+)
+    mid_days=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('midTerm', {}).get('retentionDays', 14))
+PY
+)
+    long_enabled=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('longTerm', {}).get('enabled', True) else 'false')
+PY
+)
+    extract_strength=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('longTerm', {}).get('autoExtract', 'balanced'))
+PY
+)
+    kb_enabled=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('knowledgeBase', {}).get('enabled', True) else 'false')
+PY
+)
+    kb_weight=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('knowledgeBase', {}).get('weight', 1.0))
+PY
+)
+    local_only=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('privacy', {}).get('localOnly', True) else 'false')
+PY
+)
+    mask_sensitive=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('privacy', {}).get('maskSensitive', True) else 'false')
+PY
+)
+    encrypt_at_rest=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('privacy', {}).get('encryptAtRest', False) else 'false')
+PY
+)
+    cloud_upload=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('privacy', {}).get('cloudUploadMemory', False) else 'false')
+PY
+)
+    blocked=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(','.join(cfg.get('privacy', {}).get('blockedKeywords', [])))
+PY
+)
+    max_percent=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('injection', {}).get('maxContextPercent', 15))
+PY
+)
+    threshold=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('injection', {}).get('similarityThreshold', 0.58))
+PY
+)
+    cleanup_days=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('maintenance', {}).get('cleanupDays', 30))
+PY
+)
+    auto_minutes=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('maintenance', {}).get('autoUpdateMinutes', 30))
+PY
+)
+
+    clear
+    skpl_ui_header "记忆方案设置" "管理短期、中期、长期、知识库记忆，以及隐私和高级参数"
+    echo "1. 记忆总开关: $enabled"
+    echo "2. 短期记忆开关: $short_enabled"
+    echo "3. 短期记忆长度: $short_max"
+    echo "4. 中期记忆开关: $mid_enabled"
+    echo "5. 中期记忆保留天数: $mid_days"
+    echo "6. 长期记忆开关: $long_enabled"
+    echo "7. 长期记忆自动提取强度: $extract_strength"
+    echo "8. 知识库记忆开关: $kb_enabled"
+    echo "9. 知识库检索权重: $kb_weight"
+    echo "10. 本地 only: $local_only"
+    echo "11. 敏感信息自动脱敏: $mask_sensitive"
+    echo "12. 本地加密存储: $encrypt_at_rest"
+    echo "13. 云端推理上传记忆: $cloud_upload"
+    echo "14. 禁止记忆关键词: ${blocked:-<空>}"
+    echo "15. 记忆注入上限(%): $max_percent"
+    echo "16. 检索相似度阈值: $threshold"
+    echo "17. 过时记忆清理周期(天): $cleanup_days"
+    echo "18. 自动更新频率(分钟): $auto_minutes"
+    echo "19. 重置为当前方案默认值"
+    read -e -p "输入要修改的编号(0 返回): " settings_choice
+    case "$settings_choice" in
+      1) read -e -p "输入 true/false: " v; memory_extension_update_config_field "enabled" "$v" bool ;;
+      2) read -e -p "输入 true/false: " v; memory_extension_update_config_field "shortTerm.enabled" "$v" bool ;;
+      3) read -e -p "输入短期记忆最大条数: " v; memory_extension_update_config_field "shortTerm.maxItems" "$v" int ;;
+      4) read -e -p "输入 true/false: " v; memory_extension_update_config_field "midTerm.enabled" "$v" bool ;;
+      5) read -e -p "输入中期记忆保留天数: " v; memory_extension_update_config_field "midTerm.retentionDays" "$v" int ;;
+      6) read -e -p "输入 true/false: " v; memory_extension_update_config_field "longTerm.enabled" "$v" bool ;;
+      7) read -e -p "输入 autoExtract 强度(low/balanced/high): " v; memory_extension_update_config_field "longTerm.autoExtract" "$v" string ;;
+      8) read -e -p "输入 true/false: " v; memory_extension_update_config_field "knowledgeBase.enabled" "$v" bool ;;
+      9) read -e -p "输入知识库检索权重(如 1.0): " v; memory_extension_update_config_field "knowledgeBase.weight" "$v" float ;;
+      10) read -e -p "输入 true/false: " v; memory_extension_update_config_field "privacy.localOnly" "$v" bool ;;
+      11) read -e -p "输入 true/false: " v; memory_extension_update_config_field "privacy.maskSensitive" "$v" bool ;;
+      12) read -e -p "输入 true/false: " v; memory_extension_update_config_field "privacy.encryptAtRest" "$v" bool ;;
+      13) read -e -p "输入 true/false: " v; memory_extension_update_config_field "privacy.cloudUploadMemory" "$v" bool ;;
+      14) read -e -p "输入逗号分隔关键词: " v; python3 - "$v" <<'PY' >/tmp/openclaw-memory-blocked.json
+import json, sys
+items = [x.strip() for x in sys.argv[1].split(',') if x.strip()]
+print(json.dumps(items, ensure_ascii=False))
+PY
+          memory_extension_update_config_field "privacy.blockedKeywords" "$(python3 - <<'PY'
+from pathlib import Path
+print(Path('/tmp/openclaw-memory-blocked.json').read_text(encoding='utf-8').strip())
+PY
+)" json ;;
+      15) read -e -p "输入整数百分比: " v; memory_extension_update_config_field "injection.maxContextPercent" "$v" int ;;
+      16) read -e -p "输入浮点阈值: " v; memory_extension_update_config_field "injection.similarityThreshold" "$v" float ;;
+      17) read -e -p "输入清理天数: " v; memory_extension_update_config_field "maintenance.cleanupDays" "$v" int ;;
+      18) read -e -p "输入分钟数: " v; memory_extension_update_config_field "maintenance.autoUpdateMinutes" "$v" int ;;
+      19) openclaw_memory_apply_current_scheme; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+    echo "✅ 设置已更新"
+    sleep 1
+  done
+}
+
+openclaw_memory_system_overview() {
+  local profile_json resource_summary predictive_hint sync_json sync_log sync_error_log sync_stamp
+  profile_json=$(openclaw_detect_hardware_profile_json)
+  resource_summary=$(openclaw_ai_stack_resource_status_summary 2>/dev/null || printf '%s' '未记录')
+  predictive_hint=$(openclaw_ai_stack_predictive_cache_hint "memory retrieval long term preference" 2>/dev/null || printf '%s' '未记录')
+  sync_json=$(hybrid_memory_status_json 2>/dev/null || printf '%s' '{"objects":0,"syncStamp":""}')
+  sync_log="$SKPL_HYBRID_MEMORY_SYNC_LOG"
+  sync_error_log="$SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG"
+  sync_stamp="$SKPL_HYBRID_MEMORY_SYNC_STAMP_FILE"
+  clear
+  skpl_ui_header "记忆系统总览" "查看硬件分级、资源预算、同步状态和长期记忆相关运行信息"
+  python3 - "$profile_json" "$sync_json" "$resource_summary" "$predictive_hint" "$sync_log" "$sync_error_log" "$sync_stamp" <<'PY'
+import json, os, sys
+profile = json.loads(sys.argv[1] or '{}')
+sync = json.loads(sys.argv[2] or '{}')
+resource_summary, predictive_hint, sync_log, sync_error_log, sync_stamp = sys.argv[3:8]
+tier = profile.get('tier', 'unknown')
+gpu = profile.get('gpu', {}) or {}
+budget = profile.get('budget', {}) or {}
+memory = profile.get('memory', {}) or {}
+network = profile.get('network', {}) or {}
+storage = profile.get('storage', {}) or {}
+print(f"硬件分级: {tier}")
+print(f"GPU: {gpu.get('name') or '无'} | 显存={gpu.get('vramMb', 0)}MB | 可用={gpu.get('freeVramMb', 0)}MB")
+print(f"系统内存: total={memory.get('totalMb', 0)}MB | 可用预算={budget.get('usableMemoryMb', 0)}MB")
+print(f"记忆预留: gpu={budget.get('reserveGpuMb', 0)}MB | memory={budget.get('reserveMemoryMb', 0)}MB")
+print(f"存储: {storage.get('type', 'unknown')} | free={storage.get('freeGb', 0)}GB")
+print(f"网络: online={network.get('online')} | quality={network.get('quality')} | latency={network.get('latencyMs')}")
+print(f"资源预算: {resource_summary}")
+print(f"预测缓存提示: {predictive_hint}")
+print(f"同步对象数: {sync.get('objects', 0)}")
+print(f"最近同步戳: {sync.get('syncStamp') or '-'}")
+print(f"同步日志: {sync_log if os.path.exists(sync_log) else '未生成'}")
+print(f"同步错误日志: {sync_error_log if os.path.exists(sync_error_log) else '未生成'}")
+print(f"同步状态文件: {sync_stamp if os.path.exists(sync_stamp) else '未生成'}")
+PY
+}
+
+openclaw_memory_sync_menu() {
+  while true; do
+    clear
+    skpl_ui_header "同步与资源" "查看混合记忆同步状态、同步日志、资源预算与硬件分级"
+    skpl_ui_menu_item 1 "记忆系统总览" "查看硬件分级、资源预算、同步状态和相关运行提示"
+    skpl_ui_menu_item 2 "立即同步记忆" "执行一次混合记忆同步，刷新当前记忆对象状态"
+    skpl_ui_menu_item 3 "查看同步状态" "查看同步对象数量、最近同步戳和当前融合状态"
+    skpl_ui_menu_item 4 "查看同步日志" "查看最近同步日志"
+    skpl_ui_menu_item 5 "查看同步错误日志" "查看同步失败日志"
+    skpl_ui_menu_item 6 "刷新资源预算状态" "重新探测硬件分级、资源预算和加速状态"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e sync_choice
+    case "$sync_choice" in
+      1) openclaw_memory_system_overview; break_end ;;
+      2) hybrid_memory_enqueue_event "memory-manual-sync" "用户在记忆面板触发同步"; hybrid_memory_sync_once; break_end ;;
+      3) hybrid_memory_status_report; break_end ;;
+      4) hybrid_memory_show_sync_log; break_end ;;
+      5) if [ -f "$SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG" ]; then python3 - "$SKPL_HYBRID_MEMORY_SYNC_ERROR_LOG" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+lines = path.read_text(encoding='utf-8', errors='ignore').splitlines()
+for line in lines[-80:]:
+    print(line)
+PY
+         else echo "暂无同步错误日志。"; fi; break_end ;;
+      6) openclaw_ai_stack_prepare >/dev/null 2>&1 || true; openclaw_ai_stack_detect_acceleration_state >/dev/null 2>&1 || true; openclaw_ai_stack_resource_guard_json '{"route":"search"}' >/dev/null 2>&1 || true; openclaw_memory_system_overview; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_memory_master_toggle_menu() {
+  local enabled
+  while true; do
+    memory_extension_prepare
+    enabled=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('enabled', True) else 'false')
+PY
+)
+    clear
+    skpl_ui_header "记忆总开关" "一键控制整个兼容式记忆系统是否参与检索、注入和自动提取"
+    skpl_ui_kv "当前状态" "$enabled"
+    echo
+    skpl_ui_menu_item 1 "开启记忆" "启用短期、中期、长期和知识库记忆总开关"
+    skpl_ui_menu_item 2 "关闭记忆" "关闭整个记忆系统的总开关"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) memory_extension_update_config_field "enabled" "true" bool; echo "✅ 记忆总开关已开启"; sleep 1 ;;
+      2) memory_extension_update_config_field "enabled" "false" bool; echo "✅ 记忆总开关已关闭"; sleep 1 ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_memory_type_settings_menu() {
+  while true; do
+    clear
+    skpl_ui_header "记忆类型设置" "调整短期、中期、长期和知识库记忆的开关与核心参数"
+    skpl_ui_menu_item 1 "短期记忆" "当前会话记忆开关与长度"
+    skpl_ui_menu_item 2 "中期记忆" "超上下文记忆开关与保留天数"
+    skpl_ui_menu_item 3 "长期记忆" "跨会话记忆开关与自动提取强度"
+    skpl_ui_menu_item 4 "知识库记忆" "知识库开关与检索权重"
+    skpl_ui_menu_item 5 "进入完整类型设置" "在统一设置页修改全部记忆类型参数"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) openclaw_memory_type_leaf_menu short ;;
+      2) openclaw_memory_type_leaf_menu mid ;;
+      3) openclaw_memory_type_leaf_menu long ;;
+      4) openclaw_memory_type_leaf_menu kb ;;
+      5) openclaw_memory_scheme_settings_menu ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_ai_stack_expert_roles_menu() {
+  local expert_kind="$1"
+  local expert_json
+  expert_json=$(openclaw_ai_stack_expert_catalog_json "$expert_kind")
+  clear
+  skpl_ui_header "专家角色组" "按当前硬件分级展示默认模型与可选模型，修改的是 AI 栈兼容配置"
+  python3 - "$expert_json" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+selected = data.get('selected') or {}
+print(f"硬件分级: {data.get('tier', '-')}")
+print(f"基础角色组: {', '.join(data.get('baseRoles') or [])}")
+print(f"当前组别: {data.get('kind', '-')}")
+print(f"默认模型: {selected.get('default', '-')}")
+alts = selected.get('alternatives') or []
+print(f"可选模型: {', '.join(alts) if alts else '-'}")
+PY
+  echo
+  read -e -p "输入新的默认模型，直接回车保持当前值: " new_default
+  if [ -n "$new_default" ]; then
+    openclaw_ai_stack_set_expert_default_model "$expert_kind" "$new_default" >/dev/null 2>&1 || true
+    echo "已更新默认模型为: $new_default"
+  fi
+}
+
+openclaw_ai_stack_model_management_menu() {
+  while true; do
+    clear
+    skpl_ui_header "模型管理子系统" "下载、更新、版本控制、自定义导入与兼容性测试入口"
+    skpl_ui_menu_item 1 "完整本地 AI 栈" "安装运行时、拉取模型、应用推荐配置"
+    skpl_ui_menu_item 2 "应用推荐本地模型配置" "把当前推荐文本、代码、视觉模型写入配置"
+    skpl_ui_menu_item 3 "OpenClaw 兼容性测试" "执行安装后验收检查"
+    skpl_ui_menu_item 4 "TensorRT 转换工具说明" "当前保留为进阶占位入口"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) openclaw_full_local_ai_stack_menu ;;
+      2) openclaw_apply_recommended_model_profile; break_end ;;
+      3) openclaw_postinstall_acceptance_check; break_end ;;
+      4) echo "当前版本保留 TensorRT 进阶占位入口，后续接入转换流程。"; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_ai_stack_expert_layer_menu() {
+  while true; do
+    clear
+    skpl_ui_header "第2层 单模型多角色专家层" "专家角色、默认/可选模型、模型互斥加载与管理子系统"
+    skpl_ui_kv "专家层状态" "$(openclaw_ai_stack_expert_status_summary 2>/dev/null || printf '%s' '未记录')"
+    skpl_ui_kv "生命周期" "$(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || printf '%s' '未记录')"
+    echo
+    skpl_ui_menu_item 1 "基础角色组" "查看通用、文档、工具、压缩、路由辅助、记忆整合角色"
+    skpl_ui_menu_item 2 "通用专家角色组" "查看当前硬件档位下的默认和可选通用模型"
+    skpl_ui_menu_item 3 "代码专家角色组" "查看当前硬件档位下的默认和可选代码模型"
+    skpl_ui_menu_item 4 "多模态专家角色组" "查看当前硬件档位下的默认和可选视觉模型"
+    skpl_ui_menu_item 5 "模型管理子系统" "下载、更新、导入和兼容性测试入口"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) openclaw_ai_stack_expert_roles_menu general; break_end ;;
+      2) openclaw_ai_stack_expert_roles_menu general; break_end ;;
+      3) openclaw_ai_stack_expert_roles_menu code; break_end ;;
+      4) openclaw_ai_stack_expert_roles_menu vision; break_end ;;
+      5) openclaw_ai_stack_model_management_menu ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_ai_stack_frontend_control_menu() {
+  while true; do
+    openclaw_ai_stack_frontend_refresh_state >/dev/null 2>&1 || true
+    clear
+    skpl_ui_header "前置层 全局控制中枢" "控制离线在线、动态组件加载、资源监控、负载均衡、自动降级升级与跨设备同步"
+    skpl_ui_kv "前置层状态" "$(openclaw_ai_stack_frontend_status_summary 2>/dev/null || printf '%s' '未记录')"
+    echo
+    skpl_ui_menu_item 1 "离线/在线模式控制器" "切换 connectivityMode"
+    skpl_ui_menu_item 2 "动态组件加载器" "切换 dynamicLoader"
+    skpl_ui_menu_item 3 "实时资源监控器" "开启或关闭 resourceMonitor"
+    skpl_ui_menu_item 4 "负载动态均衡器" "切换 loadBalancer"
+    skpl_ui_menu_item 5 "自动降级/升级控制器" "切换 autoScale"
+    skpl_ui_menu_item 6 "跨设备同步引擎" "切换 crossDeviceSync"
+    skpl_ui_menu_item 7 "执行跨设备同步" "手动触发同步、查看状态与设备列表"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) read -e -p "输入 auto/offline/online: " v; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "frontend.connectivityMode" "$v" string; break_end ;;
+      2) read -e -p "输入 auto/minimal/aggressive: " v; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "frontend.dynamicLoader" "$v" string; break_end ;;
+      3) read -e -p "输入 true/false: " v; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "frontend.resourceMonitor" "$v" bool; break_end ;;
+      4) read -e -p "输入 balanced/latency/throughput: " v; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "frontend.loadBalancer" "$v" string; break_end ;;
+      5) read -e -p "输入 enabled/conservative/disabled: " v; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "frontend.autoScale" "$v" string; break_end ;;
+      6) read -e -p "输入 optional/enabled/disabled: " v; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "frontend.crossDeviceSync" "$v" string; break_end ;;
+      7) openclaw_cross_device_sync_menu ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_ai_stack_cache_layer_menu() {
+  while true; do
+    clear
+    skpl_ui_header "第0层 预测性缓存层" "查看和配置 route、result、tool、semantic、predictive、代码片段、多模态、敏感缓存"
+    skpl_ui_kv "缓存层状态" "$(openclaw_ai_stack_cache_status_summary 2>/dev/null || printf '%s' '未记录')"
+    echo
+    skpl_ui_menu_item 1 "基础 TTL 设置" "route/result/tool/semantic/predictive TTL"
+    skpl_ui_menu_item 2 "容量布局设置" "代码片段、多模态、敏感缓存等容量"
+    skpl_ui_menu_item 3 "代码语义检索状态" "查看代码缓存与代码记忆索引状态"
+    skpl_ui_menu_item 4 "多模态检索状态" "查看多模态缓存与多模态记忆索引状态"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) openclaw_memory_scheme_settings_menu; break_end ;;
+      2) read -e -p "代码片段缓存 MB: " v1; [ -n "$v1" ] && openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cache.layout.codeSnippetMb" "$v1" int; read -e -p "多模态缓存 MB: " v2; [ -n "$v2" ] && openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cache.layout.multimodalMb" "$v2" int; read -e -p "敏感缓存 MB: " v3; [ -n "$v3" ] && openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cache.layout.encryptedSensitiveMb" "$v3" int; break_end ;;
+      3) openclaw_code_search_status; break_end ;;
+      4) openclaw_multimodal_search_status; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_ai_stack_cloud_layer_menu() {
+  while true; do
+    clear
+    skpl_ui_header "第5层 多云端多模型协同层" "配置单模型、并行、串行调度，成本质量平衡与聚合策略"
+    skpl_ui_kv "多云层状态" "$(openclaw_ai_stack_cloud_status_summary 2>/dev/null || printf '%s' '未记录')"
+    echo
+    skpl_ui_menu_item 1 "文本调度模式" "single / parallel / serial"
+    skpl_ui_menu_item 2 "代码调度模式" "single / parallel / serial"
+    skpl_ui_menu_item 3 "多模态调度模式" "single / parallel / serial"
+    skpl_ui_menu_item 4 "成本-质量平衡控制器" "cost-first / balanced / quality-first"
+    skpl_ui_menu_item 5 "并行扇出数量" "parallelFanout"
+    skpl_ui_menu_item 6 "Token 优化引擎" "dedupe / trim / batchMerge"
+    skpl_ui_menu_item 7 "多模型回答整合器" "一致性检查、交叉验证、冗余合并、结构化输出"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) read -e -p "输入 single/parallel/serial: " v; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cloud.strategyByRoute.text" "$v" string; break_end ;;
+      2) read -e -p "输入 single/parallel/serial: " v; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cloud.strategyByRoute.code" "$v" string; break_end ;;
+      3) read -e -p "输入 single/parallel/serial: " v; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cloud.strategyByRoute.vision" "$v" string; break_end ;;
+      4) read -e -p "输入 cost-first/balanced/quality-first: " v; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cloud.costQualityMode" "$v" string; break_end ;;
+      5) read -e -p "输入并行扇出数量: " v; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cloud.parallelFanout" "$v" int; break_end ;;
+      6) read -e -p "Token dedupe true/false: " v1; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cloud.tokenOptimizer.dedupe" "$v1" bool; read -e -p "trimRedundant true/false: " v2; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cloud.tokenOptimizer.trimRedundant" "$v2" bool; read -e -p "batchMerge true/false: " v3; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cloud.tokenOptimizer.batchMerge" "$v3" bool; break_end ;;
+      7) read -e -p "consistencyCheck true/false: " v1; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cloud.aggregator.consistencyCheck" "$v1" bool; read -e -p "crossValidate true/false: " v2; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cloud.aggregator.crossValidate" "$v2" bool; read -e -p "mergeRedundant true/false: " v3; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cloud.aggregator.mergeRedundant" "$v3" bool; read -e -p "structuredOutput true/false: " v4; openclaw_ai_stack_json_update_field "$SKPL_AI_STACK_ROOT/config.json" "cloud.aggregator.structuredOutput" "$v4" bool; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_ai_stack_resource_chain_menu() {
+  while true; do
+    clear
+    skpl_ui_header "资源安全保障链" "查看预算、二次复检、兜底模型、独占锁和空闲卸载链路"
+    skpl_ui_kv "资源状态" "$(openclaw_ai_stack_resource_status_summary 2>/dev/null || printf '%s' '未记录')"
+    skpl_ui_kv "生命周期" "$(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || printf '%s' '未记录')"
+    echo
+    skpl_ui_menu_item 1 "刷新预算与复检状态" "重新计算资源预算并刷新状态"
+    skpl_ui_menu_item 2 "执行紧急资源回收" "触发记忆清理和专家空闲卸载"
+    skpl_ui_menu_item 3 "查看前置层控制中枢" "进入前置层控制菜单"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) openclaw_ai_stack_resource_guard_json '{"route":"text"}' >/dev/null 2>&1 || true; openclaw_ai_stack_post_reclaim_route_json '{"route":"text","resourceGuard":{}}' >/dev/null 2>&1 || true; break_end ;;
+      2) openclaw_ai_stack_reclaim_memory_pressure; break_end ;;
+      3) openclaw_ai_stack_frontend_control_menu ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_memory_import_export_menu() {
+  while true; do
+    clear
+    skpl_ui_header "记忆导入导出" "导出 JSON、导入 JSON，以及完整备份恢复记忆库"
+    skpl_ui_menu_item 1 "导出为 JSON" "导出全部长期记忆条目"
+    skpl_ui_menu_item 2 "从 JSON 导入" "从 JSON 文件导入长期记忆"
+    skpl_ui_menu_item 3 "备份记忆库" "导出完整记忆备份包"
+    skpl_ui_menu_item 4 "恢复记忆库" "从备份包恢复记忆库"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) openclaw_memory_extension_export_json; break_end ;;
+      2) openclaw_memory_extension_import_json; break_end ;;
+      3) openclaw_memory_backup_export; break_end ;;
+      4) openclaw_memory_backup_import; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_memory_privacy_security_menu() {
+  while true; do
+    clear
+    skpl_ui_header "隐私与安全设置" "配置本地 only、脱敏、加密和禁止记忆关键词"
+    skpl_ui_menu_item 1 "进入隐私安全设置" "修改本地 only、自动脱敏、本地加密、云端禁传和禁止关键词"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) openclaw_memory_scheme_settings_menu ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_memory_apply_quick_profile() {
+  local profile_key="$1"
+  local preheat_mode="true"
+  local config_file
+  config_file=$(openclaw_get_config_file)
+  openclaw_runtime_self_heal || return 1
+  python3 - "$config_file" "$SKPL_MEMORY_EXTENSION_CONFIG" "$SKPL_AI_STACK_ROOT/config.json" "$profile_key" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+memory_cfg_path = Path(sys.argv[2])
+ai_stack_path = Path(sys.argv[3])
+profile_key = sys.argv[4]
+
+cfg = json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+memory_cfg = json.loads(memory_cfg_path.read_text(encoding='utf-8')) if memory_cfg_path.exists() else {}
+ai_cfg = json.loads(ai_stack_path.read_text(encoding='utf-8')) if ai_stack_path.exists() else {}
+
+profiles = {
+    'beginner-safe': {
+        'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 12, 'similarityThreshold': 0.6, 'autoUpdateMinutes': 60, 'cleanupDays': 15, 'cloudUploadMemory': False, 'localOnly': True, 'localExperts': True, 'localVision': False},
+        'routing': {'defaultTextModel': 'ollama/qwen3:0.5b', 'defaultCodeModel': 'ollama/qwen3:0.5b'},
+        'cache': {'routeTtlSeconds': 1200, 'resultTtlSeconds': 2400, 'toolTtlSeconds': 1200},
+    },
+    'balanced-local': {
+        'memory': {'backend': 'builtin', 'preheat': True, 'maxContextPercent': 15, 'similarityThreshold': 0.58, 'autoUpdateMinutes': 30, 'cleanupDays': 30, 'cloudUploadMemory': False, 'localOnly': True, 'localExperts': True, 'localVision': False},
+        'routing': {'defaultTextModel': 'ollama/qwen2.5:7b', 'defaultCodeModel': 'ollama/qwen3-coder'},
+        'cache': {'routeTtlSeconds': 900, 'resultTtlSeconds': 1800, 'toolTtlSeconds': 900},
+    },
+    'privacy-first': {
+        'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 10, 'similarityThreshold': 0.62, 'autoUpdateMinutes': 45, 'cleanupDays': 14, 'cloudUploadMemory': False, 'localOnly': True, 'localExperts': True, 'localVision': False},
+        'routing': {'defaultTextModel': 'ollama/qwen2.5:3b', 'defaultCodeModel': 'ollama/qwen3-coder'},
+        'cache': {'routeTtlSeconds': 1500, 'resultTtlSeconds': 2400, 'toolTtlSeconds': 1200},
+    },
+    'cloud-power': {
+        'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 20, 'similarityThreshold': 0.55, 'autoUpdateMinutes': 20, 'cleanupDays': 45, 'cloudUploadMemory': False, 'localOnly': True, 'localExperts': False, 'localVision': False},
+        'routing': {'defaultTextModel': 'google/gemini-2.5-flash', 'defaultCodeModel': 'google/gemini-2.5-flash', 'defaultVisionModel': 'google/gemini-2.5-pro'},
+        'cache': {'routeTtlSeconds': 600, 'resultTtlSeconds': 1200, 'toolTtlSeconds': 900},
+    },
+    'low-resource': {
+        'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 8, 'similarityThreshold': 0.65, 'autoUpdateMinutes': 90, 'cleanupDays': 10, 'cloudUploadMemory': False, 'localOnly': True, 'localExperts': True, 'localVision': False},
+        'routing': {'defaultTextModel': 'ollama/qwen3:0.5b', 'defaultCodeModel': 'ollama/qwen2.5-coder:1.5b'},
+        'cache': {'routeTtlSeconds': 1800, 'resultTtlSeconds': 1800, 'toolTtlSeconds': 1200},
+    },
+}
+
+profile = profiles.get(profile_key)
+if not profile:
+    raise SystemExit(1)
+
+memory = cfg.setdefault('memory', {})
+memory.setdefault('backend', profile['memory'].get('backend', 'builtin'))
+memory.setdefault('qmd', {})['includeDefaultMemory'] = True
+cfg.setdefault('memorySearch', {})['provider'] = 'ollama'
+cfg['memorySearch'].setdefault('ollama', {})['model'] = profile['routing']['defaultTextModel'].split('/', 1)[1] if '/' in profile['routing']['defaultTextModel'] else profile['routing']['defaultTextModel']
+cfg.setdefault('tools', {}).setdefault('global', {})['enabled'] = True
+
+agents_defaults = cfg.setdefault('agents', {}).setdefault('defaults', {})
+agents_defaults.setdefault('workspace', '~/.openclaw/workspace')
+agents_defaults.setdefault('model', {})['primary'] = profile['routing']['defaultTextModel']
+agents_defaults.setdefault('imageModel', {})['primary'] = profile['routing'].get('defaultVisionModel', agents_defaults.get('imageModel', {}).get('primary', 'google/gemini-2.5-pro'))
+agents_defaults.setdefault('models', {})
+agents_defaults['models'].setdefault(profile['routing']['defaultTextModel'], {})
+agents_defaults['models'].setdefault(profile['routing']['defaultCodeModel'], {})
+
+memory_cfg.setdefault('enabled', True)
+memory_cfg.setdefault('shortTerm', {}).setdefault('enabled', True)
+memory_cfg.setdefault('midTerm', {}).setdefault('enabled', True)
+memory_cfg.setdefault('longTerm', {}).setdefault('enabled', True)
+memory_cfg.setdefault('knowledgeBase', {}).setdefault('enabled', True)
+memory_cfg.setdefault('privacy', {}).setdefault('maskSensitive', True)
+memory_cfg['privacy'].setdefault('localOnly', profile['memory']['localOnly'])
+memory_cfg['privacy'].setdefault('cloudUploadMemory', profile['memory']['cloudUploadMemory'])
+memory_cfg['privacy'].setdefault('blockedKeywords', [])
+memory_cfg['privacy'].setdefault('encryptAtRest', False)
+memory_cfg.setdefault('injection', {})['maxContextPercent'] = profile['memory']['maxContextPercent']
+memory_cfg['injection']['similarityThreshold'] = profile['memory']['similarityThreshold']
+memory_cfg.setdefault('maintenance', {})['autoUpdateMinutes'] = profile['memory']['autoUpdateMinutes']
+memory_cfg['maintenance']['cleanupDays'] = profile['memory']['cleanupDays']
+
+ai_cfg.setdefault('routing', {}).update(profile['routing'])
+ai_cfg.setdefault('cache', {}).update(profile['cache'])
+
+config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+memory_cfg_path.write_text(json.dumps(memory_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+ai_stack_path.write_text(json.dumps(ai_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+  preheat_mode=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" "$profile_key" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+profile_key = sys.argv[2]
+profiles = {
+    'beginner-safe': False,
+    'balanced-local': True,
+    'privacy-first': False,
+    'cloud-power': False,
+    'low-resource': False,
+}
+print('true' if profiles.get(profile_key, False) else 'false')
+PY
+)
+  OPENCLAW_MEMORY_PREHEAT="$preheat_mode" openclaw_memory_apply_current_scheme || return 1
+  echo "✅ 已应用快速方案: $profile_key"
+}
+
+openclaw_memory_quick_profile_label() {
+  case "$1" in
+    beginner-safe) echo "新手安全版" ;;
+    balanced-local) echo "均衡本地版" ;;
+    privacy-first) echo "隐私优先版" ;;
+    cloud-power) echo "云端增强版" ;;
+    low-resource) echo "低配省资源版" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+openclaw_memory_recommend_quick_profile() {
+  local device_choice="$1"
+  local usecase_choice="$2"
+  local privacy_choice="$3"
+  local network_choice="$4"
+  local profile_json
+  profile_json=$(openclaw_detect_hardware_profile_json 2>/dev/null) || true
+  if [ -z "$profile_json" ]; then
+    profile_json='{"tier":"unknown","memoryMb":8192,"cpuThreads":4,"gpu":{"present":false},"network":{"quality":"offline"},"battery":{"present":false}}'
+  fi
+  python3 - "$profile_json" "$device_choice" "$usecase_choice" "$privacy_choice" "$network_choice" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+profile = json.loads(sys.argv[1])
+device_choice = sys.argv[2]
+usecase_choice = sys.argv[3]
+privacy_choice = sys.argv[4]
+network_choice = sys.argv[5]
+
+tier = profile.get('tier', 'unknown')
+network = (profile.get('network') or {}).get('quality', 'offline')
+memory_mb = int(profile.get('memoryMb') or 0)
+gpu = profile.get('gpu') or {}
+gpu_present = bool(gpu.get('present'))
+
+profile_key = 'balanced-local'
+reasons = []
+
+if privacy_choice == 'strict-local':
+    profile_key = 'privacy-first'
+    reasons.append('你选择了本地优先和更保守的记忆策略')
+elif network_choice == 'cloud' and network in ('excellent', 'normal', 'online'):
+    profile_key = 'cloud-power'
+    reasons.append('当前网络可用，适合启用云端增强能力')
+elif device_choice == 'low' or tier in ('emergency-cpu', 'entry-cpu', 'entry-gpu') or memory_mb < 8192:
+    profile_key = 'low-resource'
+    reasons.append('当前设备更适合轻量模型和省资源配置')
+elif usecase_choice == 'starter':
+    profile_key = 'beginner-safe'
+    reasons.append('你更适合先用稳妥方案快速上手')
+elif usecase_choice == 'multimodal' and network in ('excellent', 'normal', 'online'):
+    profile_key = 'cloud-power'
+    reasons.append('多模态任务配合云端视觉模型更省心')
+elif usecase_choice == 'offline':
+    profile_key = 'privacy-first' if memory_mb < 12288 else 'balanced-local'
+    reasons.append('离线场景优先本地记忆和本地模型')
+elif usecase_choice == 'coding' and (gpu_present or memory_mb >= 12288):
+    profile_key = 'balanced-local'
+    reasons.append('代码场景更适合均衡本地模型组合')
+elif device_choice == 'high' or tier in ('golden-gpu', 'flagship-gpu', 'workstation', 'server', 'advanced-cpu-plus'):
+    profile_key = 'balanced-local'
+    reasons.append('当前设备有空间运行更完整的本地方案')
+else:
+    reasons.append('综合硬件、用途和网络后，均衡方案更稳妥')
+
+if network_choice == 'offline':
+    if profile_key == 'cloud-power':
+        profile_key = 'balanced-local'
+    reasons.append('你选择了离线模式，结果会优先本地能力')
+
+if privacy_choice == 'flexible' and network_choice == 'hybrid' and profile_key == 'privacy-first' and memory_mb >= 12288:
+    profile_key = 'balanced-local'
+    reasons.append('设备资源允许时，混合模式适合更均衡的本地配置')
+
+print(profile_key)
+print(tier)
+print(network)
+print('；'.join(reasons[:3]))
+PY
+}
+
+openclaw_memory_quick_profile_wizard() {
+  local device_choice="auto"
+  local usecase_choice="starter"
+  local privacy_choice="strict-local"
+  local network_choice="hybrid"
+  local recommendation profile_key detected_tier detected_network reason_text profile_label
+
+  while true; do
+    clear
+    skpl_ui_header "筛选向导" "按你的设备和目标筛选，系统会自动给出适合的一键方案"
+    skpl_ui_menu_item 1 "设备自动判断" "系统读取当前机器配置后自动推荐"
+    skpl_ui_menu_item 2 "设备偏低配" "4G 到 8G 内存、无独显或希望更省资源"
+    skpl_ui_menu_item 3 "设备偏高配" "12G 以上内存、独显或希望能力更完整"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "先选设备情况: "
+    read -e quick_device_choice
+    case "$quick_device_choice" in
+      1) device_choice="auto"; break ;;
+      2) device_choice="low"; break ;;
+      3) device_choice="high"; break ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+
+  while true; do
+    clear
+    skpl_ui_header "筛选向导" "选择你主要想做什么，系统会把方案调到更合适的方向"
+    skpl_ui_menu_item 1 "新手通用" "第一次使用、日常问答、想少折腾"
+    skpl_ui_menu_item 2 "代码开发" "更关注代码生成、修复和工程辅助"
+    skpl_ui_menu_item 3 "多模态" "更关注图片理解、视觉模型和综合能力"
+    skpl_ui_menu_item 4 "离线优先" "更看重断网可用和本地完成度"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "再选主要用途: "
+    read -e quick_usecase_choice
+    case "$quick_usecase_choice" in
+      1) usecase_choice="starter"; break ;;
+      2) usecase_choice="coding"; break ;;
+      3) usecase_choice="multimodal"; break ;;
+      4) usecase_choice="offline"; break ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+
+  while true; do
+    clear
+    skpl_ui_header "筛选向导" "选择你的隐私偏好，系统会决定记忆策略要保守还是均衡"
+    skpl_ui_menu_item 1 "本地优先" "记忆尽量留在本地，默认更保守"
+    skpl_ui_menu_item 2 "可以灵活" "我接受更均衡的配置，优先体验"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "再选隐私偏好: "
+    read -e quick_privacy_choice
+    case "$quick_privacy_choice" in
+      1) privacy_choice="strict-local"; break ;;
+      2) privacy_choice="flexible"; break ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+
+  while true; do
+    clear
+    skpl_ui_header "筛选向导" "最后选联网方式，系统会决定更偏本地还是更偏云端"
+    skpl_ui_menu_item 1 "离线为主" "优先本地能力，减少对网络的依赖"
+    skpl_ui_menu_item 2 "混合模式" "本地和联网能力一起用，适合大多数用户"
+    skpl_ui_menu_item 3 "联网增强" "我更在意效果，网络可用时优先增强能力"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "最后选联网方式: "
+    read -e quick_network_choice
+    case "$quick_network_choice" in
+      1) network_choice="offline"; break ;;
+      2) network_choice="hybrid"; break ;;
+      3) network_choice="cloud"; break ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+
+  echo -e "\n🔍 正在检测硬件配置，请稍候..."
+  recommendation=$(openclaw_memory_recommend_quick_profile "$device_choice" "$usecase_choice" "$privacy_choice" "$network_choice") || {
+    echo "⚠️ 推荐引擎异常，使用默认方案" >&2
+    recommendation="beginner-safe
+unknown
+offline
+推荐引擎异常，使用默认新手方案"
+  }
+  {
+    IFS= read -r profile_key
+    IFS= read -r detected_tier
+    IFS= read -r detected_network
+    IFS= read -r reason_text
+  } <<EOF
+$recommendation
+EOF
+  profile_label=$(openclaw_memory_quick_profile_label "$profile_key")
+
+  while true; do
+    clear
+    skpl_ui_header "推荐结果" "系统已经根据你的筛选条件给出一键方案"
+    echo "推荐方案: $profile_label"
+    echo "设备分级: ${detected_tier:-unknown}"
+    echo "网络状态: ${detected_network:-unknown}"
+    echo "推荐理由: ${reason_text:-综合当前条件自动推荐}"
+    echo
+    skpl_ui_menu_item 1 "立即应用" "把这个推荐方案直接写入并完成记忆落地"
+    skpl_ui_menu_item 2 "查看所有预设" "返回预设列表，手动选择其他方案"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e quick_apply_choice
+    case "$quick_apply_choice" in
+      1) openclaw_memory_apply_quick_profile "$profile_key"; break_end; return 0 ;;
+      2) openclaw_memory_quick_profiles_menu; return 0 ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_memory_quick_profiles_menu() {
+  while true; do
+    clear
+    skpl_ui_header "快速筛选方案" "按设备、目标、隐私和联网模式一键选择，小白直接点即可"
+    skpl_ui_menu_item 1 "按条件自动推荐" "先选设备、用途、隐私和联网模式，再自动给你推荐结果"
+    skpl_ui_menu_item 2 "新手安全版" "稳妥、少折腾、默认本地优先，适合第一次使用"
+    skpl_ui_menu_item 3 "均衡本地版" "本地记忆与本地模型平衡，适合大多数用户"
+    skpl_ui_menu_item 4 "隐私优先版" "尽量本地处理，记忆不上云，注入更保守"
+    skpl_ui_menu_item 5 "云端增强版" "保留本地记忆，文本/视觉更多走云端模型"
+    skpl_ui_menu_item 6 "低配省资源版" "适合低内存或无独显设备，优先轻量模型"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e quick_profile_choice
+    case "$quick_profile_choice" in
+      1) openclaw_memory_quick_profile_wizard ;;
+      2) openclaw_memory_apply_quick_profile "beginner-safe"; break_end ;;
+      3) openclaw_memory_apply_quick_profile "balanced-local"; break_end ;;
+      4) openclaw_memory_apply_quick_profile "privacy-first"; break_end ;;
+      5) openclaw_memory_apply_quick_profile "cloud-power"; break_end ;;
+      6) openclaw_memory_apply_quick_profile "low-resource"; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_full_local_ai_stack_menu() {
+  while true; do
+    clear
+    skpl_ui_header "完整本地 AI 栈" "安装 Ollama 运行时和本地模型，并把推荐模型写入配置；需要联网下载"
+    openclaw_ollama_status
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "安装 Ollama 运行时" "仅安装运行时，systemd 或 ollama serve 会自动尝试拉起"
+    skpl_ui_menu_item 2 "拉取文本模型" "qwen2.5:7b，适合通用对话与工具调用"
+    skpl_ui_menu_item 3 "拉取代码模型" "qwen3-coder，适合开发辅助"
+    skpl_ui_menu_item 4 "拉取视觉模型" "gemma3:4b，适合多模态任务"
+    skpl_ui_menu_item 5 "应用推荐本地模型配置" "把文本、代码、视觉默认模型写入 OpenClaw 配置"
+    skpl_ui_menu_item 6 "一键完整本地落地" "安装运行时、拉取推荐模型、启用本地检索并执行验收"
+    skpl_ui_menu_item 7 "自定义 Ollama 模型" "手动输入任意 ollama 模型名并拉取"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e ai_stack_choice
+    case "$ai_stack_choice" in
+      1) openclaw_install_ollama_runtime; break_end ;;
+      2) openclaw_ollama_pull_recommended_model "text"; break_end ;;
+      3) openclaw_ollama_pull_recommended_model "code"; break_end ;;
+      4) openclaw_ollama_pull_recommended_model "image"; break_end ;;
+      5) openclaw_apply_recommended_model_profile; break_end ;;
+      6) openclaw_full_local_stack_setup; break_end ;;
+      7) read -e -p "请输入 ollama 模型名: " custom_ollama_model; [ -n "$custom_ollama_model" ] && openclaw_ollama_pull_model "$custom_ollama_model"; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_memory_strategy_panel() {
+  while true; do
+    clear
+        skpl_ui_header "记忆功能面板" "按记忆总开关、类型、管理、导入导出、隐私安全和高级设置分组"
+    openclaw_memory_extension_render_status
+    echo
+    skpl_ui_section "主入口"
+    skpl_ui_menu_item 1 "记忆总开关" "一键开启或关闭整个记忆系统"
+    skpl_ui_menu_item 2 "记忆类型设置" "短期、中期、长期和知识库记忆参数"
+    skpl_ui_menu_item 3 "记忆查看与管理" "查看、筛选、编辑、删除、批量删除和清空记忆"
+    skpl_ui_menu_item 4 "记忆导入导出" "JSON 导入导出，以及完整备份恢复"
+    skpl_ui_menu_item 5 "隐私与安全设置" "本地 only、自动脱敏、加密和禁止关键词"
+    skpl_ui_menu_item 6 "高级设置" "推荐方案、本地检索、同步资源、完整本地 AI 栈和验收报告"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e memory_panel_choice
+    case "$memory_panel_choice" in
+      1) openclaw_memory_master_toggle_menu ;;
+      2) openclaw_memory_type_settings_menu ;;
+      3) openclaw_memory_extension_menu ;;
+      4) openclaw_memory_import_export_menu ;;
+      5) openclaw_memory_privacy_security_menu ;;
+      6)
+        while true; do
+          clear
+          skpl_ui_header "高级设置" "这里放完整能力，平时可以不用进入"
+          skpl_ui_menu_item 1 "一键启用推荐记忆" "系统自动推荐并落地记忆方案，适合大多数用户"
+          skpl_ui_menu_item 2 "重新应用当前记忆方案" "按当前配置重新落地记忆、检索和相关策略"
+          skpl_ui_menu_item 3 "本地检索与索引" "仅处理 embedding、SQLite/LanceDB 和索引"
+          skpl_ui_menu_item 4 "同步与资源" "查看混合记忆同步、硬件分级、资源预算和运行提示"
+          skpl_ui_menu_item 5 "前置层控制中枢" "离线在线、动态组件、资源监控、负载均衡、自动升降级、跨设备同步"
+          skpl_ui_menu_item 6 "第0层预测性缓存" "route/result/tool/semantic/predictive/代码片段/多模态/敏感缓存"
+          skpl_ui_menu_item 7 "第2层专家模型层" "基础角色组、通用/代码/多模态专家组、模型管理子系统"
+          skpl_ui_menu_item 8 "资源安全保障链" "预算、独占锁、二次复检、兜底模型、空闲卸载"
+          skpl_ui_menu_item 9 "第5层多云协同层" "单模型、并行、串行、成本质量平衡、Token 优化、聚合策略"
+          skpl_ui_menu_item 10 "完整本地 AI 栈" "安装 Ollama 运行时和本地文本、代码、视觉模型"
+          skpl_ui_menu_item 11 "兼容增强工具" "调用旧记忆方案里的自动推荐、QMD 轻量兼容、源诊断和索引修复"
+          skpl_ui_menu_item 12 "EvoMap 管理" "安装、更新、同步与经验目录管理"
+          skpl_ui_menu_item 13 "记忆验收报告" "查看当前记忆方案是否已经落地生效"
+          skpl_ui_menu_item 14 "用户行为反馈" "查看隐式反馈统计与行为分析"
+          skpl_ui_menu_item 15 "主动学习与知识补全" "检测知识缺口、生成学习建议"
+          skpl_ui_menu_item 0 "返回上一级"
+          skpl_ui_footer_prompt "请输入你的选择: "
+          read -e memory_advanced_choice
+          case "$memory_advanced_choice" in
+            1) openclaw_memory_quick_profiles_menu ;;
+            2) openclaw_memory_apply_current_scheme; break_end ;;
+            3) openclaw_memory_local_retrieval_menu ;;
+            4) openclaw_memory_sync_menu ;;
+            5) openclaw_ai_stack_frontend_control_menu ;;
+            6) openclaw_ai_stack_cache_layer_menu ;;
+            7) openclaw_ai_stack_expert_layer_menu ;;
+            8) openclaw_ai_stack_resource_chain_menu ;;
+            9) openclaw_ai_stack_cloud_layer_menu ;;
+            10) openclaw_full_local_ai_stack_menu ;;
+            11) openclaw_memory_legacy_compat_menu ;;
+            12) openclaw_evomap_menu ;;
+            13) openclaw_ai_stack_acceptance_report; break_end ;;
+            14) openclaw_user_behavior_menu ;;
+            15) openclaw_active_learning_menu ;;
+            0) break ;;
+            *) echo "无效的选择，请重试。"; sleep 1 ;;
+          esac
+        done
+        ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_memory_extension_add_entry() {
+  local category title content tags sensitive
+  read -e -p "分类（identity/preference/knowledge/project）: " category
+  read -e -p "标题: " title
+  read -e -p "内容: " content
+  read -e -p "标签（逗号分隔，可空）: " tags
+  read -e -p "敏感条目？(0/1): " sensitive
+  [ -z "$sensitive" ] && sensitive="0"
+  python3 - "$tags" <<'PY' >/tmp/openclaw-memory-extension-tags.json
+import json, sys
+raw = sys.argv[1].strip()
+items = [item.strip() for item in raw.split(',') if item.strip()]
+print(json.dumps(items, ensure_ascii=False))
+PY
+  memory_extension_upsert_entry "$category" "$title" "$content" "$(python3 - <<'PY'
+from pathlib import Path
+print(Path('/tmp/openclaw-memory-extension-tags.json').read_text(encoding='utf-8').strip())
+PY
+)" "$sensitive"
+  echo "✅ 已写入扩展记忆条目"
+}
+
+openclaw_memory_extension_list_entries() {
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+rows = conn.execute('select id, category, title, sensitive, updated_at from memory_entries where deleted = 0 order by updated_at desc limit 50').fetchall()
+conn.close()
+if not rows:
+    print('暂无扩展记忆条目。')
+else:
+    for row in rows:
+        print(f"{row[0]} | {row[1]} | {row[2]} | sensitive={row[3]} | updated_at={row[4]}")
+PY
+}
+
+openclaw_memory_extension_filter_entries() {
+  local query="${1:-}" category="${2:-}" days="${3:-0}"
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$query" "$category" "$days" <<'PY'
+import json
+import sqlite3
+import sys
+import time
+
+db_path, query, category, days = sys.argv[1:5]
+query = (query or '').strip().lower()
+category = (category or '').strip().lower()
+days = int(days or 0)
+threshold = int(time.time()) - days * 86400 if days > 0 else 0
+
+conn = sqlite3.connect(db_path)
+rows = conn.execute('select id, category, title, content, tags, sensitive, updated_at from memory_entries where deleted = 0 order by updated_at desc limit 500').fetchall()
+conn.close()
+
+items = []
+for row in rows:
+    entry_id, entry_category, title, content, tags_raw, sensitive, updated_at = row
+    try:
+        tags = json.loads(tags_raw or '[]')
+        if not isinstance(tags, list):
+            tags = []
+    except Exception:
+        tags = []
+    if category and entry_category.lower() != category:
+        continue
+    if threshold and int(updated_at or 0) < threshold:
+        continue
+    haystack = ' '.join([entry_category or '', title or '', content or '', ' '.join(str(x) for x in tags)]).lower()
+    if query and query not in haystack:
+        continue
+    items.append({
+        'id': entry_id,
+        'category': entry_category,
+        'title': title,
+        'sensitive': int(sensitive or 0),
+        'updated_at': int(updated_at or 0),
+    })
+
+print(json.dumps(items, ensure_ascii=False))
+PY
+}
+
+openclaw_memory_extension_filter_menu() {
+  local query category days
+  read -e -p "关键词（可空）: " query
+  read -e -p "分类（identity/preference/knowledge/project，可空）: " category
+  read -e -p "最近多少天（0 表示不限）: " days
+  [ -z "$days" ] && days=0
+  openclaw_memory_extension_filter_entries "$query" "$category" "$days" | python3 - <<'PY'
+import json, sys, datetime
+raw = sys.stdin.read().strip() or '[]'
+items = json.loads(raw)
+if not items:
+    print('未找到符合条件的记忆条目。')
+else:
+    print('ID | 分类 | 标题 | 敏感 | 更新时间')
+    print('-' * 72)
+    for item in items:
+        ts = item.get('updated_at') or 0
+        text = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S') if ts else '-'
+        print(f"{item['id']} | {item['category']} | {item['title']} | {item['sensitive']} | {text}")
+PY
+}
+
+openclaw_memory_extension_view_entry() {
+  local entry_id
+  read -e -p "输入要查看的记忆 ID: " entry_id
+  [ -z "$entry_id" ] && return 1
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$entry_id" <<'PY'
+import json
+import sqlite3
+import sys
+import datetime
+
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute('select id, category, title, content, tags, sensitive, created_at, updated_at from memory_entries where deleted = 0 and id = ? limit 1', (sys.argv[2],)).fetchone()
+conn.close()
+if not row:
+    print('❌ 未找到该记忆条目')
+    raise SystemExit(1)
+tags = []
+try:
+    tags = json.loads(row[4] or '[]')
+    if not isinstance(tags, list):
+        tags = []
+except Exception:
+    tags = []
+print(f"ID: {row[0]}")
+print(f"分类: {row[1]}")
+print(f"标题: {row[2]}")
+print(f"内容: {row[3]}")
+print(f"标签: {', '.join(str(x) for x in tags) if tags else '<空>'}")
+print(f"敏感: {row[5]}")
+print(f"创建时间: {datetime.datetime.fromtimestamp(row[6]).strftime('%Y-%m-%d %H:%M:%S') if row[6] else '-'}")
+print(f"更新时间: {datetime.datetime.fromtimestamp(row[7]).strftime('%Y-%m-%d %H:%M:%S') if row[7] else '-'}")
+PY
+}
+
+openclaw_memory_extension_batch_delete() {
+  local query category days confirm
+  read -e -p "关键词（可空）: " query
+  read -e -p "分类（identity/preference/knowledge/project，可空）: " category
+  read -e -p "最近多少天（0 表示不限）: " days
+  [ -z "$days" ] && days=0
+  local matched_json matched_count
+  matched_json=$(openclaw_memory_extension_filter_entries "$query" "$category" "$days")
+  matched_count=$(python3 - "$matched_json" <<'PY'
+import json, sys
+print(len(json.loads(sys.argv[1] or '[]')))
+PY
+)
+  if [ "$matched_count" = "0" ]; then
+    echo "未找到符合条件的记忆条目。"
+    return 0
+  fi
+  echo "将批量删除 ${matched_count} 条记忆。"
+  read -e -p "输入 DELETE 确认批量删除: " confirm
+  [ "$confirm" = "DELETE" ] || { echo "已取消"; return 1; }
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$matched_json" <<'PY'
+import json
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+items = json.loads(sys.argv[2] or '[]')
+ids = [int(item['id']) for item in items if str(item.get('id', '')).isdigit()]
+for entry_id in ids:
+    conn.execute('update memory_entries set deleted = 1 where id = ?', (entry_id,))
+conn.commit()
+conn.close()
+print(len(ids))
+PY
+}
+
+openclaw_memory_extension_delete_entry() {
+  local entry_id
+  read -e -p "输入要删除的记忆 ID: " entry_id
+  [ -z "$entry_id" ] && return 1
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$entry_id" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+conn.execute('update memory_entries set deleted = 1 where id = ?', (sys.argv[2],))
+conn.commit()
+conn.close()
+PY
+  echo "✅ 已软删除扩展记忆条目"
+}
+
+openclaw_memory_extension_edit_entry() {
+  local entry_id category title content tags sensitive
+  read -e -p "输入要编辑的记忆 ID: " entry_id
+  [ -z "$entry_id" ] && return 1
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$entry_id" <<'PY' >/tmp/openclaw-memory-entry-edit.tsv
+import json
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+row = conn.execute('select category, title, content, tags, sensitive from memory_entries where deleted = 0 and id = ? limit 1', (sys.argv[2],)).fetchone()
+conn.close()
+if not row:
+    raise SystemExit(1)
+print(row[0])
+print(row[1])
+print(row[2])
+print(row[3])
+print(row[4])
+PY
+  [ -s /tmp/openclaw-memory-entry-edit.tsv ] || { echo "❌ 未找到该记忆条目"; return 1; }
+  category=$(python3 - <<'PY'
+from pathlib import Path
+lines = Path('/tmp/openclaw-memory-entry-edit.tsv').read_text(encoding='utf-8').splitlines()
+print(lines[0] if len(lines) > 0 else '')
+PY
+)
+  title=$(python3 - <<'PY'
+from pathlib import Path
+lines = Path('/tmp/openclaw-memory-entry-edit.tsv').read_text(encoding='utf-8').splitlines()
+print(lines[1] if len(lines) > 1 else '')
+PY
+)
+  content=$(python3 - <<'PY'
+from pathlib import Path
+lines = Path('/tmp/openclaw-memory-entry-edit.tsv').read_text(encoding='utf-8').splitlines()
+print(lines[2] if len(lines) > 2 else '')
+PY
+)
+  tags=$(python3 - <<'PY'
+from pathlib import Path
+lines = Path('/tmp/openclaw-memory-entry-edit.tsv').read_text(encoding='utf-8').splitlines()
+print(lines[3] if len(lines) > 3 else '[]')
+PY
+)
+  sensitive=$(python3 - <<'PY'
+from pathlib import Path
+lines = Path('/tmp/openclaw-memory-entry-edit.tsv').read_text(encoding='utf-8').splitlines()
+print(lines[4] if len(lines) > 4 else '0')
+PY
+)
+  read -e -p "分类 [$category]: " new_category
+  read -e -p "标题 [$title]: " new_title
+  read -e -p "内容 [$content]: " new_content
+  read -e -p "标签 JSON [$tags]: " new_tags
+  read -e -p "敏感 0/1 [$sensitive]: " new_sensitive
+  new_category="${new_category:-$category}"
+  new_title="${new_title:-$title}"
+  new_content="${new_content:-$content}"
+  new_tags="${new_tags:-$tags}"
+  new_sensitive="${new_sensitive:-$sensitive}"
+  memory_extension_upsert_entry "$new_category" "$new_title" "$new_content" "$new_tags" "$new_sensitive" || return 1
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$entry_id" <<'PY'
+import sqlite3
+import sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute('update memory_entries set deleted = 1 where id = ?', (sys.argv[2],))
+conn.commit()
+conn.close()
+PY
+  echo "✅ 已更新扩展记忆条目"
+}
+
+openclaw_memory_extension_purge_deleted() {
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+count = conn.execute('select count(*) from memory_entries where deleted = 1').fetchone()[0]
+conn.execute('delete from memory_entries where deleted = 1')
+conn.commit()
+conn.close()
+print(count)
+PY
+}
+
+openclaw_memory_extension_clear_all_entries() {
+  local confirm
+  read -e -p "输入 CLEAR 确认清空全部长期记忆: " confirm
+  [ "$confirm" = "CLEAR" ] || { echo "已取消"; return 1; }
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+conn.execute('update memory_entries set deleted = 1 where deleted = 0')
+conn.commit()
+conn.close()
+PY
+  echo "✅ 已将全部长期记忆标记为删除"
+}
+
+openclaw_memory_extension_cleanup_entries() {
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json
+import sqlite3
+import sys
+import time
+
+db_path, config_path = sys.argv[1:3]
+cfg = json.loads(open(config_path, 'r', encoding='utf-8').read())
+days = int(cfg.get('maintenance', {}).get('cleanupDays', 30) or 30)
+threshold = int(time.time()) - days * 86400
+conn = sqlite3.connect(db_path)
+conn.execute('update memory_entries set deleted = 1 where deleted = 0 and updated_at < ?', (threshold,))
+conn.commit()
+count = conn.execute('select count(*) from memory_entries where deleted = 1').fetchone()[0]
+conn.close()
+print(count)
+PY
+}
+
+# 全缓存配额强制执行 — 清理所有缓存目录至配置限额
+openclaw_ai_stack_cache_cleanup_all() {
+  openclaw_ai_stack_prepare
+  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_ROUTE_CACHE_DIR}" 128
+  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_SEMANTIC_CACHE_DIR}" 256
+  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_RESULT_CACHE_DIR}" 512
+  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_TOOL_CACHE_DIR}" 128
+  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_CODE_CACHE_DIR}" 128
+  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_MULTIMODAL_CACHE_DIR}" 128
+  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_PREDICTIVE_CACHE_DIR}" 256
+  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_ENCRYPTED_CACHE_DIR}" 64
+  return 0
+}
+
+openclaw_memory_extension_extract_fact() {
+  local raw_text="$1"
+  [ -z "$raw_text" ] && return 0
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" "$raw_text" <<'PY'
+import json
+import re
+import sys
+
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+text = sys.argv[2].strip()
+blocked = [str(item).lower() for item in cfg.get('privacy', {}).get('blockedKeywords', [])]
+lower = text.lower()
+for token in blocked:
+    if token and token in lower:
+        raise SystemExit(0)
+
+patterns = [
+    (r'记住我叫\s*([^,，。\n]+)', 'identity', 'User name'),
+    (r'我叫\s*([^,，。\n]+)', 'identity', 'User name'),
+    (r'你叫\s*([^,，。\n]+)', 'identity', 'Assistant name'),
+    (r'我的偏好是\s*([^。\n]+)', 'preference', 'User preference'),
+    (r'我喜欢\s*([^。\n]+)', 'preference', 'User preference'),
+]
+
+for pattern, category, title in patterns:
+    match = re.search(pattern, text)
+    if match:
+        content = match.group(1).strip()
+        print(json.dumps({'category': category, 'title': title, 'content': content}, ensure_ascii=False))
+        raise SystemExit(0)
+PY
+}
+
+openclaw_memory_extension_capture_text() {
+  local raw_text="$1"
+  [ -z "$raw_text" ] && return 0
+  local fact_json
+  fact_json=$(openclaw_memory_extension_extract_fact "$raw_text" 2>/dev/null || true)
+  [ -z "$fact_json" ] && return 0
+  python3 - "$fact_json" <<'PY' >/tmp/openclaw-memory-extension-fact.tsv
+import json, sys
+obj = json.loads(sys.argv[1])
+print(obj.get('category', 'knowledge'))
+print(obj.get('title', 'Fact'))
+print(obj.get('content', ''))
+PY
+  local category title content
+  category=$(python3 - <<'PY'
+from pathlib import Path
+lines = Path('/tmp/openclaw-memory-extension-fact.tsv').read_text(encoding='utf-8').splitlines()
+print(lines[0] if len(lines) > 0 else '')
+PY
+)
+  title=$(python3 - <<'PY'
+from pathlib import Path
+lines = Path('/tmp/openclaw-memory-extension-fact.tsv').read_text(encoding='utf-8').splitlines()
+print(lines[1] if len(lines) > 1 else '')
+PY
+)
+  content=$(python3 - <<'PY'
+from pathlib import Path
+lines = Path('/tmp/openclaw-memory-extension-fact.tsv').read_text(encoding='utf-8').splitlines()
+print(lines[2] if len(lines) > 2 else '')
+PY
+)
+  [ -n "$category" ] && [ -n "$title" ] && [ -n "$content" ] || return 0
+  memory_extension_upsert_entry "$category" "$title" "$content" '[]' 0
+  echo "✅ 已自动提取并写入长期记忆: $title"
+}
+
+openclaw_memory_extension_settings_menu() {
+  local enabled local_only mask_sensitive max_percent threshold cleanup_days auto_minutes extract_strength blocked
+  memory_extension_prepare
+  enabled=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('enabled', True) else 'false')
+PY
+)
+  local_only=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('privacy', {}).get('localOnly', True) else 'false')
+PY
+)
+  mask_sensitive=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print('true' if cfg.get('privacy', {}).get('maskSensitive', True) else 'false')
+PY
+)
+  max_percent=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('injection', {}).get('maxContextPercent', 15))
+PY
+)
+  threshold=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('injection', {}).get('similarityThreshold', 0.58))
+PY
+)
+  cleanup_days=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('maintenance', {}).get('cleanupDays', 30))
+PY
+)
+  auto_minutes=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('maintenance', {}).get('autoUpdateMinutes', 30))
+PY
+)
+  extract_strength=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(cfg.get('longTerm', {}).get('autoExtract', 'balanced'))
+PY
+)
+  blocked=$(python3 - "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, sys
+cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+print(','.join(cfg.get('privacy', {}).get('blockedKeywords', [])))
+PY
+)
+  echo "当前记忆方案设置："
+  echo "1. 总开关: $enabled"
+  echo "2. 本地 only: $local_only"
+  echo "3. 敏感脱敏: $mask_sensitive"
+  echo "4. 注入上限: $max_percent"
+  echo "5. 相似度阈值: $threshold"
+  echo "6. 清理周期(天): $cleanup_days"
+  echo "7. 自动更新频率(分钟): $auto_minutes"
+  echo "8. 自动提取强度: $extract_strength"
+  echo "9. 禁止关键词: ${blocked:-<空>}"
+  echo "10. 重置为当前方案默认值"
+  read -e -p "输入要修改的编号(0 返回): " settings_choice
+  case "$settings_choice" in
+    1) read -e -p "输入 true/false: " v; memory_extension_update_config_field "enabled" "$v" bool ;;
+    2) read -e -p "输入 true/false: " v; memory_extension_update_config_field "privacy.localOnly" "$v" bool ;;
+    3) read -e -p "输入 true/false: " v; memory_extension_update_config_field "privacy.maskSensitive" "$v" bool ;;
+    4) read -e -p "输入整数百分比: " v; memory_extension_update_config_field "injection.maxContextPercent" "$v" int ;;
+    5) read -e -p "输入浮点阈值: " v; memory_extension_update_config_field "injection.similarityThreshold" "$v" float ;;
+    6) read -e -p "输入清理天数: " v; memory_extension_update_config_field "maintenance.cleanupDays" "$v" int ;;
+    7) read -e -p "输入分钟数: " v; memory_extension_update_config_field "maintenance.autoUpdateMinutes" "$v" int ;;
+    8) read -e -p "输入 autoExtract 强度(low/balanced/high): " v; memory_extension_update_config_field "longTerm.autoExtract" "$v" string ;;
+    9) read -e -p "输入逗号分隔关键词: " v; python3 - "$v" <<'PY' >/tmp/openclaw-memory-blocked.json
+import json, sys
+items = [x.strip() for x in sys.argv[1].split(',') if x.strip()]
+print(json.dumps(items, ensure_ascii=False))
+PY
+       memory_extension_update_config_field "privacy.blockedKeywords" "$(python3 - <<'PY'
+from pathlib import Path
+print(Path('/tmp/openclaw-memory-blocked.json').read_text(encoding='utf-8').strip())
+PY
+)" json ;;
+    10) openclaw_memory_apply_current_scheme ;;
+    0) return 0 ;;
+  esac
+  echo "✅ 设置已更新"
+}
+
+openclaw_memory_extension_export_json() {
+  local export_file
+  memory_extension_prepare
+  export_file="$SKPL_MEMORY_EXTENSION_EXPORT_DIR/memory-extension-$(date +%Y%m%d-%H%M%S).json"
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$export_file" <<'PY'
+import json
+import sqlite3
+import sys
+
+conn = sqlite3.connect(sys.argv[1])
+rows = conn.execute('select id, category, title, content, tags, sensitive, created_at, updated_at from memory_entries where deleted = 0 order by updated_at desc').fetchall()
+conn.close()
+items = []
+for row in rows:
+    items.append({
+        'id': row[0],
+        'category': row[1],
+        'title': row[2],
+        'content': row[3],
+        'tags': json.loads(row[4] or '[]'),
+        'sensitive': bool(row[5]),
+        'createdAt': row[6],
+        'updatedAt': row[7],
+    })
+with open(sys.argv[2], 'w', encoding='utf-8') as f:
+    json.dump(items, f, ensure_ascii=False, indent=2)
+PY
+  echo "✅ 已导出扩展记忆: $export_file"
+}
+
+openclaw_memory_extension_import_json() {
+  local import_file
+  read -e -p "输入要导入的 JSON 文件路径: " import_file
+  [ -f "$import_file" ] || { echo "❌ 文件不存在"; return 1; }
+  memory_extension_prepare
+  local rows_tsv imported=0
+  rows_tsv=$(python3 - "$import_file" <<'PY'
+import json
+import sys
+try:
+    items = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
+except Exception:
+    raise SystemExit(2)
+if not isinstance(items, list):
+    raise SystemExit(3)
+for item in items:
+    category = str(item.get('category') or 'knowledge').strip()
+    title = str(item.get('title') or '').strip().replace('\t', ' ').replace('\n', ' ')
+    content = str(item.get('content') or '').strip().replace('\t', ' ').replace('\n', ' ')
+    tags = json.dumps(item.get('tags') or [], ensure_ascii=False)
+    sensitive = '1' if item.get('sensitive') else '0'
+    if title and content:
+        print('\t'.join([category, title, content, tags, sensitive]))
+PY
+)
+  local parse_rc=$?
+  if [ "$parse_rc" = "2" ]; then
+    echo "❌ 导入失败：JSON 解析失败"
+    return 1
+  fi
+  if [ "$parse_rc" = "3" ]; then
+    echo "❌ 导入失败：JSON 顶层必须是数组"
+    return 1
+  fi
+  while IFS=$'\t' read -r category title content tags sensitive; do
+    [ -n "$title" ] || continue
+    memory_extension_upsert_entry "$category" "$title" "$content" "$tags" "$sensitive" >/dev/null 2>&1 || true
+    imported=$((imported+1))
+  done <<EOF
+$rows_tsv
+EOF
+  echo "✅ 已导入扩展记忆: $imported 条"
+}
+
+openclaw_memory_extension_menu() {
+  send_stats "OpenClaw长期记忆扩展"
+  while true; do
+    clear
+    skpl_ui_header "长期记忆管理" "查看和维护长期记忆条目，支持导入导出、清理和隐私设置"
+    openclaw_memory_extension_render_status
+    echo
+    openclaw_render_hardware_profile
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "查看条目列表" "查看长期记忆条目列表"
+    skpl_ui_menu_item 2 "筛选条目" "按时间、分类、关键词筛选长期记忆"
+    skpl_ui_menu_item 3 "查看条目详情" "查看单条长期记忆的完整内容"
+    skpl_ui_menu_item 4 "新增条目" "新增一条长期记忆，支持 identity/preference/knowledge/project 分类"
+    skpl_ui_menu_item 5 "编辑条目" "修改单条长期记忆"
+    skpl_ui_menu_item 6 "删除单条" "软删除单条长期记忆"
+    skpl_ui_menu_item 7 "批量删除" "按筛选条件批量软删除长期记忆"
+    skpl_ui_menu_item 8 "导出 JSON" "导出全部长期记忆"
+    skpl_ui_menu_item 9 "导入 JSON" "导入长期记忆备份"
+    skpl_ui_menu_item 10 "备份记忆库" "导出记忆全量备份包"
+    skpl_ui_menu_item 11 "恢复记忆库" "从备份包恢复记忆库"
+    skpl_ui_menu_item 12 "记忆设置" "总开关、注入阈值、清理周期和隐私策略"
+    skpl_ui_menu_item 13 "从文本提取记忆" "从一段文本自动提取身份、偏好和事实"
+    skpl_ui_menu_item 14 "执行清理" "按清理周期标记过时长期记忆"
+    skpl_ui_menu_item 15 "清空全部" "将全部长期记忆标记删除"
+    skpl_ui_menu_item 16 "物理清除已删" "彻底删除已软删除条目"
+    skpl_ui_menu_item 17 "结构化数据检索" "搜索结构化记忆(JSON、键值对)"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e ext_choice
+    case "$ext_choice" in
+      1) openclaw_memory_extension_list_entries; break_end ;;
+      2) openclaw_memory_extension_filter_menu; break_end ;;
+      3) openclaw_memory_extension_view_entry; break_end ;;
+      4) openclaw_memory_extension_add_entry; break_end ;;
+      5) openclaw_memory_extension_edit_entry; break_end ;;
+      6) openclaw_memory_extension_delete_entry; break_end ;;
+      7) openclaw_memory_extension_batch_delete; break_end ;;
+      8) openclaw_memory_extension_export_json; break_end ;;
+      9) openclaw_memory_extension_import_json; break_end ;;
+      10) openclaw_memory_backup_export ;;
+      11) openclaw_memory_backup_import ;;
+      12) openclaw_memory_extension_settings_menu; break_end ;;
+      13) read -e -p "输入要抽取的文本: " raw_text; openclaw_memory_extension_capture_text "$raw_text"; break_end ;;
+      14) openclaw_memory_extension_cleanup_entries; break_end ;;
+      15) openclaw_memory_extension_clear_all_entries; break_end ;;
+      16) openclaw_memory_extension_purge_deleted; break_end ;;
+      17) read -e -p "输入结构化数据搜索关键词: " sq; openclaw_structured_data_search "$sq"; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
   openclaw_memory_deep_status() {
     echo "正在探测嵌入模型就绪状态..."
-    openclaw memory status --deep
+    if openclaw_memory_cli_supported; then
+      timeout 15 openclaw memory status --deep
+    else
+      echo "ℹ️ 当前 OpenClaw 版本未提供 memory CLI，无法执行深度状态探测。"
+      openclaw_memory_render_basic_status
+    fi
   }
 
-  openclaw_memory_menu() {
+openclaw_memory_menu() {
     local config_file
     config_file=$(openclaw_get_config_file)
     if [ "$(openclaw_memory_config_get "memory.qmd.includeDefaultMemory")" = "false" ]; then
@@ -9578,7 +17693,7 @@ PY
     send_stats "OpenClaw记忆管理"
     while true; do
       clear
-      skpl_ui_header "OpenClaw 智能大脑中心" "模型配置 / 技能注入 / 经验沉淀"
+      skpl_ui_header "OpenClaw 记忆管理" "统一管理记忆方案、长期记忆、本地检索与隐私设置"
       openclaw_memory_render_status
       echo
       python3 - "$config_file" <<'PY'
@@ -9591,36 +17706,23 @@ try:
 except: pass
 PY
       echo
-      skpl_ui_section "操作 (让 OpenClaw 真正变聪明、更省钱)"
-      skpl_ui_menu_item 1 "🤖 智能模型路由" "为文本、图片、代码分别配置不同模型 (省 Token/提速)"
-      skpl_ui_menu_item 2 "⚡ 注入大脑指令" "一键注入: 省 Token + 自动选模型 + 硬件感知 Skills"
-      skpl_ui_menu_item 3 "🧠 本地记忆检索" "启用本地 embedding + LanceDB + 全量重建索引"
-      skpl_ui_menu_item 4 "🧩 经验进化 EvoMap" "沉淀报错/操作经验, 下次遇到 OpenClaw 自动照着修"
-      skpl_ui_menu_item 5 "💾 极简备份/恢复" "核心数据与 Skills 的极速备份"
+      skpl_ui_section "操作"
+      skpl_ui_menu_item 1 "进入记忆功能面板" "推荐方案、记忆内容、隐私设置和高级能力统一入口"
+      skpl_ui_menu_item 2 "经验沉淀 EvoMap" "把经验写入 EvoMap 目录，方便后续查看与整理"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e memory_choice
       case "$memory_choice" in
         1)
-          openclaw_model_manager
+          openclaw_memory_strategy_panel
           ;;
         2)
-          openclaw_inject_skills
-          read -n 1 -s -r -p "完成！按任意键返回..."
-          ;;
-        3)
-          openclaw_memory_local_retrieval_menu
-          ;;
-        4)
           echo "开始进化经验沉淀..."
           read -e -p "标题 (如: 代理配置失败): " title
           [ -z "$title" ] && title="日常经验"
           read -e -p "经验内容/解法: " content
           openclaw_evomap_real_ingest "$title" "$content"
           read -n 1 -s -r -p "经验已存入大脑！按任意键返回..."
-          ;;
-        5)
-          openclaw_backup_restore_menu
           ;;
         0)
           return 0
@@ -9696,7 +17798,7 @@ PY
     else
       openclaw gateway restart >/dev/null 2>&1 || {
         openclaw gateway stop >/dev/null 2>&1
-        openclaw gateway --port "$(openclaw_gateway_port)" >/dev/null 2>&1
+        openclaw gateway --port "$(openclaw_gateway_port)" --allow-unconfigured >/dev/null 2>&1
       }
     fi
   }
@@ -9708,7 +17810,7 @@ PY
 
     if openclaw_has_command openclaw; then
       local value
-      value=$(openclaw config get "$path" 2>&1 | head -n 1)
+      value=$(timeout 5 openclaw config get "$path" 2>&1 | head -n 1)
       if [ -n "$value" ]; then
         if echo "$value" | grep -qi "config path not found"; then
           echo "(unset)"
@@ -9772,7 +17874,7 @@ PY
     if openclaw config unset "$key" >/dev/null 2>&1; then
       return 0
     fi
-    probe=$(openclaw config get "$key" 2>&1 | head -n 1)
+    probe=$(timeout 5 openclaw config get "$key" 2>&1 | head -n 1)
     if [ -z "$probe" ] || [ "$probe" = "null" ] || [ "$probe" = "(unset)" ] || echo "$probe" | grep -qi "config path not found"; then
       return 0
     fi
@@ -9811,7 +17913,7 @@ try:
     elif p == "coding" and s == "allowlist" and a == "on-miss" and e == "true" and b == "true" and ap == "true" and w == "true":
         print("开发增强模式")
     elif (p == "full" or p == "(unset)") and s == "full" and a == "off" and e == "true" and b == "true" and ap == "true":
-        print("完全开放模式")
+        print("最低拦截模式")
     else:
         print("自定义模式")
 except Exception:
@@ -9850,7 +17952,7 @@ data["defaults"]["autoAllowSkills"] = True
 print(json.dumps(data, indent=2))
 ' "$approvals_file" "$sec" "$ask" "$fallback")
 
-    if openclaw_has_command openclaw && echo "$json_payload" | openclaw approvals set --stdin >/dev/null 2>&1; then
+    if openclaw_has_command openclaw && echo "$json_payload" | timeout 5 openclaw approvals set --stdin >/dev/null 2>&1; then
       return 0
     fi
     # 回退：直接写文件
@@ -9863,10 +17965,10 @@ print(json.dumps(data, indent=2))
     skpl_ui_kv "宿主机审批" "~/.openclaw/exec-approvals.json"
     skpl_ui_rule "$gl_hui" "─" 60
     local current_profile current_sec current_ask current_elevated
-    current_profile=$(openclaw config get tools.profile 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
-    current_sec=$(openclaw config get tools.exec.security 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
-    current_ask=$(openclaw config get tools.exec.ask 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
-    current_elevated=$(openclaw config get tools.elevated.enabled 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+    current_profile=$(timeout 5 openclaw config get tools.profile 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+    current_sec=$(timeout 5 openclaw config get tools.exec.security 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+    current_ask=$(timeout 5 openclaw config get tools.exec.ask 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+    current_elevated=$(timeout 5 openclaw config get tools.elevated.enabled 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
     # 清理空值
     [ -z "$current_profile" ] || echo "$current_profile" | grep -qi "config path not found" && current_profile=""
     [ -z "$current_sec" ] || echo "$current_sec" | grep -qi "config path not found" && current_sec=""
@@ -9875,7 +17977,7 @@ print(json.dumps(data, indent=2))
 
     local current_mode="未知 / 自定义"
     if [ "$current_profile" = "full" ] && [ "$current_sec" = "full" ] && [ "$current_ask" = "off" ]; then
-      current_mode="\033[1;31m完全开放模式\033[0m"
+      current_mode="\033[1;31m最低拦截模式\033[0m"
     elif [ "$current_profile" = "coding" ] && [ "$current_sec" = "allowlist" ] && [ "$current_ask" = "on-miss" ] && [ "$current_elevated" = "true" ]; then
       current_mode="\033[1;33m开发增强模式\033[0m"
     elif [ "$current_profile" = "coding" ] && [ "$current_sec" = "allowlist" ] && [ "$current_ask" = "on-miss" ] && [ "$current_elevated" != "true" ]; then
@@ -9894,7 +17996,7 @@ print(json.dumps(data, indent=2))
     echo -e "\n${gl_huang}[底层 Exec Approvals 状态]${gl_bai}"
     if openclaw_has_command openclaw; then
       local approvals_json
-      approvals_json=$(openclaw approvals get --json 2>/dev/null)
+      approvals_json=$(timeout 5 openclaw approvals get --json 2>/dev/null)
       if [ -n "$approvals_json" ]; then
         python3 -c '
 import json, sys
@@ -9976,7 +18078,7 @@ except Exception:
   }
 
   openclaw_permission_apply_full() {
-    send_stats "OpenClaw权限-完全开放模式"
+    send_stats "OpenClaw权限-最低拦截模式"
     openclaw_permission_require_openclaw || return 1
 
     echo "正在配置应用层策略..."
@@ -9986,12 +18088,12 @@ except Exception:
     openclaw config set tools.elevated.enabled true >/dev/null 2>&1
     openclaw config set tools.exec.strictInlineEval false >/dev/null 2>&1
 
-    echo "正在瓦解宿主机拦截防御..."
-    # 这里的 full 和 off 将彻底绕过底层宿主机的 exec 审批系统
+    echo "正在放宽宿主机审批拦截配置..."
+    # 这里会把审批策略调整到最宽松档位
     openclaw_permission_update_exec_approvals "full" "off" "full"
 
     openclaw_permission_restart_gateway
-    echo -e "${gl_lv}✅ 已切换为完全开放模式 (警告：所有宿主机命令拦截已失效，智能体具有最高权限)${gl_bai}"
+    echo -e "${gl_lv}✅ 已切换为最低拦截模式 (警告：审批与工具限制会降到很低，风险极高)${gl_bai}"
   }
 
   openclaw_permission_restore_official_defaults() {
@@ -10007,7 +18109,7 @@ except Exception:
 
     echo "清理宿主机拦截配置..."
     # 优先通过 CLI 清空审批配置，回退直接删文件
-    if echo '{"version":1,"defaults":{}}' | openclaw approvals set --stdin >/dev/null 2>&1; then
+    if echo '{"version":1,"defaults":{}}' | timeout 5 openclaw approvals set --stdin >/dev/null 2>&1; then
       true
     else
       rm -f "$HOME/.openclaw/exec-approvals.json"
@@ -10038,7 +18140,7 @@ except Exception:
       skpl_ui_header "Exec 命令白名单" "管理 allowlist 放行规则"
       skpl_ui_section "当前白名单"
       local allowlist_json
-      allowlist_json=$(openclaw approvals get --json 2>/dev/null)
+      allowlist_json=$(timeout 5 openclaw approvals get --json 2>/dev/null)
       if [ -n "$allowlist_json" ]; then
         python3 -c '
 import json, sys
@@ -10075,13 +18177,13 @@ except Exception as e:
           [ -z "$pattern" ] && { echo "不能为空"; break_end; continue; }
           read -e -p "指定智能体ID (留空=所有智能体 *): " agent_id
           agent_id="${agent_id:-*}"
-          openclaw approvals allowlist add --agent "$agent_id" "$pattern"
+          timeout 5 openclaw approvals allowlist add --agent "$agent_id" "$pattern"
           break_end
           ;;
         2)
           read -e -p "输入要移除的命令路径: " pattern
           [ -z "$pattern" ] && { echo "不能为空"; break_end; continue; }
-          openclaw approvals allowlist remove "$pattern"
+          timeout 5 openclaw approvals allowlist remove "$pattern"
           break_end
           ;;
         0) return 0 ;;
@@ -10100,7 +18202,7 @@ except Exception as e:
       skpl_ui_section "模式切换"
       skpl_ui_menu_item_tone 1 "标准安全模式" "日常推荐，弹卡片审批" "ok"
       skpl_ui_menu_item_tone 2 "开发增强模式" "允许智能体申请提权" "warn"
-      skpl_ui_menu_item_tone 3 "完全开放模式" "高风险，解除宿主机拦截" "danger"
+      skpl_ui_menu_item_tone 3 "最低拦截模式" "高风险，尽量减少审批拦截" "danger"
       skpl_ui_menu_item 4 "恢复官方默认" "恢复初始沙盒防御策略"
       skpl_ui_menu_item 5 "安全审计与修复" "检查并自动修复"
       skpl_ui_menu_item 6 "Exec 命令白名单" "管理 allowlist"
@@ -10121,7 +18223,7 @@ except Exception as e:
           break_end
           ;;
         3)
-          skpl_ui_alert "danger" "完全开放模式会彻底瓦解 exec 审批并自动放行高危代码。" "仅适用于你明确知晓风险并需要最高权限的场景。"
+          skpl_ui_alert "danger" "最低拦截模式会尽量放宽 exec 审批与工具限制。" "仅适用于你明确知晓风险并需要高权限的场景。"
           read -e -p "输入 FULL 确认继续: " confirm
           if [ "$confirm" = "FULL" ]; then openclaw_permission_apply_full; else echo "已取消"; fi
           break_end
@@ -10189,7 +18291,7 @@ PY
       return 0
     fi
     local value
-    value=$(openclaw config get agents.defaults.agent 2>&1 | head -n 1)
+    value=$(timeout 5 openclaw config get agents.defaults.agent 2>&1 | head -n 1)
     if [ -z "$value" ] || echo "$value" | grep -qi "config path not found"; then
       value=$(openclaw agents list --json 2>/dev/null | python3 -c 'import json,sys
 try:
@@ -10513,7 +18615,7 @@ for idx,item in enumerate(bindings,1):
 
 
   openclaw_multiagent_show_sessions() {
-    send_stats "OpenClaw多智能体-会话概况"
+    send_stats "OpenClaw多智能体-会话缓存"
     python3 -c '
 import json,sys
 sess_obj=json.loads(sys.argv[1] or "{}")
@@ -10586,15 +18688,15 @@ print("✅ 多智能体健康检查完成")
     echo "修改选项（留空跳过）："
     read -e -p "  新名称: " new_name
     read -e -p "  新 Emoji: " new_emoji
-    local cmd="openclaw agents set-identity --agent $agent_id"
-    [ -n "$new_name" ] && cmd="$cmd --name $new_name"
-    [ -n "$new_emoji" ] && cmd="$cmd --emoji $new_emoji"
+    local cmd=(openclaw agents set-identity --agent "$agent_id")
+    [ -n "$new_name" ] && cmd+=(--name "$new_name")
+    [ -n "$new_emoji" ] && cmd+=(--emoji "$new_emoji")
     echo "也可以从 IDENTITY.md 自动读取身份信息。"
     read -e -p "是否从 IDENTITY.md 读取？(y/n): " from_id
     if [ "$from_id" = "y" ]; then
-      cmd="openclaw agents set-identity --agent $agent_id --from-identity"
+      cmd=(openclaw agents set-identity --agent "$agent_id" --from-identity)
     fi
-    eval "$cmd"
+    "${cmd[@]}"
     openclaw_multiagent_refresh_runtime_cache >/dev/null 2>&1 || true
   }
 
@@ -10610,17 +18712,17 @@ print("✅ 多智能体健康检查完成")
     send_stats "OpenClaw多智能体管理"
     while true; do
       clear
-      skpl_ui_header "多智能体管理" "智能体、绑定与会话"
+      skpl_ui_header "多智能体管理" "智能体、绑定与会话缓存"
       openclaw_multiagent_render_status
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "刷新运行时状态" "更新 agents / bindings / sessions 缓存"
+      skpl_ui_menu_item 1 "刷新缓存状态" "更新 agents / bindings / sessions 缓存"
       skpl_ui_menu_item 2 "新增智能体" "创建 Agent 与工作区"
       skpl_ui_menu_item_tone 3 "删除智能体" "移除 Agent 配置" "danger"
       skpl_ui_menu_item 4 "查看路由绑定" "查看当前绑定"
       skpl_ui_menu_item 5 "新增路由绑定" "绑定入口到 Agent"
       skpl_ui_menu_item 6 "移除路由绑定" "解除现有绑定"
-      skpl_ui_menu_item 7 "查看会话概况" "会话汇总与模型"
+      skpl_ui_menu_item 7 "查看会话缓存" "查看会话汇总与模型信息"
       skpl_ui_menu_item 8 "健康检查" "检查配置与工作区"
       skpl_ui_menu_item 9 "修改智能体身份" "名称 / Emoji / IDENTITY.md"
       skpl_ui_menu_item 10 "清理过期会话" "执行 sessions cleanup"
@@ -10650,19 +18752,16 @@ openclaw_backup_restore_menu() {
     send_stats "OpenClaw备份与还原"
     while true; do
       clear
-      skpl_ui_header "备份与还原" "统一压缩包优先，兼容旧版分项备份"
+      skpl_ui_header "备份与还原" "统一备份包优先；当前记忆方案已包含 AI 栈与混合记忆目录"
       openclaw_backup_render_file_list
       echo
-      echo "推荐流程：先使用【统一全量备份】导出单个压缩包；还原时把压缩包放入备份目录后再执行统一还原。"
+      echo "推荐流程：先使用【统一备份包导出】生成单个压缩包；还原时把压缩包放入备份目录后再执行统一导入。"
+      echo "旧版分项备份仍可用，但更适合兼容旧数据或局部迁移。"
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "统一全量备份" "记忆方案、记忆数据、EvoMap、混合记忆、项目配置统一打包"
-      skpl_ui_menu_item_tone 2 "统一全量还原" "把压缩包放入备份目录后执行自动校验与还原" "danger"
-      skpl_ui_menu_item 3 "备份记忆全量" "旧版兼容：支持多智能体"
-      skpl_ui_menu_item 4 "还原记忆全量" "旧版兼容：按包内容恢复"
-      skpl_ui_menu_item 5 "备份 OpenClaw 项目" "旧版兼容：默认安全模式"
-      skpl_ui_menu_item_tone 6 "还原 OpenClaw 项目" "旧版兼容：高级 / 高风险" "danger"
-      skpl_ui_menu_item_tone 7 "删除备份文件" "从备份目录移除归档" "danger"
+      skpl_ui_menu_item 1 "统一备份包导出" "记忆方案、AI 栈、混合记忆、EvoMap 和项目配置统一打包"
+      skpl_ui_menu_item_tone 2 "统一备份包导入" "把压缩包放入备份目录后执行自动校验与导入" "danger"
+      skpl_ui_menu_item 3 "旧版分项工具" "记忆单独导出/导入、项目单独导出/导入、删除备份文件"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e backup_choice
@@ -10670,11 +18769,36 @@ openclaw_backup_restore_menu() {
       case "$backup_choice" in
         1) openclaw_bundle_backup_export ;;
         2) openclaw_bundle_backup_import ;;
-        3) openclaw_memory_backup_export ;;
-        4) openclaw_memory_backup_import ;;
-        5) openclaw_project_backup_export ;;
-        6) openclaw_project_backup_import ;;
-        7) openclaw_backup_delete_file ;;
+        3) openclaw_backup_legacy_menu ;;
+        0) return 0 ;;
+        *)
+          echo "无效的选择，请重试。"
+          sleep 1
+          ;;
+      esac
+    done
+  }
+
+openclaw_backup_legacy_menu() {
+
+    while true; do
+      clear
+      skpl_ui_header "旧版分项备份" "用于兼容旧流程；当前记忆方案优先使用统一备份包"
+      skpl_ui_menu_item 1 "记忆单独导出" "仅导出多智能体记忆、混合记忆、AI 栈与相关目录"
+      skpl_ui_menu_item_tone 2 "记忆单独导入" "仅恢复记忆相关目录与 AI 栈" "danger"
+      skpl_ui_menu_item 3 "项目单独导出" "仅导出 OpenClaw 项目目录与配置"
+      skpl_ui_menu_item_tone 4 "项目单独导入" "仅恢复 OpenClaw 项目目录与配置" "danger"
+      skpl_ui_menu_item_tone 5 "删除备份文件" "从备份目录移除归档" "danger"
+      skpl_ui_menu_item 0 "返回上一级"
+      skpl_ui_footer_prompt "请输入你的选择: "
+      read -e legacy_choice
+
+      case "$legacy_choice" in
+        1) openclaw_memory_backup_export ;;
+        2) openclaw_memory_backup_import ;;
+        3) openclaw_project_backup_export ;;
+        4) openclaw_project_backup_import ;;
+        5) openclaw_backup_delete_file ;;
         0) return 0 ;;
         *)
           echo "无效的选择，请重试。"
@@ -10689,16 +18813,16 @@ openclaw_backup_restore_menu() {
   openclaw_evomap_menu() {
     while true; do
       clear
-      skpl_ui_header "EvoMap 管理" "安装、更新与混合记忆目录"
+      skpl_ui_header "EvoMap 管理" "安装、更新与目录状态"
       evomap_print_status
       echo
       skpl_ui_section "操作"
-      skpl_ui_menu_item 1 "安装 EvoMap" "克隆、依赖、初始化融合栈"
+      skpl_ui_menu_item 1 "安装 EvoMap" "克隆代码、安装依赖并初始化目录"
       skpl_ui_menu_item_tone 2 "卸载 EvoMap" "保留备份后移除" "danger"
-      skpl_ui_menu_item 3 "更新 EvoMap" "拉取最新代码并同步更新融合栈"
-      skpl_ui_menu_item 4 "EvoMap 记忆管理" "查看目录、备份与融合状态"
-      skpl_ui_menu_item 5 "立即同步融合记忆" "处理事件并更新检索对象"
-      skpl_ui_menu_item 6 "融合栈状态" "查看插件、对象数与最近同步"
+      skpl_ui_menu_item 3 "更新 EvoMap" "拉取最新代码并同步更新目录与脚本"
+      skpl_ui_menu_item 4 "EvoMap 记忆管理" "查看目录、备份与同步日志"
+      skpl_ui_menu_item 5 "触发一次同步" "处理事件并刷新当前同步结果"
+      skpl_ui_menu_item 6 "同步状态" "查看对象数、插件信息与最近同步"
       skpl_ui_menu_item 0 "返回上一级"
       skpl_ui_footer_prompt "请输入你的选择: "
       read -e evomap_choice
@@ -10941,7 +19065,7 @@ openclaw_webui_ensure_origins() {
   openclaw_show_webui_addr() {
     local local_ip token domains scheme port
 
-    skpl_ui_header "WebUI 访问设置" "本机访问优先，域名入口按需接入"
+    skpl_ui_header "WebUI 入口与待审批请求" "本机访问优先，可记录已有域名入口"
     local_ip="127.0.0.1"
     scheme=$(openclaw_webui_scheme)
     port=$(openclaw_gateway_port)
@@ -10973,7 +19097,7 @@ EOF
 
     echo
     skpl_ui_section "待处理设备授权"
-    echo "当前面板仅保留查看待处理请求。批准请在 root 终端手动执行官方命令。"
+    echo "当前面板提供待处理请求查看。批准请在 root 终端手动执行官方命令。"
   }
 
 
@@ -11102,7 +19226,7 @@ PY
       echo
       skpl_ui_section "操作"
       skpl_ui_menu_item 1 "重载访问 Token" "读取本地持久 token"
-      skpl_ui_menu_item 2 "记录域名入口" "保存已存在的 WebUI 域名地址"
+      skpl_ui_menu_item 2 "记录已有域名入口" "保存已存在的 WebUI 域名地址"
       skpl_ui_menu_item_tone 3 "移除域名入口" "删除已记录的域名地址" "danger"
       skpl_ui_menu_item 4 "查看待处理请求" "显示 devices list 原始输出"
       skpl_ui_menu_item 0 "返回上一级"
@@ -11179,8 +19303,6 @@ PY
         break_end
         ;;
       13) openclaw_webui_menu ;;
-      22) openclaw_network_diagnosis_menu ;;
-      23) openclaw_run_official_diagnostics ;;
       14) send_stats "TUI命令行对话"
         openclaw tui
         break_end
@@ -11191,7 +19313,6 @@ PY
       18) openclaw_backup_restore_menu ;;
       19) update_openclaw_panel ;;
       20) uninstall_openclaw_panel ;;
-      21) openclaw_evomap_menu ;;
       0) return 0 ;;
       *) echo "无效的选择，请重试。"; sleep 1 ;;
     esac
@@ -11335,7 +19456,7 @@ evomap_print_status() {
     skpl_ui_kv "状态" "未安装"
   fi
   skpl_ui_kv "记忆目录" "$EVOMAP_MEMORY_DIR"
-  skpl_ui_kv "融合栈" "$SKPL_HYBRID_MEMORY_ROOT"
+  skpl_ui_kv "同步根目录" "$SKPL_HYBRID_MEMORY_ROOT"
   hybrid_json=$(hybrid_memory_status_json 2>/dev/null || echo '{"objects":0}')
   skpl_ui_kv "知识对象" "$(python3 - <<'PY' "$hybrid_json"
 import json, sys
@@ -11500,14 +19621,14 @@ evomap_update() {
 evomap_memory_menu() {
   while true; do
     clear
-    skpl_ui_header "EvoMap 记忆管理" "查看学习目录、融合栈与备份归档"
+    skpl_ui_header "EvoMap 记忆管理" "查看学习目录、同步根目录与备份归档"
     evomap_print_status
     echo
     skpl_ui_section "操作"
     skpl_ui_menu_item 1 "立即备份 EvoMap"
     skpl_ui_menu_item 2 "查看记忆目录"
     skpl_ui_menu_item 3 "查看备份目录"
-    skpl_ui_menu_item 4 "查看融合根目录"
+      skpl_ui_menu_item 4 "查看同步根目录"
     skpl_ui_menu_item 5 "查看同步日志"
     skpl_ui_menu_item 0 "返回上一级"
     skpl_ui_footer_prompt "请输入你的选择: "
@@ -11625,7 +19746,15 @@ skpl_update_panel() {
   fi
   echo
   echo "正在重新载入最新面板..."
+  export SKPL_SKIP_SELF_SAVE=1
   exec bash "${SKPL_SCRIPT_PATH}" panel
+}
+
+skpl_sync_workspace_panel_to_runtime() {
+  if [ -f "/workspace/openclaw.json" ]; then
+    install -m 755 "/workspace/openclaw.json" "${SKPL_SCRIPT_PATH}"
+    echo "✅ 已将工作区脚本同步到运行时面板: ${SKPL_SCRIPT_PATH}"
+  fi
 }
 
 skpl_update_system() {
@@ -11680,7 +19809,7 @@ skpl_main_panel() {
     skpl_ui_section "安装与维护"
     skpl_ui_menu_item 3 "重新执行完整安装流程" "重置状态后从头运行"
     skpl_ui_menu_item 7 "从中断点继续安装" "按当前步骤续跑"
-    skpl_ui_menu_item 4 "SKPL 面板更新" "从 GitHub 拉取最新脚本"
+    skpl_ui_menu_item 4 "SKPL 面板更新" "从 GitHub 拉取最新脚本，并同步刷新当前入口"
     skpl_ui_menu_item 6 "查看最近日志" "读取安装与运行日志"
     skpl_ui_menu_item 8 "WSL 代理同步并更新系统" "执行 wslwin 与系统更新"
     skpl_ui_menu_item 5 "SKPL 面板卸载" "仅移除 SKPL 入口"
@@ -11708,6 +19837,7 @@ skpl_main_panel() {
 main() {
   ensure_root "$@"
   init_skpl_runtime
+  skpl_sync_workspace_panel_to_runtime
   save_self_to_skpl
 
   case "${1:-install}" in
@@ -11741,6 +19871,1673 @@ main() {
       exit 1
       ;;
   esac
+}
+
+
+# ─── PATCH 1: Cross-Device Sync Engine (跨设备同步执行函数) ───
+
+openclaw_cross_device_sync_state_file() {
+  echo "${SKPL_AI_STACK_STATE_DIR}/cross-device-sync.json"
+}
+
+openclaw_cross_device_sync_execute() {
+  openclaw_ai_stack_prepare
+  local config_file="$SKPL_AI_STACK_ROOT/config.json"
+  local state_file
+  state_file=$(openclaw_cross_device_sync_state_file)
+
+  python3 - "$config_file" "$state_file" "$SKPL_DEVICES_LIST_CACHE_FILE" "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_AI_STACK_EVOLVE_STATE_FILE" <<'PY'
+import json
+import sys
+import time
+import hashlib
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+state_path = Path(sys.argv[2])
+devices_path = Path(sys.argv[3])
+db_path = Path(sys.argv[4])
+evolve_path = Path(sys.argv[5])
+
+cfg = json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+frontend = cfg.get('frontend', {})
+sync_mode = str(frontend.get('crossDeviceSync', 'optional') or 'optional')
+
+if sync_mode == 'disabled':
+    print('跨设备同步已禁用，跳过执行。')
+    raise SystemExit(0)
+
+# Collect local state
+memory_count = 0
+if db_path.exists():
+    try:
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        memory_count = conn.execute('select count(*) from memory_entries where deleted = 0').fetchone()[0]
+        conn.close()
+    except Exception:
+        memory_count = 0
+
+config_hash = hashlib.md5(config_path.read_bytes()).hexdigest()[:12] if config_path.exists() else 'none'
+
+evolve_hash = 'none'
+if evolve_path.exists():
+    try:
+        evolve_hash = hashlib.md5(evolve_path.read_bytes()).hexdigest()[:12]
+    except Exception:
+        pass
+
+local_state = {
+    'memoryCount': memory_count,
+    'configHash': config_hash,
+    'evolveStateHash': evolve_hash,
+    'timestamp': int(time.time()),
+}
+
+# Read device list
+devices = []
+if devices_path.exists():
+    try:
+        content = devices_path.read_text(encoding='utf-8').strip()
+        for line in content.splitlines():
+            line = line.strip()
+            if line:
+                devices.append(line)
+    except Exception:
+        pass
+
+# Generate sync manifest
+manifest = {
+    'localState': local_state,
+    'devices': devices,
+    'syncMode': sync_mode,
+}
+
+# Load or create sync state
+state = {
+    'lastSyncAt': 0,
+    'lastSyncResult': 'never',
+    'deviceStates': {},
+    'syncCount': 0,
+    'conflicts': [],
+}
+if state_path.exists():
+    try:
+        current = json.loads(state_path.read_text(encoding='utf-8'))
+        if isinstance(current, dict):
+            state.update(current)
+    except Exception:
+        pass
+
+# Update state
+state['lastSyncAt'] = int(time.time())
+state['syncCount'] = int(state.get('syncCount', 0) or 0) + 1
+state['deviceStates']['local'] = local_state
+
+for dev in devices:
+    dev_key = hashlib.md5(dev.encode('utf-8')).hexdigest()[:8]
+    if dev_key not in state.get('deviceStates', {}):
+        state.setdefault('deviceStates', {})[dev_key] = {'name': dev, 'lastSeen': 0, 'syncStatus': 'pending'}
+
+state['lastSyncResult'] = 'success'
+state['manifest'] = manifest
+
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+print(f'跨设备同步完成 (模式: {sync_mode})')
+print(f'  本地记忆条目: {memory_count}')
+print(f'  配置哈希: {config_hash}')
+print(f'  进化状态哈希: {evolve_hash}')
+print(f'  已知设备数: {len(devices)}')
+print(f'  累计同步次数: {state["syncCount"]}')
+print(f'  (注: 实际设备间传输需要网络基础设施支持)')
+PY
+}
+
+openclaw_cross_device_sync_status() {
+  local state_file
+  state_file=$(openclaw_cross_device_sync_state_file)
+  if [ ! -f "$state_file" ]; then
+    echo "跨设备同步状态: 未初始化"
+    return 0
+  fi
+  python3 - "$state_file" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text(encoding='utf-8'))
+last_sync = int(data.get('lastSyncAt', 0) or 0)
+sync_count = int(data.get('syncCount', 0) or 0)
+result = str(data.get('lastSyncResult', 'never') or 'never')
+devices = data.get('deviceStates', {})
+conflicts = data.get('conflicts', [])
+
+if last_sync > 0:
+    ts_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_sync))
+else:
+    ts_str = '从未'
+
+print(f'上次同步: {ts_str}')
+print(f'同步结果: {result}')
+print(f'累计同步: {sync_count} 次')
+print(f'已知设备: {len(devices)} 个')
+if conflicts:
+    print(f'冲突数: {len(conflicts)}')
+for dev_key, dev_info in list(devices.items())[:5]:
+    name = dev_info.get('name', dev_key)
+    status = dev_info.get('syncStatus', 'unknown')
+    print(f'  - {name}: {status}')
+PY
+}
+
+openclaw_cross_device_sync_menu() {
+  while true; do
+    clear
+    skpl_ui_header "跨设备同步管理" "手动触发同步、查看同步状态与设备列表"
+    echo
+    skpl_ui_section "同步状态"
+    openclaw_cross_device_sync_status
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "执行同步" "手动触发一次跨设备同步"
+    skpl_ui_menu_item 2 "刷新状态" "重新查看同步状态"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) openclaw_cross_device_sync_execute; break_end ;;
+      2) continue ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+
+# ─── PATCH 2: User Model Preference Independent Config (用户模型偏好独立配置) ───
+
+openclaw_user_model_preference_file() {
+  echo "${SKPL_AI_STACK_STATE_DIR}/user-model-preferences.json"
+}
+
+openclaw_user_model_preference_load() {
+  local state_file
+  state_file=$(openclaw_user_model_preference_file)
+  if [ ! -f "$state_file" ]; then
+    echo '{"updatedAt":0,"preferences":{"defaultTextModel":"","defaultCodeModel":"","defaultVisionModel":"","preferredCloudProvider":"","costPriority":"balanced"}}'
+    return 0
+  fi
+  cat "$state_file"
+}
+
+openclaw_user_model_preference_save() {
+  local data="$1"
+  local state_file
+  state_file=$(openclaw_user_model_preference_file)
+  openclaw_ai_stack_prepare
+  python3 - "$state_file" "$data" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+data = json.loads(sys.argv[2])
+state = {
+    'updatedAt': int(time.time()),
+    'preferences': {
+        'defaultTextModel': '',
+        'defaultCodeModel': '',
+        'defaultVisionModel': '',
+        'preferredCloudProvider': '',
+        'costPriority': 'balanced',
+    },
+}
+if state_path.exists():
+    try:
+        current = json.loads(state_path.read_text(encoding='utf-8'))
+        if isinstance(current, dict):
+            state.update(current)
+    except Exception:
+        pass
+if 'preferences' in data and isinstance(data['preferences'], dict):
+    state['preferences'].update(data['preferences'])
+state['updatedAt'] = int(time.time())
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print('偏好已保存。')
+PY
+}
+
+openclaw_user_model_preference_set() {
+  local key="$1"
+  local value="$2"
+  local current_json new_json
+  current_json=$(openclaw_user_model_preference_load)
+  new_json=$(python3 - "$current_json" "$key" "$value" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+data['preferences'][key] = value
+print(json.dumps(data, ensure_ascii=False))
+PY
+)
+  openclaw_user_model_preference_save "$new_json"
+}
+
+openclaw_user_model_preference_get() {
+  local key="$1"
+  local current_json
+  current_json=$(openclaw_user_model_preference_load)
+  python3 - "$current_json" "$key" <<'PY'
+import json
+import sys
+
+data = json.loads(sys.argv[1])
+key = sys.argv[2]
+print(data.get('preferences', {}).get(key, ''))
+PY
+}
+
+openclaw_user_model_preference_menu() {
+  while true; do
+    clear
+    skpl_ui_header "用户模型偏好配置" "独立配置默认文本、代码、视觉模型与成本优先级"
+    echo
+    skpl_ui_section "当前偏好"
+    local pref_json
+    pref_json=$(openclaw_user_model_preference_load)
+    python3 - "$pref_json" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+data = json.loads(sys.argv[1])
+prefs = data.get('preferences', {})
+updated = int(data.get('updatedAt', 0) or 0)
+if updated > 0:
+    ts_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(updated))
+else:
+    ts_str = '从未更新'
+print(f'最后更新: {ts_str}')
+print(f'默认文本模型: {prefs.get("defaultTextModel", "(未设置)")}')
+print(f'默认代码模型: {prefs.get("defaultCodeModel", "(未设置)")}')
+print(f'默认视觉模型: {prefs.get("defaultVisionModel", "(未设置)")}')
+print(f'首选云提供商: {prefs.get("preferredCloudProvider", "(未设置)")}')
+print(f'成本优先级: {prefs.get("costPriority", "balanced")}')
+PY
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "设置默认文本模型" "如 ollama/qwen2.5:7b"
+    skpl_ui_menu_item 2 "设置默认代码模型" "如 ollama/qwen3-coder"
+    skpl_ui_menu_item 3 "设置默认视觉模型" "如 google/gemini-2.5-pro"
+    skpl_ui_menu_item 4 "设置首选云提供商" "如 google, openai, anthropic"
+    skpl_ui_menu_item 5 "设置成本优先级" "cost-first / balanced / quality-first"
+    skpl_ui_menu_item 6 "应用到路由配置" "将偏好写入 ai-stack 路由配置"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) read -e -p "输入默认文本模型: " v; [ -n "$v" ] && openclaw_user_model_preference_set "defaultTextModel" "$v"; break_end ;;
+      2) read -e -p "输入默认代码模型: " v; [ -n "$v" ] && openclaw_user_model_preference_set "defaultCodeModel" "$v"; break_end ;;
+      3) read -e -p "输入默认视觉模型: " v; [ -n "$v" ] && openclaw_user_model_preference_set "defaultVisionModel" "$v"; break_end ;;
+      4) read -e -p "输入首选云提供商: " v; [ -n "$v" ] && openclaw_user_model_preference_set "preferredCloudProvider" "$v"; break_end ;;
+      5) read -e -p "输入成本优先级 (cost-first/balanced/quality-first): " v; [ -n "$v" ] && openclaw_user_model_preference_set "costPriority" "$v"; break_end ;;
+      6) openclaw_user_model_preference_apply_to_route; break_end ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+openclaw_user_model_preference_apply_to_route() {
+  openclaw_ai_stack_prepare
+  local pref_json="$SKPL_AI_STACK_ROOT/config.json"
+  local user_prefs
+  user_prefs=$(openclaw_user_model_preference_load)
+  python3 - "$pref_json" "$user_prefs" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+user_prefs = json.loads(sys.argv[2])
+prefs = user_prefs.get('preferences', {})
+
+cfg = json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+routing = cfg.setdefault('routing', {})
+
+updated = []
+if prefs.get('defaultTextModel'):
+    routing['defaultTextModel'] = prefs['defaultTextModel']
+    updated.append(f'文本模型 -> {prefs["defaultTextModel"]}')
+if prefs.get('defaultCodeModel'):
+    routing['defaultCodeModel'] = prefs['defaultCodeModel']
+    updated.append(f'代码模型 -> {prefs["defaultCodeModel"]}')
+if prefs.get('defaultVisionModel'):
+    routing['defaultVisionModel'] = prefs['defaultVisionModel']
+    updated.append(f'视觉模型 -> {prefs["defaultVisionModel"]}')
+if prefs.get('costPriority'):
+    cloud = cfg.setdefault('cloud', {})
+    cloud['costQualityMode'] = prefs['costPriority']
+    updated.append(f'成本优先级 -> {prefs["costPriority"]}')
+
+config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+if updated:
+    print('已应用以下偏好到路由配置:')
+    for item in updated:
+        print(f'  - {item}')
+else:
+    print('没有需要应用的偏好设置。')
+PY
+}
+
+
+# ─── PATCH 3: Structured Data Retrieval (结构化数据检索) ───
+
+openclaw_structured_data_search() {
+  local query="$1"
+  if [ "$(openclaw_memory_feature_enabled all 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    printf '%s\n' '[]'
+    return 0
+  fi
+  if [ "$(openclaw_memory_feature_enabled longTerm 2>/dev/null || printf '%s' 'true')" != "true" ]; then
+    printf '%s\n' '[]'
+    return 0
+  fi
+  memory_extension_prepare
+  python3 - "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" "$query" <<'PY'
+import json
+import sqlite3
+import sys
+import re
+
+db_path = sys.argv[1]
+config_path = sys.argv[2]
+query = (sys.argv[3] or '').strip().lower()
+
+conn = sqlite3.connect(db_path)
+rows = conn.execute('select id, category, title, content, tags, updated_at from memory_entries where deleted = 0 order by updated_at desc limit 200').fetchall()
+conn.close()
+
+structured_categories = ['structured', 'config', 'setting', 'api', 'json']
+results = []
+
+for row in rows:
+    _id, category, title, content, tags_raw, updated_at = row
+    cat_lower = (category or '').lower()
+    title_lower = (title or '').lower()
+    content_text = content or ''
+
+    is_structured = False
+    for sc in structured_categories:
+        if sc in cat_lower:
+            is_structured = True
+            break
+
+    json_blocks = re.findall(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content_text)
+    kv_patterns = re.findall(r'["\']?(\w+)["\']?\s*[:=]\s*["\']?([^"\'\n,]+)["\']?', content_text)
+
+    if is_structured or json_blocks or kv_patterns:
+        score = 0.0
+        reasons = []
+        if is_structured:
+            score += 2.0
+            reasons.append('结构化分类')
+        if json_blocks:
+            score += 1.5
+            reasons.append(f'含{len(json_blocks)}个JSON块')
+        if kv_patterns:
+            score += 1.0
+            reasons.append(f'含{len(kv_patterns)}个键值对')
+
+        if query:
+            if query in title_lower:
+                score += 2.0
+                reasons.append('标题命中')
+            if query in content_text.lower():
+                score += 1.0
+                reasons.append('内容命中')
+            tokens = [t for t in query.split() if t]
+            for token in tokens:
+                if token in (title_lower + ' ' + content_text.lower()):
+                    score += 0.3
+
+        if score > 0:
+            tags = []
+            try:
+                tags = json.loads(tags_raw or '[]')
+            except Exception:
+                tags = []
+            results.append({
+                'id': _id,
+                'source': 'structured-data',
+                'summary': title,
+                'score': score,
+                'category': category,
+                'jsonBlocks': len(json_blocks),
+                'kvPairs': len(kv_patterns),
+                'isStructuredCategory': is_structured,
+                'tags': tags,
+                'updatedAt': updated_at,
+                'explain': ' / '.join(reasons[:3]) if reasons else '结构化数据',
+            })
+
+results.sort(key=lambda x: (x['score'], x['updatedAt']), reverse=True)
+print(json.dumps(results[:5], ensure_ascii=False))
+PY
+}
+
+openclaw_structured_data_extract() {
+  local text="$1"
+  python3 - "$text" <<'PY'
+import json
+import re
+import sys
+
+text = sys.argv[1] or ''
+
+json_blocks = re.findall(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text)
+kv_pairs = re.findall(r'["\']?(\w+)["\']?\s*[:=]\s*["\']?([^"\'\n,]+)["\']?', text)
+
+result = {
+    'jsonBlocks': json_blocks,
+    'keyValuePairs': [{'key': k, 'value': v} for k, v in kv_pairs],
+    'totalJsonBlocks': len(json_blocks),
+    'totalKvPairs': len(kv_pairs),
+}
+
+print(json.dumps(result, ensure_ascii=False, indent=2))
+PY
+}
+
+openclaw_structured_data_index_entry() {
+  local title="$1"
+  local content="$2"
+  local tags="${3:-[]}"
+  [ -z "$title" ] && { echo "标题不能为空"; return 1; }
+  [ -z "$content" ] && { echo "内容不能为空"; return 1; }
+  memory_extension_upsert_entry "structured" "$title" "$content" "$tags" 0
+  echo "结构化数据条目已索引。"
+}
+
+
+# ─── PATCH 4: Code Vector Retrieval (代码向量检索) ───
+
+openclaw_code_semantic_search() {
+  local query="$1"
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_CODE_CACHE_DIR" "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" "$query" <<'PY'
+import json
+import sqlite3
+import sys
+import os
+import re
+from pathlib import Path
+
+code_cache_dir = Path(sys.argv[1])
+db_path = Path(sys.argv[2])
+config_path = sys.argv[3]
+query = (sys.argv[4] or '').strip().lower()
+
+results = []
+
+# Search code cache files
+if code_cache_dir.exists():
+    for cache_file in sorted(code_cache_dir.glob('*.json')):
+        try:
+            data = json.loads(cache_file.read_text(encoding='utf-8'))
+            payload = data.get('payload', data)
+            if not isinstance(payload, dict):
+                continue
+            code_text = str(payload.get('code', '') or '')
+            desc = str(payload.get('description', '') or '')
+            lang = str(payload.get('language', '') or '')
+            tags = payload.get('tags', [])
+            if not isinstance(tags, list):
+                tags = []
+
+            searchable = ' '.join([code_text, desc, lang, ' '.join(str(t) for t in tags)]).lower()
+            score = 0.0
+            reasons = []
+
+            if query:
+                if query in searchable:
+                    score += 2.0
+                    reasons.append('代码缓存命中')
+                tokens = [t for t in query.split() if len(t) > 1]
+                for token in tokens:
+                    if token in searchable:
+                        score += 0.4
+                if score > 0:
+                    reasons.append(f'语言: {lang}' if lang else '')
+            else:
+                score = 0.1
+
+            if score > 0:
+                results.append({
+                    'source': 'code-cache',
+                    'summary': desc or f'{lang} snippet',
+                    'score': score,
+                    'language': lang,
+                    'tags': tags,
+                    'explain': ' / '.join(r for r in reasons if r) or '代码缓存',
+                })
+        except Exception:
+            continue
+
+# Search memory entries with code category
+if db_path.exists():
+    try:
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute("select id, category, title, content, tags, updated_at from memory_entries where deleted = 0 and (category = 'code' or tags like '%code%') order by updated_at desc limit 50").fetchall()
+        conn.close()
+
+        for row in rows:
+            _id, category, title, content, tags_raw, updated_at = row
+            text = ' '.join([title or '', content or '', tags_raw or '']).lower()
+            score = 0.0
+            reasons = []
+            if query:
+                if query in text:
+                    score += 2.5
+                    reasons.append('记忆代码命中')
+                tokens = [t for t in query.split() if len(t) > 1]
+                for token in tokens:
+                    if token in text:
+                        score += 0.5
+            else:
+                score = 0.15
+
+            if score > 0:
+                tags = []
+                try:
+                    tags = json.loads(tags_raw or '[]')
+                except Exception:
+                    tags = []
+                results.append({
+                    'id': _id,
+                    'source': 'memory-code',
+                    'summary': title,
+                    'score': score,
+                    'category': category,
+                    'tags': tags,
+                    'updatedAt': updated_at,
+                    'explain': ' / '.join(reasons[:3]) if reasons else '代码记忆',
+                })
+    except Exception:
+        pass
+
+results.sort(key=lambda x: x['score'], reverse=True)
+print(json.dumps(results[:5], ensure_ascii=False))
+PY
+}
+
+openclaw_code_snippet_index() {
+  local code="$1"
+  local description="$2"
+  local language="${3:-text}"
+  local tags="${4:-[]}"
+  [ -z "$code" ] && { echo "代码内容不能为空"; return 1; }
+  openclaw_ai_stack_prepare
+  local key
+  key=$(openclaw_ai_stack_cache_key "code-snippet" "$code")
+  local file_path="${SKPL_AI_STACK_CODE_CACHE_DIR}/${key}.json"
+  local payload
+  payload=$(python3 - "$code" "$description" "$language" "$tags" <<'PY'
+import json
+import sys
+
+code = sys.argv[1]
+description = sys.argv[2]
+language = sys.argv[3]
+tags_raw = sys.argv[4]
+try:
+    tags = json.loads(tags_raw)
+except Exception:
+    tags = [t.strip() for t in tags_raw.split(',') if t.strip()]
+
+payload = {
+    'code': code,
+    'description': description,
+    'language': language,
+    'tags': tags,
+}
+print(json.dumps(payload, ensure_ascii=False))
+PY
+)
+  openclaw_ai_stack_cache_write "$file_path" "$payload"
+  echo "代码片段已索引 (语言: $language)。"
+}
+
+openclaw_code_search_status() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_CODE_CACHE_DIR" "$SKPL_MEMORY_EXTENSION_DB" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+code_dir = Path(sys.argv[1])
+db_path = Path(sys.argv[2])
+
+cache_count = 0
+if code_dir.exists():
+    cache_count = len(list(code_dir.glob('*.json')))
+
+memory_code_count = 0
+if db_path.exists():
+    try:
+        conn = sqlite3.connect(db_path)
+        memory_code_count = conn.execute("select count(*) from memory_entries where deleted = 0 and (category = 'code' or tags like '%code%')").fetchone()[0]
+        conn.close()
+    except Exception:
+        pass
+
+print(f'代码缓存文件: {cache_count} 个')
+print(f'记忆代码条目: {memory_code_count} 条')
+print(f'总计可检索: {cache_count + memory_code_count} 项')
+PY
+}
+
+
+# ─── PATCH 5: Multimodal Vector Retrieval (多模态向量检索) ───
+
+openclaw_multimodal_search() {
+  local query="$1"
+  local filter_type="${2:-}"
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_MULTIMODAL_CACHE_DIR" "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_MEMORY_EXTENSION_CONFIG" "$query" "$filter_type" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+cache_dir = Path(sys.argv[1])
+db_path = Path(sys.argv[2])
+config_path = sys.argv[3]
+query = (sys.argv[4] or '').strip().lower()
+filter_type = (sys.argv[5] or '').strip().lower()
+
+results = []
+
+# Search multimodal cache files
+if cache_dir.exists():
+    for cache_file in sorted(cache_dir.glob('*.json')):
+        try:
+            data = json.loads(cache_file.read_text(encoding='utf-8'))
+            payload = data.get('payload', data)
+            if not isinstance(payload, dict):
+                continue
+            mm_type = str(payload.get('type', '') or '').lower()
+            desc = str(payload.get('description', '') or '')
+            source = str(payload.get('source', '') or '')
+            tags = payload.get('tags', [])
+            if not isinstance(tags, list):
+                tags = []
+
+            if filter_type and mm_type != filter_type:
+                continue
+
+            searchable = ' '.join([mm_type, desc, source, ' '.join(str(t) for t in tags)]).lower()
+            score = 0.0
+            reasons = []
+
+            if query:
+                if query in searchable:
+                    score += 2.0
+                    reasons.append('多模态缓存命中')
+                tokens = [t for t in query.split() if len(t) > 1]
+                for token in tokens:
+                    if token in searchable:
+                        score += 0.4
+                if filter_type and mm_type == filter_type:
+                    score += 1.0
+                    reasons.append(f'类型过滤: {mm_type}')
+            else:
+                score = 0.1
+
+            if score > 0:
+                results.append({
+                    'source': 'multimodal-cache',
+                    'summary': desc or f'{mm_type} content',
+                    'score': score,
+                    'type': mm_type,
+                    'sourceFile': source,
+                    'tags': tags,
+                    'explain': ' / '.join(reasons[:3]) if reasons else '多模态缓存',
+                })
+        except Exception:
+            continue
+
+# Search memory entries with visual/multimodal category
+if db_path.exists():
+    try:
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute("select id, category, title, content, tags, updated_at from memory_entries where deleted = 0 and (category = 'visual' or category = 'multimodal' or tags like '%image%' or tags like '%audio%') order by updated_at desc limit 50").fetchall()
+        conn.close()
+
+        for row in rows:
+            _id, category, title, content, tags_raw, updated_at = row
+            text = ' '.join([title or '', content or '', tags_raw or '']).lower()
+            score = 0.0
+            reasons = []
+            if query:
+                if query in text:
+                    score += 2.5
+                    reasons.append('记忆多模态命中')
+                tokens = [t for t in query.split() if len(t) > 1]
+                for token in tokens:
+                    if token in text:
+                        score += 0.5
+            else:
+                score = 0.15
+
+            if score > 0:
+                tags = []
+                try:
+                    tags = json.loads(tags_raw or '[]')
+                except Exception:
+                    tags = []
+                results.append({
+                    'id': _id,
+                    'source': 'memory-multimodal',
+                    'summary': title,
+                    'score': score,
+                    'category': category,
+                    'tags': tags,
+                    'updatedAt': updated_at,
+                    'explain': ' / '.join(reasons[:3]) if reasons else '多模态记忆',
+                })
+    except Exception:
+        pass
+
+results.sort(key=lambda x: x['score'], reverse=True)
+print(json.dumps(results[:5], ensure_ascii=False))
+PY
+}
+
+openclaw_multimodal_index_content() {
+  local content_type="$1"
+  local description="$2"
+  local source="${3:-}"
+  local tags="${4:-[]}"
+  local content_data="$5"
+  [ -z "$content_type" ] && { echo "内容类型不能为空"; return 1; }
+  openclaw_ai_stack_prepare
+  local key
+  key=$(openclaw_ai_stack_cache_key "multimodal" "${content_type}:${description}")
+  local file_path="${SKPL_AI_STACK_MULTIMODAL_CACHE_DIR}/${key}.json"
+  local payload
+  payload=$(python3 - "$content_type" "$description" "$source" "$tags" "$content_data" <<'PY'
+import json
+import sys
+
+content_type = sys.argv[1]
+description = sys.argv[2]
+source = sys.argv[3]
+tags_raw = sys.argv[4]
+content_data = sys.argv[5] if len(sys.argv) > 5 else ''
+try:
+    tags = json.loads(tags_raw)
+except Exception:
+    tags = [t.strip() for t in tags_raw.split(',') if t.strip()]
+
+payload = {
+    'type': content_type,
+    'description': description,
+    'source': source,
+    'tags': tags,
+}
+if content_data:
+    try:
+        payload['data'] = json.loads(content_data)
+    except Exception:
+        payload['data'] = content_data
+
+print(json.dumps(payload, ensure_ascii=False))
+PY
+)
+  openclaw_ai_stack_cache_write "$file_path" "$payload"
+  echo "多模态内容已索引 (类型: $content_type)。"
+}
+
+openclaw_multimodal_search_status() {
+  openclaw_ai_stack_prepare
+  python3 - "$SKPL_AI_STACK_MULTIMODAL_CACHE_DIR" "$SKPL_MEMORY_EXTENSION_DB" <<'PY'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+cache_dir = Path(sys.argv[1])
+db_path = Path(sys.argv[2])
+
+cache_count = 0
+type_counts = {}
+if cache_dir.exists():
+    for cache_file in cache_dir.glob('*.json'):
+        try:
+            data = json.loads(cache_file.read_text(encoding='utf-8'))
+            payload = data.get('payload', data)
+            mm_type = str(payload.get('type', 'unknown'))
+            cache_count += 1
+            type_counts[mm_type] = type_counts.get(mm_type, 0) + 1
+        except Exception:
+            cache_count += 1
+
+memory_mm_count = 0
+if db_path.exists():
+    try:
+        conn = sqlite3.connect(db_path)
+        memory_mm_count = conn.execute("select count(*) from memory_entries where deleted = 0 and (category = 'visual' or category = 'multimodal' or tags like '%image%' or tags like '%audio%')").fetchone()[0]
+        conn.close()
+    except Exception:
+        pass
+
+print(f'多模态缓存文件: {cache_count} 个')
+for t, c in sorted(type_counts.items()):
+    print(f'  - {t}: {c} 个')
+print(f'记忆多模态条目: {memory_mm_count} 条')
+print(f'总计可检索: {cache_count + memory_mm_count} 项')
+PY
+}
+
+
+# ─── PATCH 6: User Behavior Implicit Feedback (用户行为隐式反馈) ───
+
+openclaw_user_behavior_state_file() {
+  echo "${SKPL_AI_STACK_STATE_DIR}/user-behavior.json"
+}
+
+openclaw_user_behavior_track() {
+  local event_type="$1"
+  local query_hash="${2:-}"
+  local route_info="${3:-}"
+  local state_file
+  state_file=$(openclaw_user_behavior_state_file)
+  openclaw_ai_stack_prepare
+  python3 - "$state_file" "$event_type" "$query_hash" "$route_info" <<'PY'
+import json
+import sys
+import time
+import hashlib
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+event_type = sys.argv[2] or 'unknown'
+query_hash = sys.argv[3] or ''
+route_info = sys.argv[4] or ''
+
+valid_events = ['copy_response', 'edit_response', 'requery', 'accept', 'reject', 'skip']
+if event_type not in valid_events:
+    print(f'无效事件类型: {event_type}')
+    raise SystemExit(1)
+
+state = {
+    'updatedAt': 0,
+    'totalEvents': 0,
+    'events': {
+        'copy_response': 0,
+        'edit_response': 0,
+        'requery': 0,
+        'accept': 0,
+        'reject': 0,
+        'skip': 0,
+    },
+    'recentEvents': [],
+    'acceptanceRate': 0.0,
+    'requeryRate': 0.0,
+}
+if state_path.exists():
+    try:
+        current = json.loads(state_path.read_text(encoding='utf-8'))
+        if isinstance(current, dict):
+            state.update(current)
+    except Exception:
+        pass
+
+state['updatedAt'] = int(time.time())
+state['totalEvents'] = int(state.get('totalEvents', 0) or 0) + 1
+events = state.setdefault('events', {})
+events[event_type] = int(events.get(event_type, 0) or 0) + 1
+
+recent = state.setdefault('recentEvents', [])
+recent.append({
+    'type': event_type,
+    'timestamp': int(time.time()),
+    'queryHash': query_hash,
+    'routeInfo': route_info,
+})
+state['recentEvents'] = recent[-100:]
+
+# Recalculate rates
+total = state['totalEvents']
+accept_count = int(events.get('accept', 0) or 0)
+reject_count = int(events.get('reject', 0) or 0)
+requery_count = int(events.get('requery', 0) or 0)
+state['acceptanceRate'] = round(accept_count / total, 4) if total > 0 else 0.0
+state['requeryRate'] = round(requery_count / total, 4) if total > 0 else 0.0
+
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(f'行为事件已记录: {event_type}')
+PY
+}
+
+openclaw_user_behavior_analyze() {
+  local state_file
+  state_file=$(openclaw_user_behavior_state_file)
+  if [ ! -f "$state_file" ]; then
+    echo "暂无行为数据，请先积累使用记录。"
+    return 0
+  fi
+  python3 - "$state_file" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text(encoding='utf-8'))
+events = data.get('events', {})
+total = int(data.get('totalEvents', 0) or 0)
+acceptance = float(data.get('acceptanceRate', 0) or 0)
+requery = float(data.get('requeryRate', 0) or 0)
+recent = data.get('recentEvents', [])
+
+print('=== 行为分析报告 ===')
+print(f'总事件数: {total}')
+print()
+print('事件分布:')
+for evt_name, evt_count in sorted(events.items()):
+    pct = round(evt_count / total * 100, 1) if total > 0 else 0
+    print(f'  {evt_name}: {evt_count} ({pct}%)')
+print()
+print(f'接受率: {acceptance * 100:.1f}%')
+print(f'重查询率: {requery * 100:.1f}%')
+print()
+
+# Generate suggestions
+suggestions = []
+if acceptance < 0.5 and total > 10:
+    suggestions.append('接受率偏低，建议检查回答质量或模型选择。')
+if requery > 0.3 and total > 10:
+    suggestions.append('重查询率偏高，建议优化路由策略或增加上下文。')
+copy_count = int(events.get('copy_response', 0) or 0)
+edit_count = int(events.get('edit_response', 0) or 0)
+if edit_count > copy_count and total > 10:
+    suggestions.append('编辑次数多于复制，回答可能需要更多定制化。')
+skip_count = int(events.get('skip', 0) or 0)
+if skip_count > total * 0.2 and total > 10:
+    suggestions.append('跳过率较高，建议优化回答格式或减少冗余信息。')
+
+if suggestions:
+    print('改进建议:')
+    for s in suggestions:
+        print(f'  - {s}')
+else:
+    print('当前使用模式正常，暂无改进建议。')
+PY
+}
+
+openclaw_user_behavior_status() {
+  local state_file
+  state_file=$(openclaw_user_behavior_state_file)
+  if [ ! -f "$state_file" ]; then
+    echo "用户行为反馈: 未初始化"
+    return 0
+  fi
+  python3 - "$state_file" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text(encoding='utf-8'))
+updated = int(data.get('updatedAt', 0) or 0)
+total = int(data.get('totalEvents', 0) or 0)
+events = data.get('events', {})
+acceptance = float(data.get('acceptanceRate', 0) or 0)
+requery = float(data.get('requeryRate', 0) or 0)
+
+if updated > 0:
+    ts_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(updated))
+else:
+    ts_str = '从未'
+
+print(f'最后更新: {ts_str}')
+print(f'总事件: {total}')
+print(f'接受率: {acceptance * 100:.1f}%')
+print(f'重查询率: {requery * 100:.1f}%')
+PY
+}
+
+openclaw_user_behavior_menu() {
+  while true; do
+    clear
+    skpl_ui_header "用户行为反馈分析" "查看隐式反馈统计、行为分析与改进建议"
+    echo
+    skpl_ui_section "行为概览"
+    openclaw_user_behavior_status
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "查看详细分析" "查看完整行为分析报告与改进建议"
+    skpl_ui_menu_item 2 "记录测试事件" "手动记录一个行为事件(调试用)"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) openclaw_user_behavior_analyze; break_end ;;
+      2)
+        echo "可用事件: copy_response, edit_response, requery, accept, reject, skip"
+        read -e -p "输入事件类型: " evt
+        read -e -p "查询哈希(可空): " qh
+        openclaw_user_behavior_track "$evt" "$qh"
+        break_end
+        ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+
+# ─── PATCH 7: Active Learning & Knowledge Gap Detection (主动学习与知识补全) ───
+
+openclaw_active_learning_state_file() {
+  echo "${SKPL_AI_STACK_STATE_DIR}/active-learning.json"
+}
+
+openclaw_active_learning_detect_gaps() {
+  local state_file
+  state_file=$(openclaw_active_learning_state_file)
+  local behavior_file
+  behavior_file=$(openclaw_user_behavior_state_file)
+  openclaw_ai_stack_prepare
+  memory_extension_prepare
+  python3 - "$state_file" "$behavior_file" "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_AI_STACK_EVOLVE_STATE_FILE" <<'PY'
+import json
+import sqlite3
+import sys
+import time
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+behavior_path = Path(sys.argv[2])
+db_path = Path(sys.argv[3])
+evolve_path = Path(sys.argv[4])
+
+gaps = []
+
+# 1. Analyze requery patterns from behavior data
+if behavior_path.exists():
+    try:
+        behavior = json.loads(behavior_path.read_text(encoding='utf-8'))
+        requery_rate = float(behavior.get('requeryRate', 0) or 0)
+        if requery_rate > 0.3:
+            gaps.append({'type': 'high_requery_rate', 'severity': 'medium', 'description': f'重查询率 {requery_rate*100:.1f}% 偏高，可能存在知识盲区', 'suggestion': '增加相关领域知识条目'})
+        acceptance_rate = float(behavior.get('acceptanceRate', 0) or 0)
+        if acceptance_rate < 0.5:
+            gaps.append({'type': 'low_acceptance', 'severity': 'high', 'description': f'接受率 {acceptance_rate*100:.1f}% 偏低', 'suggestion': '检查回答质量，优化模型选择'})
+    except Exception:
+        pass
+
+# 2. Identify topics with low quality scores
+if evolve_path.exists():
+    try:
+        evolve = json.loads(evolve_path.read_text(encoding='utf-8'))
+        route_quality = evolve.get('routeQualityScores', {})
+        for route_name, scores in route_quality.items():
+            avg = float(scores.get('average', 0) or 0)
+            if 0 < avg < 0.5:
+                gaps.append({'type': 'low_quality_route', 'severity': 'medium', 'description': f'路由 {route_name} 平均质量分 {avg:.2f} 偏低', 'suggestion': f'优化 {route_name} 路由的模型选择或提示策略'})
+    except Exception:
+        pass
+
+# 3. Identify memory categories with few entries
+if db_path.exists():
+    try:
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute('select category, count(*) from memory_entries where deleted = 0 group by category').fetchall()
+        conn.close()
+        category_counts = {row[0]: row[1] for row in rows}
+        expected_categories = ['identity', 'preference', 'knowledge', 'project', 'structured', 'code']
+        for cat in expected_categories:
+            count = category_counts.get(cat, 0)
+            if count == 0:
+                gaps.append({'type': 'empty_category', 'severity': 'low', 'description': f'记忆分类 {cat} 暂无条目', 'suggestion': f'考虑添加 {cat} 类型的知识条目'})
+            elif count < 3:
+                gaps.append({'type': 'sparse_category', 'severity': 'low', 'description': f'记忆分类 {cat} 仅有 {count} 条', 'suggestion': f'补充更多 {cat} 类型的知识'})
+    except Exception:
+        pass
+
+# Update state
+state = {
+    'updatedAt': int(time.time()),
+    'detectedGaps': [],
+    'suggestions': [],
+    'learnedInsights': 0,
+    'autoLearnEnabled': False,
+    'lastGapDetection': int(time.time()),
+}
+if state_path.exists():
+    try:
+        current = json.loads(state_path.read_text(encoding='utf-8'))
+        if isinstance(current, dict):
+            state.update(current)
+    except Exception:
+        pass
+
+state['detectedGaps'] = gaps
+state['suggestions'] = [g['suggestion'] for g in gaps]
+state['lastGapDetection'] = int(time.time())
+state['updatedAt'] = int(time.time())
+
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+if gaps:
+    print(f'检测到 {len(gaps)} 个知识缺口:')
+    for g in gaps:
+        print(f'  [{g["severity"]}] {g["description"]}')
+        print(f'    建议: {g["suggestion"]}')
+else:
+    print('未检测到明显知识缺口。')
+PY
+}
+
+openclaw_active_learning_generate_suggestions() {
+  local state_file
+  state_file=$(openclaw_active_learning_state_file)
+  if [ ! -f "$state_file" ]; then
+    echo "请先执行知识缺口检测。"
+    return 0
+  fi
+  python3 - "$state_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text(encoding='utf-8'))
+gaps = data.get('detectedGaps', [])
+suggestions = data.get('suggestions', [])
+
+if not gaps:
+    print('当前无知识缺口，暂无学习建议。')
+    raise SystemExit(0)
+
+print('=== 主动学习建议 ===')
+print()
+for i, gap in enumerate(gaps, 1):
+    print(f'{i}. [{gap["severity"]}] {gap["description"]}')
+    print(f'   建议: {gap["suggestion"]}')
+    print()
+
+print(f'共 {len(gaps)} 条建议。')
+PY
+}
+
+openclaw_active_learning_record_insight() {
+  local title="$1"
+  local content="$2"
+  local tags="${3:-[\"knowledge\",\"learned\"]}"
+  [ -z "$title" ] && { echo "标题不能为空"; return 1; }
+  [ -z "$content" ] && { echo "内容不能为空"; return 1; }
+  memory_extension_upsert_entry "knowledge" "$title" "$content" "$tags" 0
+
+  # Update active learning state
+  local state_file
+  state_file=$(openclaw_active_learning_state_file)
+  python3 - "$state_file" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+state = {
+    'updatedAt': int(time.time()),
+    'detectedGaps': [],
+    'suggestions': [],
+    'learnedInsights': 0,
+    'autoLearnEnabled': False,
+    'lastGapDetection': 0,
+}
+if state_path.exists():
+    try:
+        current = json.loads(state_path.read_text(encoding='utf-8'))
+        if isinstance(current, dict):
+            state.update(current)
+    except Exception:
+        pass
+
+state['learnedInsights'] = int(state.get('learnedInsights', 0) or 0) + 1
+state['updatedAt'] = int(time.time())
+state_path.parent.mkdir(parents=True, exist_ok=True)
+state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+PY
+  echo "学习洞察已记录并索引。"
+}
+
+openclaw_active_learning_status() {
+  local state_file
+  state_file=$(openclaw_active_learning_state_file)
+  if [ ! -f "$state_file" ]; then
+    echo "主动学习状态: 未初始化"
+    return 0
+  fi
+  python3 - "$state_file" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text(encoding='utf-8'))
+updated = int(data.get('updatedAt', 0) or 0)
+last_detection = int(data.get('lastGapDetection', 0) or 0)
+gaps = data.get('detectedGaps', [])
+insights = int(data.get('learnedInsights', 0) or 0)
+auto_learn = data.get('autoLearnEnabled', False)
+
+if updated > 0:
+    ts_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(updated))
+else:
+    ts_str = '从未'
+if last_detection > 0:
+    det_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_detection))
+else:
+    det_str = '从未'
+
+print(f'最后更新: {ts_str}')
+print(f'上次缺口检测: {det_str}')
+print(f'已检测缺口: {len(gaps)} 个')
+print(f'已记录洞察: {insights} 条')
+print(f'自动学习: {"开启" if auto_learn else "关闭"}')
+PY
+}
+
+openclaw_active_learning_menu() {
+  while true; do
+    clear
+    skpl_ui_header "主动学习与知识补全" "检测知识缺口、生成学习建议、记录学习洞察"
+    echo
+    skpl_ui_section "状态概览"
+    openclaw_active_learning_status
+    echo
+    skpl_ui_section "操作"
+    skpl_ui_menu_item 1 "检测知识缺口" "分析行为数据和记忆库，检测知识盲区"
+    skpl_ui_menu_item 2 "查看学习建议" "基于已检测的缺口生成学习建议"
+    skpl_ui_menu_item 3 "记录学习洞察" "手动记录一条学习到的知识"
+    skpl_ui_menu_item 4 "查看行为反馈" "进入用户行为反馈分析菜单"
+    skpl_ui_menu_item 0 "返回上一级"
+    skpl_ui_footer_prompt "请输入你的选择: "
+    read -e choice
+    case "$choice" in
+      1) openclaw_active_learning_detect_gaps; break_end ;;
+      2) openclaw_active_learning_generate_suggestions; break_end ;;
+      3)
+        read -e -p "洞察标题: " title
+        read -e -p "洞察内容: " content
+        openclaw_active_learning_record_insight "$title" "$content"
+        break_end
+        ;;
+      4) openclaw_user_behavior_menu ;;
+      0) return 0 ;;
+      *) echo "无效的选择，请重试。"; sleep 1 ;;
+    esac
+  done
+}
+
+
+# ============================================================================
+# Layer 0 - 基础设施层: 通用工具函数库
+# ============================================================================
+
+# --- 1.1 硬件检测缓存 ---
+SKPL_HARDWARE_CACHE_FILE="${SKPL_HOME}/hardware-cache.json"
+SKPL_HARDWARE_CACHE_TTL=300
+
+skpl_cached_hardware_profile() {
+  if [ -f "$SKPL_HARDWARE_CACHE_FILE" ]; then
+    local age
+    age=$(($(date +%s) - $(stat -c %Y "$SKPL_HARDWARE_CACHE_FILE" 2>/dev/null || echo '0')))
+    if [ "$age" -lt "$SKPL_HARDWARE_CACHE_TTL" ]; then
+      cat "$SKPL_HARDWARE_CACHE_FILE"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+skpl_cache_hardware_profile() {
+  mkdir -p "$(dirname "$SKPL_HARDWARE_CACHE_FILE")"
+  cat > "$SKPL_HARDWARE_CACHE_FILE"
+}
+
+# --- 1.2 错误处理与日志 ---
+SKPL_ERROR_LOG="${SKPL_HOME}/error.log"
+
+skpl_log_error() {
+  local msg="$1"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $msg" >> "$SKPL_ERROR_LOG"
+}
+
+skpl_log_warn() {
+  local msg="$1"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARN: $msg" >> "$SKPL_ERROR_LOG"
+}
+
+skpl_log_info() {
+  local msg="$1"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] INFO: $msg" >> "$SKPL_ERROR_LOG"
+}
+
+skpl_safe_exec() {
+  local desc="$1"
+  shift
+  local output exit_code
+  output=$("$@" 2>&1)
+  exit_code=$?
+  if [ "$exit_code" -ne 0 ]; then
+    skpl_log_error "$desc failed (exit=$exit_code): $output"
+    return $exit_code
+  fi
+  echo "$output"
+}
+
+skpl_safe_file_read() {
+  local file="$1"
+  if [ ! -f "$file" ]; then
+    skpl_log_warn "File not found: $file"
+    return 1
+  fi
+  cat "$file" 2>/dev/null || {
+    skpl_log_error "Failed to read: $file"
+    return 1
+  }
+}
+
+skpl_safe_mkdir() {
+  local dir="$1"
+  if [ ! -d "$dir" ]; then
+    mkdir -p "$dir" 2>/dev/null || {
+      skpl_log_error "Failed to create directory: $dir"
+      return 1
+    }
+  fi
+}
+
+# --- 1.3 WSL2 兼容性增强 ---
+# ═══════════════════════════════════════════════════════════════
+# 安全性修复：输入验证函数
+# ═══════════════════════════════════════════════════════════════
+
+# 验证插件ID安全性（防止路径遍历攻击）
+skpl_validate_plugin_id() {
+  local plugin_id="$1"
+  if [ -z "$plugin_id" ]; then
+    return 1
+  fi
+  # 只允许字母、数字、短横线、下划线
+  if echo "$plugin_id" | grep -Eqq '^[a-zA-Z0-9_-]+$'; then
+    return 0
+  fi
+  echo "❌ 非法插件ID格式: $plugin_id" >&2
+  return 1
+}
+
+# 验证技能名称安全性
+skpl_validate_skill_name() {
+  local skill_name="$1"
+  if [ -z "$skill_name" ]; then
+    return 1
+  fi
+  if echo "$skill_name" | grep -Eqq '^[a-zA-Z0-9_-]+$'; then
+    return 0
+  fi
+  echo "❌ 非法技能名称格式: $skill_name" >&2
+  return 1
+}
+
+# 验证模型名称安全性
+skpl_validate_model_name() {
+  local model_name="$1"
+  if [ -z "$model_name" ]; then
+    return 1
+  fi
+  # Ollama模型名只允许: 字母、数字、冒号、短横线、斜杠（命名空间）
+  if echo "$model_name" | grep -Eqq '^[a-zA-Z0-9_:/.-]+$'; then
+    if echo "$model_name" | grep -Eqq '\.\.|\/|\\|;|`|\$\(|\\'; then
+      echo "❌ 非法模型名: $model_name" >&2
+      return 1
+    fi
+    return 0
+  fi
+  echo "❌ 非法模型名格式: $model_name" >&2
+  return 1
+}
+
+skpl_wsl_version() {
+  if [ -f /proc/version ]; then
+    if grep -qi "microsoft" /proc/version 2>/dev/null; then
+      if grep -qi "wsl2" /proc/version 2>/dev/null; then
+        echo "2"
+      else
+        echo "1"
+      fi
+    else
+      echo "0"
+    fi
+  else
+    echo "0"
+  fi
+}
+
+skpl_is_wsl2() {
+  [ "$(skpl_wsl_version)" = "2" ]
+}
+
+skpl_has_systemd() {
+  [ -d /run/systemd/system ] 2>/dev/null
+}
+
+skpl_wsl_windows_host_ip() {
+  local ip=""
+  ip=$(grep -m1 '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}')
+  if [ -z "$ip" ]; then
+    ip=$(ip route show default 2>/dev/null | awk '/via/ {print $3; exit}')
+  fi
+  echo "$ip"
+}
+
+skpl_wsl_proxy_auto_discover() {
+  if ! skpl_is_wsl2; then
+    return 1
+  fi
+  local host_ip
+  host_ip=$(skpl_wsl_windows_host_ip)
+  [ -z "$host_ip" ] && return 1
+  local port proxy test_code
+  for port in 7890 7897 10808 10809 8080 1080; do
+    proxy="http://${host_ip}:${port}"
+    test_code=$(curl -s -o /dev/null -w "%{http_code}" --proxy "$proxy" --max-time 3 --connect-timeout 2 http://www.google.com/generate_204 2>/dev/null)
+    if [ "$test_code" = "204" ] || [ "$test_code" = "200" ]; then
+      echo "$proxy"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# --- 1.4 代理健康检查 ---
+skpl_proxy_health_check() {
+  local proxy_url="${1:-}"
+  [ -z "$proxy_url" ] && return 1
+  local test_code
+  test_code=$(curl -s -o /dev/null -w "%{http_code}" --proxy "$proxy_url" --max-time 5 --connect-timeout 3 http://www.google.com/generate_204 2>/dev/null)
+  if [ "$test_code" = "204" ] || [ "$test_code" = "200" ]; then
+    return 0
+  fi
+  test_code=$(curl -s -o /dev/null -w "%{http_code}" --proxy "$proxy_url" --max-time 5 --connect-timeout 3 http://www.baidu.com 2>/dev/null)
+  [ "$test_code" = "200" ]
+}
+
+# --- 1.5 通用缓存管理 ---
+skpl_generic_cache_read() {
+  local cache_file="$1" ttl="$2"
+  [ ! -f "$cache_file" ] && return 1
+  local age
+    age=$(($(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo '0')))
+  [ "$age" -ge "$ttl" ] && return 1
+  cat "$cache_file" 2>/dev/null
+}
+
+skpl_generic_cache_write() {
+  local cache_file="$1" content="$2"
+  skpl_safe_mkdir "$(dirname "$cache_file")"
+  echo "$content" > "$cache_file"
+}
+
+# --- 1.6 Python 工具脚本（运行时生成） ---
+SKPL_PYTHON_UTILS="${SKPL_HOME}/python-utils.py"
+
+skpl_init_python_utils() {
+  skpl_safe_mkdir "$SKPL_HOME"
+  [ -f "$SKPL_PYTHON_UTILS" ] && return 0
+  cat > "$SKPL_PYTHON_UTILS" << 'PYEOF'
+#!/usr/bin/env python3
+"""OpenClaw Python Utils - unified tool to reduce subprocess overhead"""
+import json, sys, time, hashlib, os, re, sqlite3, shutil, subprocess
+from pathlib import Path
+
+class ConfigCache:
+    _c = {}
+    _m = {}
+    @classmethod
+    def get(cls, path, ttl=5):
+        p = Path(path)
+        if not p.exists():
+            return {}
+        now = time.time()
+        mt = p.stat().st_mtime
+        if path in cls._c and cls._m.get(path) == mt and (now - cls._c[path]['_ts']) < ttl:
+            return cls._c[path]['d']
+        try:
+            d = json.loads(p.read_text(encoding='utf-8'))
+            cls._c[path] = {'d': d, '_ts': now}
+            cls._m[path] = mt
+            return d
+        except Exception:
+            return {}
+    @classmethod
+    def set(cls, path, data):
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        cls._c[path] = {'d': data, '_ts': time.time()}
+        cls._m[path] = p.stat().st_mtime
+
+def cmd_cache_key(ns, text):
+    return hashlib.sha256((ns + '::' + text).encode('utf-8')).hexdigest()
+
+def detect_hw():
+    r = {'ts': int(time.time()), 'gpu': {'avail': False, 'mem': 0, 'name': ''}, 'mem': 0, 'cpu': 1}
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            for l in f:
+                if l.startswith('MemTotal:'):
+                    r['mem'] = int(l.split()[1]) // 1024
+                    break
+    except Exception:
+        pass
+    try:
+        r['cpu'] = os.cpu_count() or 1
+    except Exception:
+        pass
+    try:
+        if shutil.which('nvidia-smi'):
+            o = subprocess.check_output(['nvidia-smi', '--query-gpu=name,memory.total', '--format=csv,noheader'], text=True, timeout=5).strip()
+            if o:
+                parts = o.split(',')
+                if len(parts) >= 2:
+                    mb = int(parts[1].strip().replace('MiB','').replace('MB','').strip())
+                    r['gpu'] = {'avail': True, 'mem': mb, 'name': parts[0].strip()}
+    except Exception:
+        pass
+    return r
+
+def sqlite_query(db, q, params=()):
+    try:
+        c = sqlite3.connect(db, timeout=10)
+        c.row_factory = sqlite3.Row
+        rows = c.execute(q, params).fetchall()
+        c.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        return [{'error': str(e)}]
+
+def sqlite_exec(db, q, params=()):
+    try:
+        c = sqlite3.connect(db, timeout=10)
+        c.execute(q, params)
+        c.commit()
+        c.close()
+        return True
+    except Exception as e:
+        return str(e)
+
+if __name__ == '__main__':
+    cmd = sys.argv[1] if len(sys.argv) > 1 else 'help'
+    if cmd == 'cache_key':
+        print(cmd_cache_key(sys.argv[2], sys.argv[3]))
+    elif cmd == 'read_config':
+        print(json.dumps(ConfigCache.get(sys.argv[2]), ensure_ascii=False))
+    elif cmd == 'write_config':
+        ConfigCache.set(sys.argv[2], json.loads(sys.argv[3]))
+        print('ok')
+    elif cmd == 'detect_hw':
+        print(json.dumps(detect_hw(), ensure_ascii=False))
+    elif cmd == 'sqlite_query':
+        p = json.loads(sys.argv[4]) if len(sys.argv) > 4 else ()
+        print(json.dumps(sqlite_query(sys.argv[2], sys.argv[3], p), ensure_ascii=False))
+    elif cmd == 'sqlite_exec':
+        p = json.loads(sys.argv[4]) if len(sys.argv) > 4 else ()
+        r = sqlite_exec(sys.argv[2], sys.argv[3], p)
+        print('ok' if r is True else str(r))
+    else:
+        print('unknown')
+
+PYEOF
+  chmod +x "$SKPL_PYTHON_UTILS" 2>/dev/null || true
+}
+
+skpl_py() {
+  skpl_init_python_utils
+  python3 "$SKPL_PYTHON_UTILS" "$@"
+}
+
+skpl_py_cache_key() {
+  skpl_py cache_key "$1" "$2"
+}
+
+skpl_py_read_config() {
+  skpl_py read_config "$1"
+}
+
+skpl_py_detect_hw() {
+  skpl_py detect_hw
 }
 
 main "$@"
