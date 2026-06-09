@@ -21133,10 +21133,27 @@ openclaw_resolve_ollama_bin() {
     return 1
 }
 
+_openclaw_ollama_proxy_warn() {
+    local user_proxy="${HTTP_PROXY:-${http_proxy:-}}${HTTPS_PROXY:-${https_proxy:-}}${ALL_PROXY:-${all_proxy:-}}"
+    [ -z "$user_proxy" ] && return 0
+    local ollama_pid
+    ollama_pid=$(pgrep -f "ollama serve" 2>/dev/null | head -n 1)
+    [ -z "$ollama_pid" ] && return 0
+    local env_file="/proc/$ollama_pid/environ"
+    [ -r "$env_file" ] || return 0
+    if tr '\0' '\n' < "$env_file" 2>/dev/null | grep -qE '^(HTTP_PROXY|HTTPS_PROXY|ALL_PROXY)='; then
+        return 0
+    fi
+    echo "⚠️ 已设置代理但运行中的 ollama serve (PID $ollama_pid) 未继承代理"
+    echo "   模型下载速度可能受限。建议执行:"
+    echo "   kill $ollama_pid && env HTTP_PROXY=$HTTP_PROXY HTTPS_PROXY=$HTTPS_PROXY ollama serve &"
+}
+
 openclaw_ensure_ollama_running() {
     local ollama_bin
     if openclaw_ollama_endpoint_ready; then
       echo "✅ ollama 服务已就绪"
+      _openclaw_ollama_proxy_warn
       return 0
     fi
 
@@ -21160,6 +21177,7 @@ openclaw_ensure_ollama_running() {
       sleep 2
       if openclaw_ollama_endpoint_ready; then
         echo "✅ ollama serve 已在运行"
+        _openclaw_ollama_proxy_warn
         return 0
       fi
     fi
@@ -21204,7 +21222,7 @@ openclaw_ollama_pull_model() {
     openclaw_install_ollama_runtime || return 1
     openclaw_ensure_ollama_running || return 1
     echo "⬇️ 正在拉取本地模型: $model_name"
-    ollama pull "$model_name" || return 1
+    env HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" ALL_PROXY="${ALL_PROXY:-${all_proxy:-}}" ollama pull "$model_name" || return 1
     local model_role="text"
     case "$model_name" in
       *coder*) model_role="code" ;;
@@ -21402,6 +21420,22 @@ openclaw_ollama_runtime_hint() {
     local version_text
     version_text=$(timeout 8 ollama --version 2>/dev/null | head -n 1)
     [ -n "$version_text" ] && echo "ℹ️ 当前 Ollama 版本: $version_text"
+    # 代理与下载速度提示
+    local user_proxy="${HTTP_PROXY:-${http_proxy:-}}${HTTPS_PROXY:-${https_proxy:-}}${ALL_PROXY:-${all_proxy:-}}"
+    if [ -z "$user_proxy" ]; then
+        echo "💡 下载慢？设置代理可加速: export HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890"
+        echo "   （端口号请根据实际代理工具调整：Clash=7890, v2ray=10809）"
+    else
+        echo "🌐 已检测到代理设置: ${HTTP_PROXY:-$https_proxy}"
+        local ollama_pid
+        ollama_pid=$(pgrep -f "ollama serve" 2>/dev/null | head -n 1)
+        if [ -n "$ollama_pid" ] && [ -r "/proc/$ollama_pid/environ" ]; then
+            if ! tr '\0' '\n' < "/proc/$ollama_pid/environ" 2>/dev/null | grep -qE '^(HTTP_PROXY|HTTPS_PROXY)='; then
+                echo "⚠️ 代理已设置但 ollama serve 未继承，下载将不走代理！"
+                echo "   请重启 ollama: kill $ollama_pid && env HTTP_PROXY=$HTTP_PROXY ollama serve &"
+            fi
+        fi
+    fi
 }
 
 openclaw_ollama_pull_first_available() {
@@ -22711,11 +22745,12 @@ if not profile:
 memory = cfg.setdefault('memory', {})
 memory.setdefault('backend', profile['memory'].get('backend', 'builtin'))
 memory.setdefault('qmd', {})['includeDefaultMemory'] = True
-cfg.setdefault('memorySearch', {})['provider'] = 'ollama'
-cfg['memorySearch'].setdefault('ollama', {})['model'] = profile['routing']['defaultTextModel'].split('/', 1)[1] if '/' in profile['routing']['defaultTextModel'] else profile['routing']['defaultTextModel']
 cfg.setdefault('tools', {}).setdefault('global', {})['enabled'] = True
 
 agents_defaults = cfg.setdefault('agents', {}).setdefault('defaults', {})
+memory_search = agents_defaults.setdefault('memorySearch', {})
+memory_search['provider'] = 'ollama'
+memory_search['model'] = profile['routing']['defaultTextModel'].split('/', 1)[1] if '/' in profile['routing']['defaultTextModel'] else profile['routing']['defaultTextModel']
 agents_defaults.setdefault('workspace', '~/.openclaw/workspace')
 agents_defaults.setdefault('model', {})['primary'] = profile['routing']['defaultTextModel']
 agents_defaults.setdefault('imageModel', {})['primary'] = profile['routing'].get('defaultVisionModel', agents_defaults.get('imageModel', {}).get('primary', 'google/gemini-2.5-pro'))
