@@ -1369,9 +1369,30 @@ skpl_collect_domestic_provider_hosts_from_config() {
   local config_file="$1"
   [ -s "$config_file" ] || return 0
   python3 - "$config_file" <<'PY'
-import json
-import sys
+import json, re, sys
 from urllib.parse import urlparse
+
+raw = open(sys.argv[1], 'r', encoding='utf-8').read()
+# JSON5 compat: strip // comments
+_lines = []
+in_s = False; sc = None
+for _l in raw.split('\n'):
+    _i = 0
+    while _i < len(_l):
+        ch = _l[_i]
+        if not in_s:
+            if ch in "\"'": in_s = True; sc = ch
+            elif ch == '/' and _i+1 < len(_l) and _l[_i+1] == '/': _l = _l[:_i]; break
+            _i += 1
+        else:
+            if ch == '\\' and _i+1 < len(_l): _i += 2; continue
+            elif ch == sc: in_s = False
+            _i += 1
+    _lines.append(_l)
+raw = '\n'.join(_lines)
+raw = re.sub(r'/\*.*?\*/', '', raw, flags=re.DOTALL)
+raw = re.sub(r',(\s*[}\]])', r'\1', raw)
+data = json.loads(raw)
 
 rules = [
     'model-square.app.baizhi.cloud', '.baizhi.cloud', '.aliyuncs.com', '.modelscope.cn',
@@ -1392,9 +1413,6 @@ def is_domestic(host: str) -> bool:
         elif host == rule or host.endswith('.' + rule):
             return True
     return False
-
-with open(sys.argv[1], 'r', encoding='utf-8') as f:
-    data = json.load(f)
 
 providers = (((data or {}).get('models') or {}).get('providers') or {})
 hosts = []
@@ -1739,6 +1757,89 @@ openclaw_get_config_file() {
 
 openclaw_default_memory_model_path() {
   printf '%s\n' "${HOME}/.openclaw/models/embedding/embeddinggemma-300M-Q8_0.gguf"
+}
+
+# JSON5 -> JSON: 移除注释和尾逗号，使 openclaw 写入的 JSON5 可被 json.loads 解析
+# OpenClaw 2026.6.1 写入的配置文件包含 // 注释和尾逗号，Python json 标准库无法解析
+openclaw_json5_to_json() {
+  local input_file="$1"
+  local output_file="$2"
+  python3 - "$input_file" "$output_file" <<'PY'
+import re, sys
+
+text = open(sys.argv[1], 'r', encoding='utf-8').read()
+# 移除单行注释 (// ...) — 但保留 URL 中的 //
+lines = []
+for line in text.split('\n'):
+    in_string = False
+    string_char = None
+    i = 0
+    result = []
+    while i < len(line):
+        ch = line[i]
+        if in_string:
+            result.append(ch)
+            if ch == '\\' and i + 1 < len(line):
+                result.append(line[i + 1])
+                i += 2
+                continue
+            if ch == string_char:
+                in_string = False
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_string = True
+            string_char = ch
+            result.append(ch)
+            i += 1
+            continue
+        if ch == '/' and i + 1 < len(line) and line[i + 1] == '/':
+            break  # 行注释，跳过剩余部分
+        result.append(ch)
+        i += 1
+    lines.append(''.join(result))
+text = '\n'.join(lines)
+
+# 移除块注释 (/* ... */)
+text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+
+# 移除尾逗号 (在 ] 或 } 之前)
+text = re.sub(r',(\s*[}\]])', r'\1', text)
+
+# 移除空行和额外空白
+text = re.sub(r'\n\s*\n', '\n', text)
+
+open(sys.argv[2], 'w', encoding='utf-8').write(text)
+PY
+}
+
+# 安全加载 openclaw 配置（兼容 JSON5）
+openclaw_load_config_safe() {
+  local config_file="$1"
+  local tmp_json="${SKPL_HOME}/openclaw-config-tmp.json"
+  if [ ! -f "$config_file" ]; then
+    echo '{}'
+    return 0
+  fi
+  openclaw_json5_to_json "$config_file" "$tmp_json"
+  python3 -c "import json,sys; print(json.dumps(json.load(open('$tmp_json','r'))))"
+  rm -f "$tmp_json" 2>/dev/null || true
+}
+
+# 安全写入 openclaw 配置（保留 JSON 格式）
+openclaw_save_config_safe() {
+  local config_file="$1"
+  local json_str="$2"
+  local tmp_json="${SKPL_HOME}/openclaw-config-tmp.json"
+  printf '%s\n' "$json_str" > "$tmp_json"
+  python3 -c "
+import json
+cfg = json.load(open('$tmp_json','r'))
+with open('$config_file','w') as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    f.write('\n')
+"
+  rm -f "$tmp_json" 2>/dev/null || true
 }
 
 log_msg() {
@@ -2408,7 +2509,7 @@ _skpl_detect_proxy() {
     export no_proxy="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.modelscope.cn,.deepseek.com"
   fi
 }
-_skpl_detect_proxy "$PROXY_PORT"
+_skpl_detect_proxy "$PROXY_PORT" || true  # 代理检测失败不影响网关启动
 
 CONFIG_FILE="${HOME}/.openclaw/openclaw.json"
 DYNAMIC_NO_PROXY="$(collect_domestic_hosts_from_config "$CONFIG_FILE" 2>/dev/null || true)"
@@ -19285,7 +19386,9 @@ openclaw_memory_refresh_status_cache() {
 
 openclaw_memory_cli_supported() {
   command -v openclaw >/dev/null 2>&1 || return 1
-  timeout 8 openclaw --help 2>/dev/null | grep -qE '(^|[[:space:]])memory([[:space:]]|$)'
+  # 同时检查 help 提及 memory 且 memory 子命令实际可用
+  timeout 8 openclaw --help 2>/dev/null | grep -qE '(^|[[:space:]])memory([[:space:]]|$)' || return 1
+  timeout 8 openclaw memory --help >/dev/null 2>&1
 }
 
 openclaw_memory_refresh_runtime_state() {
@@ -19361,7 +19464,7 @@ openclaw_memory_list_agents() {
         echo "⚠️ [$agent_id] 索引备份失败，继续重建。"
       fi
     fi
-    timeout 120 openclaw memory index --agent "$agent_id" --force
+    timeout 120 openclaw memory index --agent "$agent_id" --force 2>/dev/null || true
   }
 
   openclaw_memory_rebuild_index_safe() {
@@ -19888,7 +19991,7 @@ openclaw_memory_download_file() {
       preh_agent_lines=$(openclaw_memory_list_agents)
       while IFS=$'\t' read -r preh_agent_id preh_workspace; do
         [ -z "$preh_agent_id" ] && continue
-        timeout 120 openclaw memory index --agent "$preh_agent_id" --force
+        timeout 120 openclaw memory index --agent "$preh_agent_id" --force 2>/dev/null || true
       done <<EOF
 $preh_agent_lines
 EOF
@@ -19962,7 +20065,7 @@ openclaw_memory_auto_setup_local() {
       while IFS=$'\t' read -r preh_agent_id preh_workspace; do
         [ -z "$preh_agent_id" ] && continue
         echo "🧱 正在预热索引: $preh_agent_id (最多10分钟)..."
-        timeout 600 openclaw memory index --agent "$preh_agent_id" --force || {
+        timeout 600 openclaw memory index --agent "$preh_agent_id" --force 2>/dev/null || {
           echo "⚠️ 索引预热超时或失败: $preh_agent_id"
           return 1
         }
@@ -20380,6 +20483,19 @@ PY
 openclaw_apply_and_restart() {
     echo "💾 正在保存配置并重启 OpenClaw..."
     openclaw_optimize_memory_and_skills >/dev/null 2>&1 || true
+    # 写入完成后先做配置验证
+    if command -v openclaw >/dev/null 2>&1; then
+      local validate_out
+      validate_out=$(timeout 10 openclaw config validate 2>&1) || {
+        echo "⚠️ 配置验证发现问题，尝试自动修复..."
+        timeout 20 openclaw doctor --fix >/dev/null 2>&1 || true
+        timeout 10 openclaw config validate >/dev/null 2>&1 || echo "⚠️ 自动修复后仍有配置问题，请手动检查"
+      }
+    fi
+    # 先停掉可能处于崩溃循环的网关
+    systemctl --user stop openclaw-gateway.service >/dev/null 2>&1 || true
+    sleep 1
+    systemctl --user reset-failed openclaw-gateway.service >/dev/null 2>&1 || true
     start_gateway force 0 >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1
     echo "✅ 配置已生效！AI 将使用新分配的模型工作。"
 }
@@ -20423,71 +20539,32 @@ openclaw_memorysearch_loop_self_heal() {
       echo "ℹ️ 当前主文本模型不是本地 Ollama，记忆检索继续使用本地模型: $memory_model"
     fi
     openclaw_memory_config_set "memorySearch.model" "$memory_model"
-    python3 - "$(openclaw_get_config_file)" <<'PY'
-import json, sys
-from pathlib import Path
-path = Path(sys.argv[1])
-cfg = {}
-if path.exists():
-    try:
-        cfg = json.loads(path.read_text(encoding='utf-8'))
-    except Exception:
-        cfg = {}
-# OpenClaw 2026.6+ requires tools at root level
-tools_cfg = cfg.get('tools')
-if not isinstance(tools_cfg, dict):
-    tools_cfg = {}
-    cfg['tools'] = tools_cfg
-global_tools = tools_cfg.get('global')
-if not isinstance(global_tools, dict):
-    global_tools = {}
-    tools_cfg['global'] = global_tools
-global_tools['enabled'] = False
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-PY
+    # 使用 openclaw CLI 切配置，避免 JSON5 文件被 json.loads 损坏
+    openclaw config set tools.global.enabled false >/dev/null 2>&1 || true
     echo "✅ 已执行 tools.global.enabled=false 诊断切换"
     start_gateway force 0 >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
-    python3 - "$(openclaw_get_config_file)" <<'PY'
-import json, sys
-from pathlib import Path
-path = Path(sys.argv[1])
-cfg = {}
-if path.exists():
-    try:
-        cfg = json.loads(path.read_text(encoding='utf-8'))
-    except Exception:
-        cfg = {}
-tools_cfg = cfg.get('tools')
-if not isinstance(tools_cfg, dict):
-    tools_cfg = {}
-    cfg['tools'] = tools_cfg
-global_tools = tools_cfg.get('global')
-if not isinstance(global_tools, dict):
-    global_tools = {}
-    tools_cfg['global'] = global_tools
-global_tools['enabled'] = True
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-PY
-    echo "✅ 已恢复 tools.global.enabled=true"
+    openclaw config set tools.global.enabled true >/dev/null 2>&1 || true
     echo "✅ 已恢复 tools.global.enabled=true"
     openclaw_validate_global_tools_runtime
 }
 
 openclaw_optimize_memory_and_skills() {
-    local config_file
+    local config_file tmp_json
     config_file=$(openclaw_get_config_file)
     mkdir -p "$HOME/.openclaw/workspace" "$HOME/.openclaw/workspace/skills" "$HOME/.openclaw/workspace/memory"
-    python3 - "$config_file" <<'PY'
+    # JSON5 safe: pre-process config to temp JSON
+    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
+    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
+    python3 - "$config_file" "$tmp_json" <<'PY'
 import json, sys
 from pathlib import Path
 
-path = Path(sys.argv[1])
+out_path = Path(sys.argv[1])   # original config file (write target)
+cfg_path = Path(sys.argv[2])   # JSON5-safe temp copy (read source)
 cfg = {}
-if path.exists() and path.stat().st_size > 0:
+if cfg_path.exists() and cfg_path.stat().st_size > 0:
     try:
-        cfg = json.loads(path.read_text(encoding='utf-8'))
+        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
         if not isinstance(cfg, dict):
             cfg = {}
     except Exception:
@@ -20518,9 +20595,10 @@ if not isinstance(models_obj, dict):
     defaults['models'] = models_obj
 defaults.pop('skills', None)
 
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
+    rm -f "$tmp_json"
 }
 
 openclaw_inject_skills() {
@@ -20572,24 +20650,28 @@ openclaw_evomap_real_ingest() {
 }
 
 openclaw_configure_local_ollama_provider() {
-    local config_file provider_model full_model model_role
+    local config_file provider_model full_model model_role tmp_json
     config_file=$(openclaw_get_config_file)
     provider_model="${1:-qwen2.5:7b}"
     model_role="${2:-text}"
     full_model="ollama/${provider_model}"
-    python3 - "$config_file" "$provider_model" "$full_model" "$model_role" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" "$SKPL_AI_STACK_ACCEL_STATE_FILE" <<'PY'
+    # JSON5 safe: pre-process config to temp JSON
+    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
+    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
+    python3 - "$config_file" "$tmp_json" "$provider_model" "$full_model" "$model_role" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" "$SKPL_AI_STACK_ACCEL_STATE_FILE" <<'PY'
 import json, sys
 from pathlib import Path
-path = Path(sys.argv[1])
-raw_model = sys.argv[2]
-full_model = sys.argv[3]
-role = sys.argv[4]
-ollama_bin = sys.argv[5]
-accel_state_path = Path(sys.argv[6])
+out_path = Path(sys.argv[1])   # original config file (write target)
+cfg_path = Path(sys.argv[2])   # JSON5-safe temp copy (read source)
+raw_model = sys.argv[3]
+full_model = sys.argv[4]
+role = sys.argv[5]
+ollama_bin = sys.argv[6]
+accel_state_path = Path(sys.argv[7])
 cfg = {}
-if path.exists():
+if cfg_path.exists():
     try:
-        cfg = json.loads(path.read_text(encoding='utf-8'))
+        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
 
@@ -20732,10 +20814,10 @@ else:
         model_cfg = {}
         defs['model'] = model_cfg
     model_cfg['primary'] = full_model
-    ollama_memory['model'] = raw_model
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
+    rm -f "$tmp_json"
     echo "✅ 已写入本地 Ollama provider 配置"
 }
 
@@ -20745,16 +20827,20 @@ openclaw_memorysearch_config_supported() {
 }
 
 openclaw_safe_enable_global_tools() {
-    local config_file
+    local config_file tmp_json
     config_file=$(openclaw_get_config_file)
-    python3 - "$config_file" <<'PY'
+    # JSON5 safe: pre-process config to temp JSON
+    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
+    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
+    python3 - "$config_file" "$tmp_json" <<'PY'
 import json, sys
 from pathlib import Path
-path = Path(sys.argv[1])
+out_path = Path(sys.argv[1])   # original config file (write target)
+cfg_path = Path(sys.argv[2])   # JSON5-safe temp copy (read source)
 cfg = {}
-if path.exists():
+if cfg_path.exists():
     try:
-        cfg = json.loads(path.read_text(encoding='utf-8'))
+        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
 # OpenClaw 2026.6+ requires tools at root level
@@ -20767,9 +20853,10 @@ if not isinstance(global_tools, dict):
     global_tools = {}
     tools_cfg['global'] = global_tools
 global_tools['enabled'] = True
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
+    rm -f "$tmp_json"
     echo "✅ 已设置 tools.global.enabled=true"
 }
 
@@ -20790,18 +20877,22 @@ openclaw_apply_recommended_model_profile() {
     local text_model="${OPENCLAW_TEXT_MODEL_RESOLVED:-ollama/qwen2.5:7b}"
     local image_model="${OPENCLAW_IMAGE_MODEL_RESOLVED:-ollama/gemma3:4b}"
     local code_model="${OPENCLAW_CODE_MODEL_RESOLVED:-ollama/qwen2.5-coder:1.5b}"
-    local config_file
+    local config_file tmp_json
     config_file=$(openclaw_get_config_file)
-    python3 - "$config_file" "$text_model" "$image_model" "$code_model" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" "${OPENCLAW_FORCE_LOCAL_PROFILE:-0}" <<'PY'
+    # JSON5 safe: pre-process config to temp JSON
+    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
+    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
+    python3 - "$config_file" "$tmp_json" "$text_model" "$image_model" "$code_model" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" "${OPENCLAW_FORCE_LOCAL_PROFILE:-0}" <<'PY'
 import json, sys
 from pathlib import Path
-path = Path(sys.argv[1])
-text_model, image_model, code_model, ollama_bin, force_flag = sys.argv[2:7]
+out_path = Path(sys.argv[1])   # original config file (write target)
+cfg_path = Path(sys.argv[2])   # JSON5-safe temp copy (read source)
+text_model, image_model, code_model, ollama_bin, force_flag = sys.argv[3:8]
 force_local_profile = force_flag == '1'
 cfg = {}
-if path.exists():
+if cfg_path.exists():
     try:
-        cfg = json.loads(path.read_text(encoding='utf-8'))
+        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
 cfg.setdefault('models', {}).setdefault('providers', {})
@@ -20872,9 +20963,10 @@ memory_search['model'] = text_model.split('/', 1)[1] if '/' in text_model else t
 if 'memorySearch' in cfg and cfg['memorySearch'] is not memory_search:
     del cfg['memorySearch']
 
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
+    rm -f "$tmp_json"
     echo "✅ 推荐模型组合已写入"
     echo "   文本: $text_model"
     echo "   视觉: $image_model"
@@ -21149,6 +21241,25 @@ _openclaw_ollama_proxy_warn() {
     echo "   kill $ollama_pid && env HTTP_PROXY=$HTTP_PROXY HTTPS_PROXY=$HTTPS_PROXY ollama serve &"
 }
 
+# 检测代理是否存活：尝试 TCP 连接代理地址，3 秒超时
+_openclaw_proxy_is_alive() {
+    local proxy_url="${1:-}"
+    [ -z "$proxy_url" ] && return 1
+    # 提取 host:port，支持 http://127.0.0.1:7890 格式
+    local host_port
+    host_port=$(printf '%s' "$proxy_url" | sed -n 's|^https\?://||; s|/$||; s|^\[\(.*\)\]|\1|; p')
+    [ -z "$host_port" ] && return 1
+    local host="${host_port%:*}"
+    local port="${host_port##*:}"
+    [ -z "$port" ] || [ "$port" = "$host_port" ] && return 1
+    timeout 3 bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null
+}
+
+# 获取当前有效的代理环境变量（优先 HTTP_PROXY）
+_openclaw_effective_proxy() {
+    printf '%s' "${HTTP_PROXY:-${http_proxy:-${HTTPS_PROXY:-${https_proxy:-${ALL_PROXY:-${all_proxy:-}}}}}}"
+}
+
 openclaw_ensure_ollama_running() {
     local ollama_bin
     if openclaw_ollama_endpoint_ready; then
@@ -21222,7 +21333,31 @@ openclaw_ollama_pull_model() {
     openclaw_install_ollama_runtime || return 1
     openclaw_ensure_ollama_running || return 1
     echo "⬇️ 正在拉取本地模型: $model_name"
-    env HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" ALL_PROXY="${ALL_PROXY:-${all_proxy:-}}" ollama pull "$model_name" || return 1
+    local _om_pull_retry=0 _om_pull_rc=0 _om_pull_err
+    local _om_proxy=$(_openclaw_effective_proxy)
+    local _om_proxy_bypass=false
+    if [ -n "$_om_proxy" ] && ! _openclaw_proxy_is_alive "$_om_proxy"; then
+      echo "⚠️ 代理 $_om_proxy 不可用，自动绕过直连下载"
+      _om_proxy_bypass=true
+    fi
+    while [ "$_om_pull_retry" -le 2 ]; do
+      if [ "$_om_proxy_bypass" = "true" ]; then
+        _om_pull_err=$(env HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" ollama pull "$model_name" 2>&1)
+      elif [ -n "$_om_proxy" ]; then
+        _om_pull_err=$(env HTTP_PROXY="$_om_proxy" HTTPS_PROXY="$_om_proxy" ollama pull "$model_name" 2>&1)
+      else
+        _om_pull_err=$(ollama pull "$model_name" 2>&1)
+      fi
+      _om_pull_rc=$?
+      [ "$_om_pull_rc" -eq 0 ] && break
+      if printf '%s' "$_om_pull_err" | grep -qiE 'unexpected EOF|connection reset|timeout|broken pipe'; then
+        _om_pull_retry=$((_om_pull_retry + 1))
+        [ "$_om_pull_retry" -le 2 ] && { echo "🔄 网络瞬断，自动重试 ($_om_pull_retry/2)..."; sleep 3; }
+      else
+        break
+      fi
+    done
+    [ "$_om_pull_rc" -ne 0 ] && return 1
     local model_role="text"
     case "$model_name" in
       *coder*) model_role="code" ;;
@@ -21479,12 +21614,53 @@ openclaw_ollama_pull_first_available() {
         openclaw_ollama_cache_status_set "$model_role" "$model_name" "skipped" "用户取消"
         continue
       fi
-      if timeout "$pull_timeout" env HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" ALL_PROXY="${ALL_PROXY:-${all_proxy:-}}" ollama pull "$model_name"; then
+      # --- 代理检测与自适应绕过 ---
+      local pull_proxy_effective proxy_bypass=false
+      pull_proxy_effective=$(_openclaw_effective_proxy)
+      if [ -n "$pull_proxy_effective" ]; then
+        if _openclaw_proxy_is_alive "$pull_proxy_effective"; then
+          echo "🌐 代理 $pull_proxy_effective 已连接，将通过代理下载"
+        else
+          echo "⚠️ 检测到代理 $pull_proxy_effective 但无法连接（connection refused）"
+          echo "   自动绕过代理直连下载（速度可能较慢但可用）"
+          proxy_bypass=true
+        fi
+      fi
+      # --- 拉取 + 断点续传重试（针对 unexpected EOF） ---
+      local pull_retry=0 pull_max_retry=2 pull_err pull_rc=0
+      while [ "$pull_retry" -le "$pull_max_retry" ]; do
+        if [ "$proxy_bypass" = "true" ]; then
+          pull_err=$(timeout "$pull_timeout" env HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" ollama pull "$model_name" 2>&1)
+        elif [ -n "$pull_proxy_effective" ]; then
+          pull_err=$(timeout "$pull_timeout" env HTTP_PROXY="$pull_proxy_effective" HTTPS_PROXY="$pull_proxy_effective" ollama pull "$model_name" 2>&1)
+        else
+          pull_err=$(timeout "$pull_timeout" ollama pull "$model_name" 2>&1)
+        fi
+        pull_rc=$?
+        # 判断是否为可恢复的网络瞬断（断点续传场景）
+        if printf '%s' "$pull_err" | grep -qiE 'unexpected EOF|connection reset|timeout|broken pipe'; then
+          pull_retry=$((pull_retry + 1))
+          if [ "$pull_retry" -le "$pull_max_retry" ]; then
+            echo "🔄 检测到网络瞬断（已下载部分将保留），自动重试 ($pull_retry/$pull_max_retry)..."
+            sleep 3
+          fi
+        else
+          break
+        fi
+      done
+      if [ "$pull_rc" -eq 0 ]; then
         OPENCLAW_LAST_PULLED_MODEL="$model_name"
         openclaw_ollama_cache_status_set "$model_role" "$model_name" "ok" "拉取成功"
         openclaw_configure_local_ollama_provider "$model_name" "$model_role" || true
         echo "✅ 已选定本地$model_role模型: $model_name"
         return 0
+      fi
+      # 如果是代理错误且尚未尝试绕过，标记为可能是代理问题
+      if printf '%s' "$pull_err" | grep -qiE 'proxyconnect|connection refused.*127\\.0\\.0\\.1|no such host'; then
+        openclaw_ollama_cache_status_set "$model_role" "$model_name" "failed" "代理不通，建议 unset HTTP_PROXY 后重试"
+        echo "❌ 代理不通导致下载失败，请检查代理或执行: unset HTTP_PROXY HTTPS_PROXY"
+        # 不继续尝试下一个模型——代理不通的话全都会失败
+        return 1
       fi
       openclaw_ollama_cache_status_set "$model_role" "$model_name" "failed" "当前运行时未成功拉取"
       echo "⚠️ 当前模型不可用，继续尝试下一个: $model_name"
@@ -21844,7 +22020,7 @@ openclaw_memory_search_test() {
     return 1
     fi
   echo "正在搜索记忆..."
-  timeout 30 openclaw memory search "$query" --max-results 5
+  timeout 30 openclaw memory search "$query" --max-results 5 2>/dev/null || true
 }
 
 # Unified memory search - combines official OpenClaw memory and SKPL extension memory
@@ -22052,7 +22228,7 @@ PY
 }
 
 openclaw_memory_apply_current_scheme() {
-  local config_file
+  local config_file tmp_json
   local want_local_models="true"
   local want_vision_models="false"
   config_file=$(openclaw_get_config_file)
@@ -22063,17 +22239,21 @@ openclaw_memory_apply_current_scheme() {
   openclaw_optimize_memory_and_skills >/dev/null 2>&1 || true
   openclaw_inject_skills >/dev/null 2>&1 || true
   openclaw_safe_enable_global_tools >/dev/null 2>&1 || true
-  python3 - "$config_file" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+  # JSON5 safe: pre-process config to temp JSON
+  tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
+  openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
+  python3 - "$config_file" "$tmp_json" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-config_path = Path(sys.argv[1])
-memory_cfg_path = Path(sys.argv[2])
+out_path = Path(sys.argv[1])      # original config file (write target)
+cfg_path = Path(sys.argv[2])      # JSON5-safe temp copy (read source)
+memory_cfg_path = Path(sys.argv[3])
 cfg = {}
-if config_path.exists():
+if cfg_path.exists():
     try:
-        cfg = json.loads(config_path.read_text(encoding='utf-8'))
+        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
 memory = cfg.setdefault('memory', {})
@@ -22088,7 +22268,7 @@ memory_search['model'] = memory_search.get('model') or 'qwen2.5:7b'
 tools = cfg.setdefault('tools', {})
 tools.setdefault('global', {})['enabled'] = True
 agents.setdefault('workspace', '~/.openclaw/workspace')
-config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+out_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
 memory_cfg = {}
 if memory_cfg_path.exists():
@@ -22116,6 +22296,7 @@ maintenance['cleanupDays'] = int(maintenance.get('cleanupDays', 30) or 30)
 maintenance['autoUpdateMinutes'] = int(maintenance.get('autoUpdateMinutes', 30) or 30)
 memory_cfg_path.write_text(json.dumps(memory_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 PY
+  rm -f "$tmp_json"
   want_local_models=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
 import json
 import sys
@@ -22693,20 +22874,24 @@ openclaw_memory_privacy_security_menu() {
 openclaw_memory_apply_quick_profile() {
   local profile_key="$1"
   local preheat_mode="true"
-  local config_file
+  local config_file tmp_json
   config_file=$(openclaw_get_config_file)
   openclaw_runtime_self_heal || return 1
-  python3 - "$config_file" "$SKPL_MEMORY_EXTENSION_CONFIG" "$SKPL_AI_STACK_ROOT/config.json" "$profile_key" <<'PY'
+  # JSON5 safe: pre-process config to temp JSON
+  tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
+  openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
+  python3 - "$config_file" "$tmp_json" "$SKPL_MEMORY_EXTENSION_CONFIG" "$SKPL_AI_STACK_ROOT/config.json" "$profile_key" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-config_path = Path(sys.argv[1])
-memory_cfg_path = Path(sys.argv[2])
-ai_stack_path = Path(sys.argv[3])
-profile_key = sys.argv[4]
+out_path = Path(sys.argv[1])      # original config file (write target)
+cfg_path = Path(sys.argv[2])      # JSON5-safe temp copy (read source)
+memory_cfg_path = Path(sys.argv[3])
+ai_stack_path = Path(sys.argv[4])
+profile_key = sys.argv[5]
 
-cfg = json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+cfg = json.loads(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
 memory_cfg = json.loads(memory_cfg_path.read_text(encoding='utf-8')) if memory_cfg_path.exists() else {}
 ai_cfg = json.loads(ai_stack_path.read_text(encoding='utf-8')) if ai_stack_path.exists() else {}
 
@@ -22776,10 +22961,11 @@ memory_cfg['maintenance']['cleanupDays'] = profile['memory']['cleanupDays']
 ai_cfg.setdefault('routing', {}).update(profile['routing'])
 ai_cfg.setdefault('cache', {}).update(profile['cache'])
 
-config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+out_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 memory_cfg_path.write_text(json.dumps(memory_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 ai_stack_path.write_text(json.dumps(ai_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 PY
+  rm -f "$tmp_json"
   preheat_mode=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" "$profile_key" <<'PY'
 import json
 import sys
@@ -23764,7 +23950,7 @@ openclaw_memory_extension_menu() {
   openclaw_memory_deep_status() {
     echo "正在探测嵌入模型就绪状态..."
     if openclaw_memory_cli_supported; then
-      timeout 15 openclaw memory status --deep
+      timeout 15 openclaw memory status --deep 2>/dev/null || true
     else
       echo "ℹ️ 当前 OpenClaw 版本未提供 memory CLI，无法执行深度状态探测。"
       openclaw_memory_render_basic_status
