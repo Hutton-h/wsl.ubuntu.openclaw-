@@ -20539,12 +20539,12 @@ openclaw_memorysearch_loop_self_heal() {
       echo "ℹ️ 当前主文本模型不是本地 Ollama，记忆检索继续使用本地模型: $memory_model"
     fi
     openclaw_memory_config_set "memorySearch.model" "$memory_model"
-    # 使用 openclaw CLI 切配置，避免 JSON5 文件被 json.loads 损坏
-    openclaw config set tools.global.enabled false >/dev/null 2>&1 || true
-    echo "✅ 已执行 tools.global.enabled=false 诊断切换"
+    # 使用 tools.profile 切配置，避免 JSON5 文件被 json.loads 损坏
+    openclaw config set tools.profile minimal >/dev/null 2>&1 || true
+    echo "✅ 已执行 tools.profile=minimal 诊断切换"
     start_gateway force 0 >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
-    openclaw config set tools.global.enabled true >/dev/null 2>&1 || true
-    echo "✅ 已恢复 tools.global.enabled=true"
+    openclaw config set tools.profile coding >/dev/null 2>&1 || true
+    echo "✅ 已恢复 tools.profile=coding"
     openclaw_validate_global_tools_runtime
 }
 
@@ -20578,6 +20578,12 @@ for legacy_key in ('host', 'hostname', 'url', 'baseUrl'):
     gateway.pop(legacy_key, None)
 gateway.setdefault('auth', {})['mode'] = 'token'
 gateway.pop('controlUi', None)
+
+# OpenClaw 2026.6+: tools.profile 替代了不存在的 tools.global.enabled
+tools_cfg = cfg.setdefault('tools', {})
+# 清理旧版无效的 tools.global 字段
+tools_cfg.pop('global', None)
+tools_cfg.setdefault('profile', 'coding')
 
 memory = cfg.setdefault('memory', {})
 qmd = memory.setdefault('qmd', {})
@@ -20788,16 +20794,6 @@ memory_search['model'] = raw_model if '/' not in raw_model else raw_model.split(
 # 迁移旧版 root-level memorySearch
 if 'memorySearch' in cfg and cfg['memorySearch'] is not memory_search:
     del cfg['memorySearch']
-# tools 必须在根级别
-tools_cfg = cfg.get('tools')
-if not isinstance(tools_cfg, dict):
-    tools_cfg = {}
-    cfg['tools'] = tools_cfg
-global_tools = tools_cfg.get('global')
-if not isinstance(global_tools, dict):
-    global_tools = {}
-    tools_cfg['global'] = global_tools
-global_tools['enabled'] = True
 if role == 'image':
     image_model_cfg = defs.get('imageModel')
     if not isinstance(image_model_cfg, dict):
@@ -20827,49 +20823,23 @@ openclaw_memorysearch_config_supported() {
 }
 
 openclaw_safe_enable_global_tools() {
-    local config_file tmp_json
-    config_file=$(openclaw_get_config_file)
-    # JSON5 safe: pre-process config to temp JSON
-    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-    python3 - "$config_file" "$tmp_json" <<'PY'
-import json, sys
-from pathlib import Path
-out_path = Path(sys.argv[1])   # original config file (write target)
-cfg_path = Path(sys.argv[2])   # JSON5-safe temp copy (read source)
-cfg = {}
-if cfg_path.exists():
-    try:
-        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
-    except Exception:
-        cfg = {}
-# OpenClaw 2026.6+ requires tools at root level
-tools_cfg = cfg.get('tools')
-if not isinstance(tools_cfg, dict):
-    tools_cfg = {}
-    cfg['tools'] = tools_cfg
-global_tools = tools_cfg.get('global')
-if not isinstance(global_tools, dict):
-    global_tools = {}
-    tools_cfg['global'] = global_tools
-global_tools['enabled'] = True
-out_path.parent.mkdir(parents=True, exist_ok=True)
-out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-PY
-    rm -f "$tmp_json"
-    echo "✅ 已设置 tools.global.enabled=true"
+    # OpenClaw 2026.6+ 无 tools.global 字段，不用 python 注入；用 CLI profile 更安全
+    if command -v openclaw >/dev/null 2>&1; then
+      openclaw config set tools.profile coding >/dev/null 2>&1 || true
+    fi
+    echo "✅ 已设置 tools.profile=coding"
 }
 
 openclaw_validate_global_tools_runtime() {
     if ! openclaw_has_command openclaw; then
-      echo "ℹ️ openclaw 命令未安装，已跳过 tools.global.enabled 验活"
+      echo "ℹ️ openclaw 命令未安装，已跳过 tools 验活"
       return 0
     fi
     if timeout 10 openclaw models status >/dev/null 2>&1; then
-      echo "✅ tools.global.enabled 验活通过"
+      echo "✅ tools 验活通过"
       return 0
     fi
-    echo "⚠️ tools.global.enabled 已写入，运行时验活未通过"
+    echo "⚠️ tools 验活未通过，请检查 openclaw gateway 是否正常运行"
     return 0
 }
 
@@ -20937,16 +20907,6 @@ defs = cfg['agents']['defaults']
 defs.setdefault('models', {})
 for model in (text_model, image_model, code_model):
     defs['models'].setdefault(model, {})
-# tools 必须在根级别
-tools_cfg = cfg.get('tools')
-if not isinstance(tools_cfg, dict):
-    tools_cfg = {}
-    cfg['tools'] = tools_cfg
-global_tools = tools_cfg.get('global')
-if not isinstance(global_tools, dict):
-    global_tools = {}
-    tools_cfg['global'] = global_tools
-global_tools.setdefault('enabled', True)
 if force_local_profile or not isinstance(defs.get('model'), dict) or not defs['model'].get('primary'):
     defs.setdefault('model', {})['primary'] = text_model
 if force_local_profile or not isinstance(defs.get('imageModel'), dict) or not defs['imageModel'].get('primary'):
@@ -22265,8 +22225,6 @@ agents = cfg.setdefault('agents', {}).setdefault('defaults', {})
 memory_search = agents.setdefault('memorySearch', {})
 memory_search['provider'] = 'ollama'
 memory_search['model'] = memory_search.get('model') or 'qwen2.5:7b'
-tools = cfg.setdefault('tools', {})
-tools.setdefault('global', {})['enabled'] = True
 agents.setdefault('workspace', '~/.openclaw/workspace')
 out_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
@@ -22930,7 +22888,6 @@ if not profile:
 memory = cfg.setdefault('memory', {})
 memory.setdefault('backend', profile['memory'].get('backend', 'builtin'))
 memory.setdefault('qmd', {})['includeDefaultMemory'] = True
-cfg.setdefault('tools', {}).setdefault('global', {})['enabled'] = True
 
 agents_defaults = cfg.setdefault('agents', {}).setdefault('defaults', {})
 memory_search = agents_defaults.setdefault('memorySearch', {})
