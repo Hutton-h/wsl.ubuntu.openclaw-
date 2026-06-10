@@ -1604,7 +1604,7 @@ EOF_SKPL_GATEWAY_SERVICE
 }
 
 openclaw_ensure_local_gateway_config() {
-  local config_file gateway_port
+  local config_file gateway_port tmp_json
   config_file=$(openclaw_get_config_file)
   gateway_port="${OPENCLAW_GATEWAY_PORT:-18789}"
   mkdir -p "$(dirname "$config_file")"
@@ -1615,20 +1615,24 @@ openclaw_ensure_local_gateway_config() {
     openclaw config set gateway.port "$gateway_port" --strict-json >/dev/null 2>&1 || true
   fi
 
-  python3 - "$config_file" "$gateway_port" <<'PY'
+  # JSON5 safe: pre-process config to temp JSON before reading
+  tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
+  openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
+  python3 - "$config_file" "$tmp_json" "$gateway_port" <<'PY'
 import json, secrets, sys
 from pathlib import Path
 
-path = Path(sys.argv[1])
+out_path = Path(sys.argv[1])      # original config (write target)
+cfg_path = Path(sys.argv[2])      # JSON5-safe temp copy (read source)
 try:
-    port = int(sys.argv[2])
+    port = int(sys.argv[3])
 except Exception:
     port = 18789
 
 data = {}
-if path.exists() and path.stat().st_size > 0:
+if cfg_path.exists() and cfg_path.stat().st_size > 0:
     try:
-        data = json.loads(path.read_text(encoding='utf-8'))
+        data = json.loads(cfg_path.read_text(encoding='utf-8'))
         if not isinstance(data, dict):
             data = {}
     except Exception:
@@ -1661,10 +1665,12 @@ auth['token'] = token
 
 gateway.pop('controlUi', None)
 
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
+  rm -f "$tmp_json"
   mkdir -p "$HOME/.openclaw/workspace" "$HOME/.openclaw/workspace/skills" "$HOME/.openclaw/workspace/memory"
+  # 第二个 Python 块：刚才写入的是纯 JSON，直接读取没问题
   python3 - "$config_file" "$HOME/.openclaw/gateway.token" <<'PY'
 import json, sys
 from pathlib import Path
@@ -19235,25 +19241,31 @@ PY
     local value="$1"
     # OpenClaw 2026.6+: memorySearch under agents.defaults, tools at root level
     local mapped_key="$key"
+    local config_file tmp_json
     case "$mapped_key" in
       memorySearch.*) mapped_key="agents.defaults.${mapped_key}" ;;
     esac
     if timeout 5 openclaw config set "$mapped_key" "$@" >/dev/null 2>&1; then
       return 0
     fi
-    python3 - "$(openclaw_get_config_file)" "$key" "$value" <<'PY'
+    # CLI failed → Python fallback with JSON5 pre-processing
+    config_file=$(openclaw_get_config_file)
+    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
+    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
+    python3 - "$config_file" "$tmp_json" "$key" "$value" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-path = Path(sys.argv[1])
-key = sys.argv[2]
-value = sys.argv[3]
+out_path = Path(sys.argv[1])   # original (write target)
+cfg_path = Path(sys.argv[2]) # JSON5-safe temp (read source)
+key = sys.argv[3]
+value = sys.argv[4]
 
 cfg = {}
-if path.exists():
+if cfg_path.exists():
     try:
-        cfg = json.loads(path.read_text(encoding='utf-8'))
+        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
 
@@ -19283,9 +19295,10 @@ cur[parts[-1]] = parsed
 # Clean up old root-level memorySearch if present
 if key.startswith('memorySearch.') and 'memorySearch' in cfg:
     del cfg['memorySearch']
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 PY
+    rm -f "$tmp_json"
   }
 
 openclaw_memory_config_unset() {
@@ -20003,6 +20016,8 @@ EOF
 
 openclaw_memory_auto_setup_local() {
     echo "🔍 检测 Local 环境"
+    # 记忆检索依赖本地 Ollama 做 embedding，即使主模型是云端也必须安装
+    openclaw_install_ollama_runtime || return 1
     openclaw_memory_cleanup_legacy_keys
     openclaw_safe_enable_global_tools
     openclaw_memory_prepare_workspace_all
@@ -20401,7 +20416,7 @@ PY
 
 openclaw_set_model_slot() {
     local type="$1" config_file="$2"
-    local model_name normalized_model provider_model
+    local model_name normalized_model provider_model tmp_json
     read -e -p "请输入 [$type] 模型 ID (格式: 提供商/模型名): " model_name
     [ -z "$model_name" ] && return 0
 
@@ -20432,17 +20447,21 @@ PY
       }
     fi
 
-    python3 - "$config_file" "$type" "$normalized_model" <<'PY'
+    # JSON5 safe: pre-process config to temp JSON
+    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
+    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
+    python3 - "$config_file" "$tmp_json" "$type" "$normalized_model" <<'PY'
 import json, sys
 from pathlib import Path
 
-path = Path(sys.argv[1])
-cfg_type = sys.argv[2]
-model = sys.argv[3]
+out_path = Path(sys.argv[1])   # original (write target)
+cfg_path = Path(sys.argv[2]) # JSON5-safe temp (read source)
+cfg_type = sys.argv[3]
+model = sys.argv[4]
 cfg = {}
-if path.exists() and path.stat().st_size > 0:
+if cfg_path.exists() and cfg_path.stat().st_size > 0:
     try:
-        cfg = json.loads(path.read_text(encoding='utf-8'))
+        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
         if not isinstance(cfg, dict):
             cfg = {}
     except Exception:
@@ -20473,10 +20492,11 @@ elif cfg_type == 'image':
 elif cfg_type == 'custom':
     cfg['agents']['defaults']['models'][model].setdefault('alias', 'custom')
 
-path.parent.mkdir(parents=True, exist_ok=True)
-path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 print(f"✅ 已将 {cfg_type} 模型设为: {model}")
 PY
+    rm -f "$tmp_json"
     read -n 1 -s -r -p "按任意键继续..."
 }
 
@@ -20530,13 +20550,17 @@ openclaw_memorysearch_loop_self_heal() {
     if [ -z "$primary_model" ]; then
       primary_model="ollama/qwen2.5:7b"
     fi
-    memory_model="${primary_model#ollama/}"
-    [ -z "$memory_model" ] && memory_model="qwen2.5:7b"
     if [[ "$primary_model" == ollama/* ]]; then
+      memory_model="${primary_model#ollama/}"
       openclaw_configure_local_ollama_provider "$memory_model" "text" >/dev/null 2>&1 || true
       echo "✅ 已让记忆检索跟随当前主文本模型: $memory_model"
     else
-      echo "ℹ️ 当前主文本模型不是本地 Ollama，记忆检索继续使用本地模型: $memory_model"
+      # 主模型是云端模型，嵌入必须用本地 Ollama 模型
+      memory_model=$(openclaw_memory_config_get "memorySearch.model" 2>/dev/null || true)
+      if [ -z "$memory_model" ] || [ "$memory_model" = "null" ]; then
+        memory_model="qwen2.5:7b"
+      fi
+      echo "ℹ️ 当前主文本模型不是本地 Ollama（$primary_model），记忆检索引擎独立使用本地模型: $memory_model"
     fi
     openclaw_memory_config_set "memorySearch.model" "$memory_model"
     # 使用 tools.profile 切配置，避免 JSON5 文件被 json.loads 损坏
