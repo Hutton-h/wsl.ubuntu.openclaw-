@@ -13397,33 +13397,8 @@ PY
 
 # ==========================================
 # 🌌 新一代极致记忆与智能路由系统 (Ultra-Light)
+# ⚠️ 旧路由管道已被多Agent架构替代，以下函数为保留定义，实际不再调用
 # ==========================================
-
-# 1. 硬件分级检测 (极速版 - 0 延迟)
-# 根据内存容量和 CPU 核心数判断: 1=低配, 2=中配, 3=高配
-openclaw_detect_hardware_tier() {
-    local profile_json
-    profile_json=$(openclaw_detect_hardware_profile_json)
-    python3 - "$profile_json" <<'PY'
-import json
-import sys
-data = json.loads(sys.argv[1])
-tier_name = data.get('tier') or 'entry-cpu'
-mapping = {
-    'server': 3,
-    'workstation': 3,
-    'flagship-gpu': 3,
-    'golden-gpu': 3,
-    'advanced-gpu': 2,
-    'advanced-cpu-plus': 2,
-    'advanced-cpu': 2,
-    'entry-gpu': 1,
-    'entry-cpu': 1,
-    'emergency-cpu': 1,
-}
-print(mapping.get(tier_name, 1))
-PY
-}
 
 openclaw_ai_stack_classify_query() {
   local query="$1"
@@ -13658,6 +13633,8 @@ PY
 # 0: 文本/闲聊 -> 云端小模型 (Flash/Saver)
 # 1: 图像/复杂推理 -> 云端强模型 (Pro/Vision)
 # 2: 简单逻辑/隐私 -> 本地量化模型 (仅高/中配，低配强制跳过)
+# ▼▼▼ 已废弃: 旧版关键词路由管道，已被多Agent编排器架构替代 ▼▼▼
+# 保留仅作参考，未在任何流程中调用
 openclaw_memory_smart_route() {
     local input_text="$1" route_json cached lock_result selected_model memory_injection memory_for_execution predictive_hint expert_state tool_state tool_result cloud_pool cloud_state resource_cleanup_json special_cache_profile special_cache_scope special_cache_result skip_tool_exec skip_cloud_exec
     openclaw_ai_stack_prepare
@@ -16954,16 +16931,20 @@ PY
       fi
 
       if command -v python3 >/dev/null 2>&1; then
-        if python3 - "$config_file" "$plugin_id" <<'PYTHON_EOF'
+        # JSON5 safe: pre-process via temp file
+        local tmp_py_json=$(mktemp /tmp/openclaw_plugin_XXXXXX.json)
+        if openclaw_json5_to_json "$config_file" "$tmp_py_json" 2>/dev/null; then
+          if python3 - "$config_file" "$tmp_py_json" "$plugin_id" <<'PYTHON_EOF'
 import json
 import sys
 from pathlib import Path
 
-config_file = Path(sys.argv[1])
-plugin_id = sys.argv[2]
+out_path = Path(sys.argv[1])
+tmp_path = Path(sys.argv[2])
+plugin_id = sys.argv[3]
 
 try:
-    data = json.loads(config_file.read_text(encoding='utf-8')) if config_file.exists() else {}
+    data = json.loads(tmp_path.read_text(encoding='utf-8')) if tmp_path.exists() else {}
     if not isinstance(data, dict):
         data = {}
 except Exception:
@@ -16982,11 +16963,14 @@ if plugin_id not in a:
 
 plugins['allow'] = a
 data['plugins'] = plugins
-config_file.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding='utf-8')
+out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding='utf-8')
 PYTHON_EOF
-        then
-          echo "✅ 已同步 plugins.allow 白名单: $plugin_id"
-          return 0
+          then
+            rm -f "$tmp_py_json"
+            echo "✅ 已同步 plugins.allow 白名单: $plugin_id"
+            return 0
+          fi
+          rm -f "$tmp_py_json"
         fi
       fi
 
@@ -17021,16 +17005,20 @@ PYTHON_EOF
       fi
 
       if command -v python3 >/dev/null 2>&1; then
-        if python3 - "$config_file" "$plugin_id" <<'PYTHON_EOF'
+        # JSON5 safe: pre-process via temp file
+        local tmp_py_json2=$(mktemp /tmp/openclaw_plugin2_XXXXXX.json)
+        if openclaw_json5_to_json "$config_file" "$tmp_py_json2" 2>/dev/null; then
+          if python3 - "$config_file" "$tmp_py_json2" "$plugin_id" <<'PYTHON_EOF'
 import json
 import sys
 from pathlib import Path
 
-config_file = Path(sys.argv[1])
-plugin_id = sys.argv[2]
+out_path = Path(sys.argv[1])
+tmp_path = Path(sys.argv[2])
+plugin_id = sys.argv[3]
 
 try:
-    data = json.loads(config_file.read_text(encoding='utf-8')) if config_file.exists() else {}
+    data = json.loads(tmp_path.read_text(encoding='utf-8')) if tmp_path.exists() else {}
     if not isinstance(data, dict):
         data = {}
 except Exception:
@@ -17047,11 +17035,14 @@ if not isinstance(a, list):
 a = [x for x in a if x != plugin_id]
 plugins['allow'] = a
 data['plugins'] = plugins
-config_file.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding='utf-8')
+out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding='utf-8')
 PYTHON_EOF
-        then
-          echo "✅ 已从 plugins.allow 移除: $plugin_id"
-          return 0
+          then
+            rm -f "$tmp_py_json2"
+            echo "✅ 已从 plugins.allow 移除: $plugin_id"
+            return 0
+          fi
+          rm -f "$tmp_py_json2"
         fi
       fi
 
@@ -20521,9 +20512,11 @@ openclaw_apply_and_restart() {
 }
 
 openclaw_get_primary_text_model() {
-    local config_file
+    local config_file tmp_json
     config_file=$(openclaw_get_config_file)
-    python3 - "$config_file" <<'PY'
+    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
+    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
+    python3 - "$tmp_json" <<'PY'
 import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])
@@ -20539,6 +20532,7 @@ if isinstance(value, dict):
     if isinstance(primary, str):
         print(primary)
 PY
+    rm -f "$tmp_json"
 }
 
 openclaw_memorysearch_loop_self_heal() {
@@ -20931,10 +20925,9 @@ defs = cfg['agents']['defaults']
 defs.setdefault('models', {})
 for model in (text_model, image_model, code_model):
     defs['models'].setdefault(model, {})
-if force_local_profile or not isinstance(defs.get('model'), dict) or not defs['model'].get('primary'):
-    defs.setdefault('model', {})['primary'] = text_model
-if force_local_profile or not isinstance(defs.get('imageModel'), dict) or not defs['imageModel'].get('primary'):
-    defs['imageModel'] = {'primary': image_model}
+# 无论当前主模型是什么，都应用推荐本地模型组合
+defs.setdefault('model', {})['primary'] = text_model
+defs['imageModel'] = {'primary': image_model}
 defs['models'][code_model].setdefault('agentRuntime', {'id': 'auto'})
 
 # memorySearch 在 agents.defaults 下
@@ -20955,6 +20948,560 @@ PY
     echo "   文本: $text_model"
     echo "   视觉: $image_model"
     echo "   代码: $code_model"
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# 多Agent多模型架构 — 基于 OpenClaw 原生多 Agent + 子Agent 编排
+# 取代旧的运行时智能路由管道（后者与 OpenClaw 架构不兼容）
+# ═══════════════════════════════════════════════════════════════════════
+
+# ── 硬件分级 → Agent 能力矩阵映射表 ──
+openclaw_multi_agent_capability_matrix() {
+  local tier="$1" cloud_model="${2:-}"
+  # cloud_model: 如 "google/gemini-2.5-flash"，空字符串表示无云端模型
+  python3 - "$tier" "$cloud_model" <<'PY'
+import json, sys
+tier = sys.argv[1]
+cloud = sys.argv[2].strip() if len(sys.argv) > 2 else ''
+
+# entry-cpu: 仅有CPU，显存0，只能用极小本地模型
+# advanced-cpu: CPU较好但无GPU
+# advanced-gpu: 有4-8GB显存GPU
+# golden-gpu: 有8GB+显存GPU
+# 如果 cloud 非空，在所有tier追加云端Agent作为"极致"难度兜底
+
+matrix = {}
+
+if tier in ('entry-cpu', 'emergency-cpu'):
+    agents = [
+        {"id": "general-basic", "model": "ollama/qwen3:0.6b", "label": "通用-基础",
+         "capabilities": ["通用问答","简单总结","翻译"], "difficulty": "简单",
+         "maxTokens": 1024, "historyRounds": 3},
+        {"id": "code-basic", "model": "ollama/qwen2.5-coder:1.5b", "label": "代码-基础",
+         "capabilities": ["简单代码","脚本","调试"], "difficulty": "简单",
+         "maxTokens": 2048, "historyRounds": 3},
+    ]
+    matrix = {"orchestrator": {"model": "ollama/qwen3:0.6b", "label": "编排器"},
+              "agents": agents,
+              "memorySearch": {"provider": "ollama", "model": "qwen2.5:7b"},
+              "toolsProfile": "coding"}
+elif tier == 'advanced-cpu':
+    agents = [
+        {"id": "general-basic", "model": "ollama/qwen3:0.6b", "label": "通用-基础",
+         "capabilities": ["通用问答","简单总结","翻译"], "difficulty": "简单",
+         "maxTokens": 1024, "historyRounds": 3},
+        {"id": "general-advanced", "model": "ollama/qwen2.5:7b", "label": "通用-进阶",
+         "capabilities": ["通用问答","总结","翻译","文案"], "difficulty": "中等",
+         "maxTokens": 2048, "historyRounds": 4},
+        {"id": "code-basic", "model": "ollama/qwen2.5-coder:1.5b", "label": "代码-基础",
+         "capabilities": ["简单代码","脚本","调试"], "difficulty": "简单",
+         "maxTokens": 2048, "historyRounds": 3},
+        {"id": "code-advanced", "model": "ollama/qwen2.5-coder:7b", "label": "代码-进阶",
+         "capabilities": ["代码编写","调试","脚本","运维"], "difficulty": "中等",
+         "maxTokens": 4096, "historyRounds": 4},
+    ]
+    matrix = {"orchestrator": {"model": "ollama/qwen3:1.8b", "label": "编排器"},
+              "agents": agents,
+              "memorySearch": {"provider": "ollama", "model": "qwen2.5:7b"},
+              "toolsProfile": "coding"}
+elif tier in ('advanced-gpu', 'entry-gpu'):
+    agents = [
+        {"id": "general-basic", "model": "ollama/qwen3:0.6b", "label": "通用-基础",
+         "capabilities": ["通用问答","简单总结","翻译"], "difficulty": "简单",
+         "maxTokens": 1024, "historyRounds": 3},
+        {"id": "general-advanced", "model": "ollama/qwen2.5:7b", "label": "通用-进阶",
+         "capabilities": ["通用问答","总结","翻译","文案","方案撰写"], "difficulty": "复杂",
+         "maxTokens": 4096, "historyRounds": 5},
+        {"id": "code-basic", "model": "ollama/qwen2.5-coder:1.5b", "label": "代码-基础",
+         "capabilities": ["简单代码","脚本","调试"], "difficulty": "简单",
+         "maxTokens": 2048, "historyRounds": 3},
+        {"id": "code-advanced", "model": "ollama/qwen2.5-coder:7b", "label": "代码-进阶",
+         "capabilities": ["代码编写","调试","脚本","运维","系统设计"], "difficulty": "复杂",
+         "maxTokens": 8192, "historyRounds": 5},
+        {"id": "multimodal-basic", "model": "ollama/gemma3:4b", "label": "多模态-基础",
+         "capabilities": ["简单识图","OCR","图表识别"], "difficulty": "简单",
+         "maxTokens": 512, "historyRounds": 1},
+    ]
+    matrix = {"orchestrator": {"model": "ollama/qwen3:1.8b", "label": "编排器"},
+              "agents": agents,
+              "memorySearch": {"provider": "ollama", "model": "qwen2.5:7b"},
+              "toolsProfile": "coding"}
+elif tier == 'golden-gpu':
+    agents = [
+        {"id": "general-basic", "model": "ollama/qwen3:0.6b", "label": "通用-基础",
+         "capabilities": ["通用问答","简单总结","翻译"], "difficulty": "简单",
+         "maxTokens": 1024, "historyRounds": 3},
+        {"id": "general-advanced", "model": "ollama/qwen2.5:14b", "label": "通用-高级",
+         "capabilities": ["通用问答","深度总结","翻译","文案","方案撰写","深度推理"], "difficulty": "复杂",
+         "maxTokens": 8192, "historyRounds": 6},
+        {"id": "code-basic", "model": "ollama/qwen2.5-coder:1.5b", "label": "代码-基础",
+         "capabilities": ["简单代码","脚本","调试"], "difficulty": "简单",
+         "maxTokens": 2048, "historyRounds": 3},
+        {"id": "code-advanced", "model": "ollama/qwen2.5-coder:7b", "label": "代码-高级",
+         "capabilities": ["代码编写","调试","脚本","运维","系统设计","架构设计"], "difficulty": "复杂",
+         "maxTokens": 8192, "historyRounds": 6},
+        {"id": "multimodal-advanced", "model": "ollama/gemma3:12b", "label": "多模态-进阶",
+         "capabilities": ["图片识别","内容解读","图表分析","图纸分析"], "difficulty": "复杂",
+         "maxTokens": 2048, "historyRounds": 2},
+    ]
+    matrix = {"orchestrator": {"model": "ollama/qwen3:1.8b", "label": "编排器"},
+              "agents": agents,
+              "memorySearch": {"provider": "ollama", "model": "qwen2.5:7b"},
+              "toolsProfile": "coding"}
+else:
+    agents = [
+        {"id": "general-basic", "model": "ollama/qwen3:0.6b", "label": "通用-基础",
+         "capabilities": ["通用问答","简单总结","翻译"], "difficulty": "简单",
+         "maxTokens": 1024, "historyRounds": 3},
+    ]
+    matrix = {"orchestrator": {"model": "ollama/qwen3:0.6b", "label": "编排器"},
+              "agents": agents,
+              "memorySearch": {"provider": "ollama", "model": "qwen2.5:7b"},
+              "toolsProfile": "coding"}
+
+# ── 云端增强：有云端模型时追加云端Agent，兜底极致难度任务 ──
+if cloud and not cloud.startswith('ollama/'):
+    cloud_label = cloud.split('/', 1)[1] if '/' in cloud else cloud
+    # 通用-云端Agent（极致难度兜底）
+    matrix["agents"].append({
+        "id": "general-cloud", "model": cloud, "label": f"通用-云端({cloud_label})",
+        "capabilities": ["通用问答","深度推理","复杂方案","跨领域分析"], "difficulty": "极难",
+        "maxTokens": 8192, "historyRounds": 6
+    })
+    # 代码-云端Agent（极致难度兜底）
+    matrix["agents"].append({
+        "id": "code-cloud", "model": cloud, "label": f"代码-云端({cloud_label})",
+        "capabilities": ["复杂代码","架构设计","系统优化"], "difficulty": "极难",
+        "maxTokens": 16384, "historyRounds": 6
+    })
+    # 多模态-云端Agent（如果tier够高）
+    if tier in ('golden-gpu', 'advanced-gpu', 'advanced-cpu'):
+        matrix["agents"].append({
+            "id": "multimodal-cloud", "model": cloud, "label": f"多模态-云端({cloud_label})",
+            "capabilities": ["复杂图像分析","图纸解读","场景理解"], "difficulty": "极难",
+            "maxTokens": 4096, "historyRounds": 3
+        })
+
+print(json.dumps(matrix, ensure_ascii=False))
+PY
+}
+
+# ── 编排器 Agent System Prompt 模板 ──
+openclaw_orchestrator_system_prompt() {
+  local agent_list_json="$1"  # JSON数组，{id, label, capabilities, difficulty, model}
+  python3 - "$agent_list_json" <<'PY'
+import json, sys
+agents = json.loads(sys.argv[1])
+
+prompt = """你是全栈分层式AI推理系统的**任务编排调度器**。
+
+## 你的职责
+1. 分析用户消息，判断任务类型和难度
+2. 选择合适的专业Agent处理任务
+3. 通过 sessions_spawn 派发子Agent执行
+4. 收集子Agent结果，统一格式返回用户
+
+## 可用的专业Agent
+"""
+
+for a in agents:
+    caps = "、".join(a.get("capabilities", []))
+    prompt += f"- **{a['label']}** (`{a['id']}`)：模型={a['model']}，能力=[{caps}]，适用难度={a.get('difficulty','中等')}，max_tokens={a.get('maxTokens',2048)}\n"
+
+prompt += """
+## 分类与派发规则
+1. **代码/编程/调试/运维任务** → 选择对应难度的代码Agent
+   - 简单脚本/调试 → 代码-基础
+   - 复杂开发/系统设计 → 代码-进阶/高级
+2. **图片/截图/OCR/识图/图纸** → 选择多模态Agent（如果可用），否则说明不支持
+3. **通用问答/总结/翻译/文案/方案** → 选择对应难度的通用Agent
+   - 简单/日常 → 通用-基础
+   - 中等/文案 → 通用-进阶
+   - 复杂/深度/方案 → 通用-高级
+4. **任务难度判断标准**：
+   - 简单：单步问题、简单翻译、简短总结（≤10字回答）
+   - 中等：多步推理、中等长度文案、技术解释
+   - 复杂：深度分析、方案设计、长文撰写、架构决策
+   - 极难：跨领域综合分析、安全敏感操作（优先使用复杂Agent）
+
+## sessions_spawn 调用格式
+```
+sessions_spawn(agentId="<AgentID>", prompt="<精简任务描述>", context="isolated")
+```
+- agentId: 从上述Agent列表中选择
+- prompt: 精简核心任务描述（≤200字），不要包含冗余上下文
+- context: 默认"isolated"（独立会话，节省Token）
+
+## 输出格式
+1. 先输出简短分类：[能力类型: xxx | 难度: xxx | 目标Agent: xxx]
+2. 派发子Agent
+3. 收到结果后统一格式返回用户
+
+## 注意
+- 不认识的领域关键词 → 使用通用-进阶Agent
+- 如果某个Agent不可用，自动降级到下一级
+- 保持回答简洁，不要重复用户输入
+"""
+print(prompt)
+PY
+}
+
+# ── 生成多Agent OpenClaw配置并写入 ──
+openclaw_write_multi_agent_config() {
+  local tier="$1" cloud_model="${2:-}" force="${3:-false}"
+  local config_file tmp_json matrix_json agent_json orchestrator_model orchestrator_label
+  config_file=$(openclaw_get_config_file)
+
+  echo "🧠 正在按硬件分级 [$tier] 生成多Agent多模型架构..."
+  [ -n "$cloud_model" ] && echo "   ☁️ 云端增强: $cloud_model"
+
+  matrix_json=$(openclaw_multi_agent_capability_matrix "$tier" "$cloud_model" 2>/dev/null)
+  if [ -z "$matrix_json" ] || [ "$matrix_json" = "null" ]; then
+    echo "⚠️ 能力矩阵生成失败，使用默认 entry-cpu"
+    matrix_json=$(openclaw_multi_agent_capability_matrix "entry-cpu" 2>/dev/null)
+  fi
+
+  orchestrator_model=$(echo "$matrix_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['orchestrator']['model'])")
+  orchestrator_label=$(echo "$matrix_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['orchestrator']['label'])")
+
+  # 提取agent列表为JSON
+  agent_json=$(echo "$matrix_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(d['agents'], ensure_ascii=False))")
+
+  # JSON5 safe
+  tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
+  openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
+
+  # 写入多Agent配置到 openclaw.json
+  python3 - "$config_file" "$tmp_json" "$matrix_json" "$agent_json" "$orchestrator_model" "$tier" "$force" "$cloud_model" <<'PY'
+import json, sys
+from pathlib import Path
+
+out_path = Path(sys.argv[1])
+cfg_path = Path(sys.argv[2])
+matrix = json.loads(sys.argv[3])
+agent_list = json.loads(sys.argv[4])
+orch_model = sys.argv[5]
+tier = sys.argv[6]
+force = sys.argv[7] == 'true'
+cloud_model = sys.argv[8].strip() if len(sys.argv) > 8 else ''
+
+cfg = {}
+if cfg_path.exists() and cfg_path.stat().st_size > 0:
+    try: cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+    except: pass
+
+# ── 1. gateway 基础配置 ──
+gw = cfg.setdefault('gateway', {})
+gw.setdefault('mode', 'local')
+gw['bind'] = 'loopback'
+gw.setdefault('port', 18789)
+gw.setdefault('auth', {})['mode'] = 'token'
+gw.pop('controlUi', None)
+
+# ── 2. tools 全局配置 ──
+tools = cfg.setdefault('tools', {})
+tools.pop('global', None)  # 清理旧无效字段
+tools_cfg = matrix.get('toolsProfile', 'coding')
+tools.setdefault('profile', tools_cfg)
+
+# ── 3. models providers (Ollama) ──
+providers = cfg.setdefault('models', {}).setdefault('providers', {})
+ollama_prov = providers.setdefault('ollama', {})
+ollama_prov['baseUrl'] = ollama_prov.get('baseUrl') or 'http://127.0.0.1:11434'
+ollama_prov['apiKey'] = ollama_prov.get('apiKey') or 'ollama-local'
+ollama_prov['api'] = 'ollama'
+ollama_prov.setdefault('timeoutSeconds', 300)
+
+# 收集所有需要的模型
+all_models = set()
+for a in agent_list:
+    all_models.add(a['model'])
+all_models.add(orch_model)
+
+# 写入model entries
+existing_models = ollama_prov.setdefault('models', [])
+existing_ids = {m['id'] if isinstance(m, dict) else m for m in existing_models}
+for m in all_models:
+    if '/' not in m:
+        # ollama local model
+        if m not in existing_ids:
+            existing_models.append({'id': m, 'name': m, 'input': ['text']})
+    else:
+        # cloud model: create entry in its provider
+        provider_name, model_name = m.split('/', 1)
+        if provider_name != 'ollama':
+            # ensure provider exists, don't overwrite existing config
+            cloud_prov = providers.setdefault(provider_name, {})
+            if cloud_prov.get('models') is None:
+                cloud_prov['models'] = []
+            cloud_existing = cloud_prov['models']
+            cloud_existing_ids = {entry['id'] if isinstance(entry, dict) else entry for entry in cloud_existing}
+            if model_name not in cloud_existing_ids:
+                cloud_existing.append({'id': model_name, 'name': model_name, 'input': ['text']})
+            # Keep existing provider config (apiKey, baseUrl etc.)
+        else:
+            # ollama model with provider prefix
+            model_name = m.split('/', 1)[1]
+            if model_name not in existing_ids:
+                existing_models.append({'id': model_name, 'name': model_name, 'input': ['text']})
+
+# ── 4. agents.defaults ──
+agents_cfg = cfg.setdefault('agents', {})
+defaults = agents_cfg.setdefault('defaults', {})
+
+# 编排器 = 主Agent
+defaults.setdefault('model', {})['primary'] = orch_model
+defaults.setdefault('workspace', '~/.openclaw/workspace')
+subagents = defaults.setdefault('subagents', {})
+subagents.setdefault('model', {})['primary'] = orch_model
+# sessions_spawn 运行时约束
+subagents.setdefault('maxSpawnDepth', 2)
+subagents.setdefault('maxChildrenPerAgent', 5)
+subagents.setdefault('maxConcurrent', 8)
+subagents.setdefault('runTimeoutSeconds', 900)
+subagents.setdefault('delegationMode', 'agent-driven')
+
+# memorySearch
+ms = matrix.get('memorySearch', {})
+memory_search = defaults.setdefault('memorySearch', {})
+memory_search['provider'] = ms.get('provider', 'ollama')
+memory_search['model'] = ms.get('model', 'qwen2.5:7b')
+
+# models allowlist
+allowlist = defaults.setdefault('models', {})
+allowlist[orch_model] = {}
+for a in agent_list:
+    allowlist[a['model']] = {}
+
+# imageModel: 使用第一个多模态Agent的模型
+multimodal_agents = [a for a in agent_list if 'multimodal' in a.get('id', '')]
+if multimodal_agents:
+    defaults.setdefault('imageModel', {})['primary'] = multimodal_agents[0]['model']
+
+# ── 5. agents.list (多Agent定义) ──
+agent_configs = agents_cfg.setdefault('list', [])
+
+# 5a. 编排器Agent (main, default)
+orch_entry = None
+for entry in agent_configs:
+    if entry.get('id') == 'main':
+        orch_entry = entry
+        break
+if orch_entry is None:
+    orch_entry = {'id': 'main'}
+    agent_configs.insert(0, orch_entry)
+
+orch_entry['default'] = True
+orch_entry.setdefault('model', {})['primary'] = orch_model
+orch_entry.setdefault('workspace', '~/.openclaw/workspace')
+
+# 5b. 各专业Agent
+existing_agent_ids = {a['id'] for a in agent_configs if 'id' in a}
+for a in agent_list:
+    aid = a['id']
+    if aid in existing_agent_ids and not force:
+        continue  # 已存在且非强制模式，跳过
+    if aid == 'main':
+        continue
+
+    entry = None
+    for e in agent_configs:
+        if e.get('id') == aid:
+            entry = e
+            break
+    if entry is None:
+        entry = {'id': aid}
+        agent_configs.append(entry)
+
+    entry['model'] = {'primary': a['model']}
+    entry['label'] = a.get('label', aid)
+    entry['workspace'] = f'~/.openclaw/agents/{aid}'
+    # 子Agent配置
+    entry.setdefault('subagents', {}).setdefault('model', {})['primary'] = a['model']
+
+# ── 6. 写入 ──
+out_path.parent.mkdir(parents=True, exist_ok=True)
+out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+
+# 打印摘要
+print(f"✅ 编排器Agent [main] → {orch_model}")
+for a in agent_list:
+    print(f"   专业Agent [{a['id']}] → {a['model']} ({a.get('label','')})")
+PY
+  rm -f "$tmp_json"
+
+  # ── 7. 写编排器 System Prompt ──
+  local orch_prompt_dir="$HOME/.openclaw/agents/main"
+  mkdir -p "$orch_prompt_dir"
+  local orch_prompt
+  orch_prompt=$(openclaw_orchestrator_system_prompt "$agent_json" 2>/dev/null)
+  printf '%s\n' "$orch_prompt" > "$orch_prompt_dir/AGENTS.md"
+  echo "✅ 编排器 System Prompt 已写入 ~/.openclaw/agents/main/AGENTS.md"
+
+  # ── 8. 写各专业Agent的简短System Prompt ──
+  echo "$agent_json" | python3 - "$HOME/.openclaw/agents" <<'PY'
+import json, sys, os
+from pathlib import Path
+base = Path(sys.argv[1])
+agents = json.load(sys.stdin)
+for a in agents:
+    aid = a['id']
+    adir = base / aid
+    adir.mkdir(parents=True, exist_ok=True)
+    caps = '、'.join(a.get('capabilities', []))
+    prompt = f"""你是 {a.get('label', aid)}，绑定模型 {a['model']}。
+
+## 能力范围
+{caps}
+
+## 工作规则
+- 仅处理能力范围内的问题
+- 超出能力范围时简洁说明，由编排器重新调度
+- 回答保持简洁精准
+- max_tokens: {a.get('maxTokens', 2048)}
+"""
+    (adir / 'AGENTS.md').write_text(prompt, encoding='utf-8')
+    print(f"✅ {a['label']} System Prompt 已写入 ~/.openclaw/agents/{aid}/AGENTS.md")
+PY
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  多Agent多模型架构部署完成"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  硬件分级: $tier"
+  echo "  编排器:   main → $orchestrator_model"
+  echo "  专业Agent: $(echo "$agent_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))") 个"
+  echo "  架构:     编排器(分类+派发) → 子Agent(专业执行)"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo ""
+  echo "  💡 使用方式: 直接与 main Agent 对话即可，"
+  echo "     编排器会自动分类并派发专业子Agent处理"
+  echo ""
+}
+
+# ── 一键多Agent部署入口 ──
+openclaw_apply_multi_agent_architecture() {
+  local tier force_flag="${1:-false}" cloud_model="" config_file tmp_json
+  tier=$(openclaw_detect_hardware_tier 2>/dev/null || echo "entry-cpu")
+  [ -z "$tier" ] && tier="entry-cpu"
+
+  echo "🏗️ 正在部署多Agent多模型架构..."
+  echo "   硬件分级: $tier"
+
+  # 确保Ollama已安装
+  openclaw_install_ollama_runtime || {
+    echo "⚠️ Ollama 安装失败，多Agent架构需要本地模型"
+    return 1
+  }
+
+  # 确保OpenClaw已安装
+  if ! command -v openclaw >/dev/null 2>&1; then
+    echo "⚠️ OpenClaw 未安装，无法部署多Agent架构"
+    return 1
+  fi
+
+  # ── 检测是否有云端模型可用 ──
+  config_file=$(openclaw_get_config_file)
+  if [ -f "$config_file" ] && [ -s "$config_file" ]; then
+    tmp_json=$(mktemp /tmp/openclaw_cloud_detect_XXXXXX.json)
+    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
+    cloud_model=$(python3 - "$tmp_json" 2>/dev/null <<'PY'
+import json, sys
+from pathlib import Path
+cfg = {}
+try: cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
+except: pass
+# 检查 agents.defaults.model.primary
+primary = (cfg.get('agents', {})).get('defaults', {}).get('model', {}).get('primary', '')
+# 检查是否有非ollama的provider（云服务商）
+providers = (cfg.get('models', {})).get('providers', {})
+cloud_providers = [k for k in providers if k not in ('ollama',)]
+if primary and not primary.startswith('ollama/'):
+    print(primary)
+elif cloud_providers:
+    # 有云服务商但primary不是cloud的：尝试从provider提取首个模型
+    for cp in cloud_providers:
+        prov = providers.get(cp, {})
+        models = prov.get('models', [])
+        if models and isinstance(models, list):
+            m = models[0]
+            mid = m.get('id', '') if isinstance(m, dict) else str(m)
+            if mid:
+                print(f"{cp}/{mid}")
+                break
+PY
+)
+    rm -f "$tmp_json"
+    if [ -n "$cloud_model" ]; then
+      echo "   ☁️ 检测到云端模型: $cloud_model"
+    fi
+  fi
+
+  # 生成并写入多Agent配置
+  openclaw_write_multi_agent_config "$tier" "$cloud_model" "$force_flag" || return 1
+
+  # 重启网关使配置生效
+  openclaw_apply_and_restart
+}
+
+# ── 获取硬件分级（安装时一次性运行）──
+openclaw_detect_hardware_tier() {
+  python3 <<'PY'
+import subprocess, os, sys
+
+# 检测GPU
+has_gpu = False
+gpu_mem_mb = 0
+try:
+    out = subprocess.check_output(
+        ['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader'],
+        text=True, timeout=5, stderr=subprocess.DEVNULL
+    ).strip()
+    if out:
+        gpu_mem_mb = int(out.replace('MiB','').replace('MB','').strip())
+        has_gpu = True
+except: pass
+
+# 检测系统内存
+mem_mb = 0
+try:
+    with open('/proc/meminfo') as f:
+        for l in f:
+            if l.startswith('MemTotal:'):
+                mem_mb = int(l.split()[1]) // 1024
+                break
+except: pass
+
+# 检测CPU核心数
+cpu_cores = os.cpu_count() or 1
+
+# WSL检测
+is_wsl = False
+try:
+    with open('/proc/version') as f:
+        if 'microsoft' in f.read().lower():
+            is_wsl = True
+except: pass
+
+# 分级逻辑
+if has_gpu and gpu_mem_mb >= 8000:
+    tier = 'golden-gpu'
+elif has_gpu and gpu_mem_mb >= 4000:
+    tier = 'advanced-gpu'
+elif has_gpu and gpu_mem_mb >= 2000:
+    tier = 'entry-gpu'
+elif mem_mb >= 16000 and cpu_cores >= 8:
+    tier = 'advanced-cpu'
+else:
+    tier = 'entry-cpu'
+
+if is_wsl:
+    # WSL下GPU可能被误检测，保守处理
+    if gpu_mem_mb < 4000 and tier.startswith('golden'):
+        tier = 'advanced-gpu'
+
+print(tier)
+PY
 }
 
 openclaw_postinstall_acceptance_check() {
@@ -20990,8 +21537,7 @@ openclaw_full_local_stack_setup() {
     openclaw_ollama_pull_recommended_model "text" || echo "⚠️ 文本模型安装跳过"
     openclaw_ollama_pull_recommended_model "image" || echo "⚠️ 视觉模型安装跳过"
     openclaw_ollama_pull_recommended_model "code" || echo "⚠️ 代码模型安装跳过"
-    OPENCLAW_FORCE_LOCAL_PROFILE=1
-    openclaw_apply_recommended_model_profile || return 1
+    openclaw_apply_multi_agent_architecture "true" || return 1
     openclaw_memorysearch_loop_self_heal || return 1
     openclaw_inject_skills || return 1
     openclaw_optimize_memory_and_skills || return 1
@@ -22212,6 +22758,7 @@ PY
 }
 
 openclaw_memory_apply_current_scheme() {
+  local tier force="${1:-false}"
   local config_file tmp_json
   local want_local_models="true"
   local want_vision_models="false"
@@ -22219,7 +22766,14 @@ openclaw_memory_apply_current_scheme() {
   echo "正在应用当前记忆方案..."
   openclaw_runtime_self_heal || return 1
   openclaw_memory_prepare_workspace_all >/dev/null 2>&1 || true
-  openclaw_apply_recommended_model_profile >/dev/null 2>&1 || true
+
+  # ── 多Agent多模型架构 (OpenClaw 原生方式) ──
+  # 检测硬件分级，一次性生成所有Agent配置
+  tier=$(openclaw_detect_hardware_tier 2>/dev/null || echo "entry-cpu")
+  echo "🔍 硬件分级检测: $tier"
+  echo "🚀 正在构建多Agent多模型智能调度..."
+  openclaw_apply_multi_agent_architecture "$force" || return 1
+
   openclaw_optimize_memory_and_skills >/dev/null 2>&1 || true
   openclaw_inject_skills >/dev/null 2>&1 || true
   openclaw_safe_enable_global_tools >/dev/null 2>&1 || true
@@ -22966,6 +23520,41 @@ PY
 )
   OPENCLAW_MEMORY_PREHEAT="$preheat_mode" openclaw_memory_apply_current_scheme || return 1
   echo "✅ 已应用快速方案: $profile_key"
+}
+
+# ── 初始化配置向导 ──
+openclaw_run_onboard_wizard() {
+  local tier profile_choice
+  clear
+  echo "╔══════════════════════════════════════════════════╗"
+  echo "║          OpenClaw 初始化配置向导                  ║"
+  echo "╚══════════════════════════════════════════════════╝"
+  echo ""
+  echo "  OpenClaw 2026.6 采用多Agent多模型架构："
+  echo "  编排器Agent(本地轻量模型) 智能分类任务 →"
+  echo "  派发到专业子Agent(各绑定专用模型)执行"
+  echo ""
+  tier=$(openclaw_detect_hardware_tier 2>/dev/null || echo "entry-cpu")
+  echo "  🔍 检测到硬件分级: $tier"
+  echo ""
+  echo "  推荐方案:"
+  echo "  1) 均衡本地版 - 全本地模型，隐私安全"
+  echo "  2) 云端增强版 - 本地+云端混合，强推理能力"
+  echo "  3) 新手安全版 - 最小配置，快速启动"
+  echo "  4) 跳过向导，直接部署多Agent架构"
+  echo ""
+  read -e -p "  请选择方案 [1-4]: " profile_choice
+  case "$profile_choice" in
+    1) openclaw_memory_apply_quick_profile "balanced-local"
+       echo "✅ 均衡本地版已部署"; break_end ;;
+    2) openclaw_memory_apply_quick_profile "cloud-power"
+       echo "✅ 云端增强版已部署"; break_end ;;
+    3) openclaw_memory_apply_quick_profile "beginner-safe"
+       echo "✅ 新手安全版已部署"; break_end ;;
+    4) openclaw_apply_multi_agent_architecture "true"
+       echo "✅ 多Agent架构已部署"; break_end ;;
+    *) echo "⚠️ 无效选择，跳过向导"; break_end ;;
+  esac
 }
 
 openclaw_memory_quick_profile_label() {
