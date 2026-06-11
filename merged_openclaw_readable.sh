@@ -20551,7 +20551,8 @@ openclaw_memorysearch_loop_self_heal() {
     else
       # 主模型是云端模型，嵌入必须用本地 Ollama 模型
       memory_model=$(openclaw_memory_config_get "memorySearch.model" 2>/dev/null || true)
-      if [ -z "$memory_model" ] || [ "$memory_model" = "null" ]; then
+      # 验证：如果读到的模型名包含 / 或看起来像云端模型，回退到本地
+      if [ -z "$memory_model" ] || [ "$memory_model" = "null" ] || [[ "$memory_model" == */* ]] || [[ "$memory_model" == gemini* ]] || [[ "$memory_model" == gpt* ]] || [[ "$memory_model" == claude* ]]; then
         memory_model="qwen2.5:7b"
       fi
       echo "ℹ️ 当前主文本模型不是本地 Ollama（$primary_model），记忆检索引擎独立使用本地模型: $memory_model"
@@ -21082,6 +21083,41 @@ if cloud and not cloud.startswith('ollama/'):
             "maxTokens": 4096, "historyRounds": 3
         })
 
+# ── 角色标注与权限派生 ──
+# 根据 agent id 和 label 自动推导 role / allowSpawn / tools
+for a in matrix["agents"]:
+    aid = a.get("id", "")
+    # 编排器总是 scheduler（可派发子Agent）
+    if aid == "main" or "orchestrator" in aid.lower():
+        a["role"] = "scheduler"
+        a["allowSpawn"] = True
+        a["tools"] = ["read", "write", "shell", "spawn", "web"]
+        a["subagents"] = {"maxSpawnDepth": 2, "maxChildrenPerAgent": 5}
+    elif "cloud" in aid:
+        # 云端Agent：执行角色，但因为是远程API，允许完整工具集
+        a["role"] = "executor"
+        a["allowSpawn"] = False
+        a["tools"] = ["read", "write", "shell"]
+    elif "basic" in aid:
+        # 基础Agent：最小权限，仅文本处理
+        a["role"] = "executor"
+        a["allowSpawn"] = False
+        a["tools"] = ["read"]
+    elif "advanced" in aid or "code" in aid:
+        # 进阶/代码Agent：中等权限，可读写文件
+        a["role"] = "executor"
+        a["allowSpawn"] = False
+        a["tools"] = ["read", "write", "shell"]
+    elif "multimodal" in aid:
+        # 多模态Agent：仅读取，不需要shell
+        a["role"] = "executor"
+        a["allowSpawn"] = False
+        a["tools"] = ["read"]
+    else:
+        a["role"] = "executor"
+        a["allowSpawn"] = False
+        a["tools"] = ["read"]
+
 print(json.dumps(matrix, ensure_ascii=False))
 PY
 }
@@ -21106,7 +21142,10 @@ prompt = """你是全栈分层式AI推理系统的**任务编排调度器**。
 
 for a in agents:
     caps = "、".join(a.get("capabilities", []))
-    prompt += f"- **{a['label']}** (`{a['id']}`)：模型={a['model']}，能力=[{caps}]，适用难度={a.get('difficulty','中等')}，max_tokens={a.get('maxTokens',2048)}\n"
+    role = a.get("role", "executor")
+    allow_spawn = "可派发" if a.get("allowSpawn") else "不可派发"
+    tools = "、".join(a.get("tools", ["read"]))
+    prompt += f"- **{a['label']}** (`{a['id']}`)：角色={role}，模型={a['model']}，权限=[{tools}]，能力=[{caps}]，适用难度={a.get('difficulty','中等')}，{allow_spawn}子Agent\n"
 
 prompt += """
 ## 分类与派发规则
@@ -21122,7 +21161,13 @@ prompt += """
    - 简单：单步问题、简单翻译、简短总结（≤10字回答）
    - 中等：多步推理、中等长度文案、技术解释
    - 复杂：深度分析、方案设计、长文撰写、架构决策
-   - 极难：跨领域综合分析、安全敏感操作（优先使用复杂Agent）
+   - 极难：跨领域综合分析、安全敏感操作（优先使用云端Agent）
+
+## 角色与权限体系
+本系统采用分层权限控制：
+- **调度者(scheduler)**：你是唯一的调度者，负责分类任务并派发子Agent，拥有完整工具集
+- **执行者(executor)**：所有子Agent均为执行角色，**不可继续派发子Agent**，仅持有完成当前任务所需的最小工具集
+- 子Agent 的权限按其角色自动裁剪：基础Agent仅可读取，代码Agent可读写+Shell，多模态Agent仅可读取
 
 ## sessions_spawn 调用格式
 ```
@@ -21138,9 +21183,10 @@ sessions_spawn(agentId="<AgentID>", prompt="<精简任务描述>", context="isol
 3. 收到结果后统一格式返回用户
 
 ## 注意
-- 不认识的领域关键词 → 使用通用-进阶Agent
+- 不认识的领域关键词 → 使用通用-进阶/高级Agent
 - 如果某个Agent不可用，自动降级到下一级
 - 保持回答简洁，不要重复用户输入
+- 不要尝试让执行角色(executor)的子Agent继续派发更多Agent，它们没有这个权限
 """
 print(prompt)
 PY
@@ -21294,6 +21340,9 @@ if orch_entry is None:
 orch_entry['default'] = True
 orch_entry.setdefault('model', {})['primary'] = orch_model
 orch_entry.setdefault('workspace', '~/.openclaw/workspace')
+orch_entry['role'] = 'scheduler'
+orch_entry['allowSpawn'] = True
+orch_entry['tools'] = ['read', 'write', 'shell', 'spawn', 'web']
 
 # 5b. 各专业Agent
 existing_agent_ids = {a['id'] for a in agent_configs if 'id' in a}
@@ -21316,17 +21365,35 @@ for a in agent_list:
     entry['model'] = {'primary': a['model']}
     entry['label'] = a.get('label', aid)
     entry['workspace'] = f'~/.openclaw/agents/{aid}'
-    # 子Agent配置
-    entry.setdefault('subagents', {}).setdefault('model', {})['primary'] = a['model']
+    # 角色: scheduler(可派发子Agent) / executor(仅执行)
+    entry['role'] = a.get('role', 'executor')
+    entry['allowSpawn'] = a.get('allowSpawn', False)
+    # 工具集裁剪
+    entry['tools'] = a.get('tools', ['read'])
+    # 子Agent自身派发策略
+    sub = entry.setdefault('subagents', {})
+    sub.setdefault('model', {})['primary'] = a['model']
+    if a.get('role') == 'scheduler':
+        sub.setdefault('maxSpawnDepth', a.get('subagents', {}).get('maxSpawnDepth', 1))
+        sub.setdefault('maxChildrenPerAgent', a.get('subagents', {}).get('maxChildrenPerAgent', 3))
+    else:
+        # executor 角色禁止派发子Agent
+        sub.setdefault('maxSpawnDepth', 0)
+        sub.setdefault('maxChildrenPerAgent', 0)
+    sub.setdefault('maxConcurrent', 4)
+    sub.setdefault('runTimeoutSeconds', 600)
 
 # ── 6. 写入 ──
 out_path.parent.mkdir(parents=True, exist_ok=True)
 out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 
 # 打印摘要
-print(f"✅ 编排器Agent [main] → {orch_model}")
+print(f"✅ 编排器Agent [main] → {orch_model} (角色:scheduler, 可派发子Agent)")
 for a in agent_list:
-    print(f"   专业Agent [{a['id']}] → {a['model']} ({a.get('label','')})")
+    role = a.get('role', 'executor')
+    tools = '、'.join(a.get('tools', ['read']))
+    spawn_tag = '可派发' if a.get('allowSpawn') else '仅执行'
+    print(f"   专业Agent [{a['id']}] → {a['model']} ({a.get('label','')}, 角色:{role}, 权限:[{tools}], {spawn_tag})")
 PY
   rm -f "$tmp_json"
 
@@ -21339,17 +21406,25 @@ PY
   echo "✅ 编排器 System Prompt 已写入 ~/.openclaw/agents/main/AGENTS.md"
 
   # ── 8. 写各专业Agent的简短System Prompt ──
-  echo "$agent_json" | python3 - "$HOME/.openclaw/agents" <<'PY'
+  # 注意: 不能 pipe + heredoc 混用，heredoc 会覆盖 stdin；改用命令行参数传递 JSON
+  python3 - "$HOME/.openclaw/agents" "$agent_json" <<'PY'
 import json, sys, os
 from pathlib import Path
 base = Path(sys.argv[1])
-agents = json.load(sys.stdin)
+agents = json.loads(sys.argv[2])
 for a in agents:
     aid = a['id']
     adir = base / aid
     adir.mkdir(parents=True, exist_ok=True)
     caps = '、'.join(a.get('capabilities', []))
-    prompt = f"""你是 {a.get('label', aid)}，绑定模型 {a['model']}。
+    role = a.get('role', 'executor')
+    tools = '、'.join(a.get('tools', ['read']))
+    spawn_note = '你可以派发子Agent完成复杂任务' if a.get('allowSpawn') else '你不可派发子Agent，仅处理分配给你的任务'
+    prompt = f"""你是 {a.get('label', aid)}，角色={role}，绑定模型 {a['model']}。
+
+## 角色权限
+- 你的角色为 **{role}**，可用工具: [{tools}]
+- {spawn_note}
 
 ## 能力范围
 {caps}
@@ -21358,6 +21433,7 @@ for a in agents:
 - 仅处理能力范围内的问题
 - 超出能力范围时简洁说明，由编排器重新调度
 - 回答保持简洁精准
+- 你是子Agent，不是主Agent，不要主动轮询
 - max_tokens: {a.get('maxTokens', 2048)}
 """
     (adir / 'AGENTS.md').write_text(prompt, encoding='utf-8')
@@ -21437,11 +21513,77 @@ PY
     fi
   fi
 
+  # ── 自动拉取多Agent所需的本地模型 ──
+  openclaw_multi_agent_pull_models "$tier" || echo "⚠️ 部分模型拉取失败，将使用已有模型继续"
+
   # 生成并写入多Agent配置
   openclaw_write_multi_agent_config "$tier" "$cloud_model" "$force_flag" || return 1
 
   # 重启网关使配置生效
   openclaw_apply_and_restart
+}
+
+# ── 多Agent所需模型自动拉取 ──
+openclaw_multi_agent_pull_models() {
+  local tier="$1"
+  echo "⬇️ 正在拉取多Agent架构所需的本地模型..."
+  echo "   硬件分级: $tier"
+
+  openclaw_ensure_ollama_running >/dev/null 2>&1 || {
+    echo "⚠️ Ollama 服务未就绪，跳过模型拉取"
+    return 1
+  }
+
+  local pulled=0 failed=0
+
+  _pull_if_needed() {
+    local label="$1" model="$2"
+    if ollama list 2>/dev/null | grep -qF "$model"; then
+      echo "   ✅ $label ($model) 已存在"
+      return 0
+    fi
+    echo "   ⬇️ 拉取 $label ($model)..."
+    if ollama pull "$model" >/dev/null 2>&1; then
+      echo "   ✅ $label 拉取成功"
+      pulled=$((pulled + 1))
+      return 0
+    else
+      echo "   ⚠️ $label 拉取失败"
+      failed=$((failed + 1))
+      return 1
+    fi
+  }
+
+  # 所有tier通用的基础模型
+  _pull_if_needed "基础文本" "qwen3:0.6b"
+  _pull_if_needed "基础代码" "qwen2.5-coder:1.5b"
+  _pull_if_needed "记忆检索" "qwen2.5:7b"
+
+  case "$tier" in
+    golden-gpu)
+      _pull_if_needed "编排器" "qwen3:1.8b"
+      _pull_if_needed "高级文本" "qwen2.5:14b"
+      _pull_if_needed "高级代码" "qwen2.5-coder:7b"
+      _pull_if_needed "高级多模态" "gemma3:12b"
+      ;;
+    advanced-gpu|entry-gpu)
+      _pull_if_needed "编排器" "qwen3:1.8b"
+      _pull_if_needed "进阶文本" "qwen2.5:7b"
+      _pull_if_needed "进阶代码" "qwen2.5-coder:7b"
+      _pull_if_needed "基础多模态" "gemma3:4b"
+      ;;
+    advanced-cpu)
+      _pull_if_needed "编排器" "qwen3:1.8b"
+      _pull_if_needed "进阶文本" "qwen2.5:7b"
+      _pull_if_needed "进阶代码" "qwen2.5-coder:7b"
+      ;;
+    entry-cpu|*)
+      # entry-cpu 仅需基础模型（已在上面拉取）
+      ;;
+  esac
+
+  echo "   模型拉取完成: $pulled 个成功, $failed 个失败"
+  [ "$failed" -eq 0 ] && return 0 || return 1
 }
 
 # ── 获取硬件分级（安装时一次性运行）──
@@ -21592,13 +21734,13 @@ PY
 
     case "$tier" in
       server|workstation|flagship-gpu|golden-gpu)
-        text_model="qwen2.5:7b"
-        code_model="qwen2.5-coder:1.5b"
-        vision_model="gemma3:4b"
+        text_model="qwen2.5:14b"
+        code_model="qwen2.5-coder:7b"
+        vision_model="gemma3:12b"
         ;;
       advanced-gpu|advanced-cpu-plus|advanced-cpu)
-        text_model="qwen2.5:3b"
-        code_model="qwen2.5-coder:1.5b"
+        text_model="qwen2.5:7b"
+        code_model="qwen2.5-coder:7b"
         vision_model="gemma3:4b"
         ;;
       entry-gpu|entry-cpu)
@@ -21631,11 +21773,11 @@ PY
     local text_fallbacks code_fallbacks
     case "$tier" in
       server|workstation|flagship-gpu|golden-gpu)
-        text_fallbacks=("qwen3:4b" "qwen2.5:3b" "llama3.2:3b")
-        code_fallbacks=("qwen2.5-coder:7b" "qwen2.5-coder:3b" "deepseek-coder:6.7b")
+        text_fallbacks=("qwen2.5:7b" "qwen3:4b" "qwen2.5:3b")
+        code_fallbacks=("qwen2.5-coder:1.5b" "qwen2.5-coder:3b" "deepseek-coder:6.7b")
         ;;
       advanced-gpu|advanced-cpu-plus|advanced-cpu)
-        text_fallbacks=("qwen3:4b" "qwen2.5:1.5b" "llama3.2:3b")
+        text_fallbacks=("qwen3:4b" "qwen2.5:3b" "qwen2.5:1.5b")
         code_fallbacks=("qwen2.5-coder:3b" "qwen2.5-coder:1.5b" "deepseek-coder:1.3b")
         ;;
       entry-gpu|entry-cpu|*)
@@ -23470,7 +23612,14 @@ memory.setdefault('qmd', {})['includeDefaultMemory'] = True
 agents_defaults = cfg.setdefault('agents', {}).setdefault('defaults', {})
 memory_search = agents_defaults.setdefault('memorySearch', {})
 memory_search['provider'] = 'ollama'
-memory_search['model'] = profile['routing']['defaultTextModel'].split('/', 1)[1] if '/' in profile['routing']['defaultTextModel'] else profile['routing']['defaultTextModel']
+# memorySearch 始终使用本地 Ollama 模型做嵌入检索，不受云端主模型影响
+_local_ms_model = profile['routing']['defaultTextModel'].split('/', 1)[1] if '/' in profile['routing']['defaultTextModel'] else profile['routing']['defaultTextModel']
+if _local_ms_model.startswith('ollama/'):
+    _local_ms_model = _local_ms_model.split('/', 1)[1]
+# 如果推导出的模型是云端的（包含 /），回退到本地模型
+if '/' in _local_ms_model or 'gemini' in _local_ms_model.lower() or 'gpt' in _local_ms_model.lower() or 'claude' in _local_ms_model.lower():
+    _local_ms_model = 'qwen2.5:7b'
+memory_search['model'] = _local_ms_model
 agents_defaults.setdefault('workspace', '~/.openclaw/workspace')
 agents_defaults.setdefault('model', {})['primary'] = profile['routing']['defaultTextModel']
 agents_defaults.setdefault('imageModel', {})['primary'] = profile['routing'].get('defaultVisionModel', agents_defaults.get('imageModel', {}).get('primary', 'google/gemini-2.5-pro'))
