@@ -246,1044 +246,6 @@ print(','.join(items))
 PY
 }
 
-# ========================================================================
-# 第6层 - 系统日志管理器
-# ========================================================================
-openclaw_ai_stack_log_manager() {
-  local action="${1:-tail}" level="${2:-all}" lines="${3:-50}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$level" "$lines" "$SKPL_AI_STACK_ROOT/logs" "$SKPL_AI_STACK_ROOT" <<'PY'
-import json, sys, os, time, re, sqlite3
-from pathlib import Path
-
-action = sys.argv[1]
-level = sys.argv[2]
-lines = int(sys.argv[3])
-logs_dir = Path(sys.argv[4])
-stack_root = Path(sys.argv[5])
-logs_dir.mkdir(parents=True, exist_ok=True)
-
-log_db = logs_dir / "system-logs.sqlite3"
-
-def init_db():
-    conn = sqlite3.connect(str(log_db), timeout=10)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS log_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp INTEGER,
-            level TEXT,
-            component TEXT,
-            message TEXT,
-            details TEXT,
-            source_file TEXT,
-            session_id TEXT
-        )
-    ''')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_log_level ON log_entries(level)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_log_time ON log_entries(timestamp)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_log_component ON log_entries(component)')
-    conn.commit()
-    return conn
-
-conn = init_db()
-
-LOG_LEVELS = ['debug', 'info', 'warn', 'error', 'critical']
-COMPONENTS = ['resource', 'model', 'cloud', 'cache', 'tool', 'route', 'evolve', 'general']
-
-def log(level_name, component, message, details='', source_file=''):
-    if level_name not in LOG_LEVELS:
-        level_name = 'info'
-    conn.execute('''
-        INSERT INTO log_entries (timestamp, level, component, message, details, source_file, session_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (int(time.time()), level_name, component, message, details[:1000], source_file, ''))
-    conn.commit()
-
-if action == 'tail':
-    # 查看最近日志
-    level_filter = f"AND level = '{level}'" if level != 'all' else ''
-    rows = conn.execute(f'''
-        SELECT timestamp, level, component, message, details
-        FROM log_entries
-        WHERE 1=1 {level_filter}
-        ORDER BY timestamp DESC LIMIT ?
-    ''', (lines,)).fetchall()
-
-    entries = [{
-        'time': r[0], 'level': r[1], 'component': r[2],
-        'message': r[3], 'details': r[4][:200] if r[4] else '',
-    } for r in reversed(rows)]
-
-    total = conn.execute(f'SELECT COUNT(*) FROM log_entries WHERE 1=1 {level_filter}').fetchone()[0]
-    print(json.dumps({'entries': entries, 'shown': len(entries), 'total': total}, ensure_ascii=False))
-
-elif action == 'log':
-    # 记录一条日志
-    component = sys.argv[4] if len(sys.argv) > 4 else 'general'
-    message = sys.argv[5] if len(sys.argv) > 5 else ''
-    details = sys.argv[6] if len(sys.argv) > 6 else ''
-    if message:
-        log(level, component, message, details)
-        print(json.dumps({'ok': True, 'logged': 1}, ensure_ascii=False))
-    else:
-        print(json.dumps({'error': 'message required'}, ensure_ascii=False))
-
-elif action == 'stats':
-    # 日志统计
-    by_level = {}
-    for row in conn.execute('SELECT level, COUNT(*) FROM log_entries GROUP BY level').fetchall():
-        by_level[row[0]] = row[1]
-    by_component = {}
-    for row in conn.execute('SELECT component, COUNT(*) FROM log_entries GROUP BY component').fetchall():
-        by_component[row[0]] = row[1]
-
-    recent_errors = conn.execute('''
-        SELECT timestamp, component, message FROM log_entries
-        WHERE level IN ("error", "critical")
-        ORDER BY timestamp DESC LIMIT 10
-    ''').fetchall()
-
-    total = sum(by_level.values())
-    print(json.dumps({
-        'total': total,
-        'byLevel': by_level,
-        'byComponent': by_component,
-        'recentErrors': [{'time': r[0], 'component': r[1], 'message': r[2][:100]} for r in recent_errors],
-        'dbSize': os.path.getsize(str(log_db)) if log_db.exists() else 0,
-    }, ensure_ascii=False))
-
-elif action == 'cleanup':
-    # 清理旧日志
-    cutoff_30d = int(time.time()) - 30 * 86400
-    before = conn.execute('SELECT COUNT(*) FROM log_entries').fetchone()[0]
-    conn.execute('DELETE FROM log_entries WHERE timestamp < ? AND level NOT IN ("error", "critical")', (cutoff_30d,))
-    conn.commit()
-    after = conn.execute('SELECT COUNT(*) FROM log_entries').fetchone()[0]
-    conn.execute('VACUUM')
-    print(json.dumps({'before': before, 'after': after, 'removed': before - after}, ensure_ascii=False))
-
-elif action == 'search':
-    # 搜索日志
-    query = level  # level parameter is reused
-    if not query:
-        print(json.dumps({'error': 'query required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    rows = conn.execute('''
-        SELECT timestamp, level, component, message FROM log_entries
-        WHERE message LIKE ? OR details LIKE ?
-        ORDER BY timestamp DESC LIMIT ?
-    ''', (f'%{query}%', f'%{query}%', lines)).fetchall()
-
-    entries = [{'time': r[0], 'level': r[1], 'component': r[2], 'message': r[3][:200]} for r in rows]
-    print(json.dumps({'query': query, 'entries': entries, 'count': len(entries)}, ensure_ascii=False))
-
-elif action == 'export':
-    # 导出日志
-    export_path = logs_dir / f'log-export-{int(time.time())}.json'
-    rows = conn.execute('SELECT timestamp, level, component, message FROM log_entries ORDER BY timestamp DESC LIMIT 1000').fetchall()
-    entries = [{'time': r[0], 'level': r[1], 'component': r[2], 'message': r[3]} for r in rows]
-    export_path.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps({'exported': len(entries), 'path': str(export_path)}, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'tail|log|stats|cleanup|search|export'}, ensure_ascii=False))
-
-conn.close()
-PY
-}
-
-# ========================================================================
-# 第6层 - 错误自动上报器
-# ========================================================================
-openclaw_ai_stack_error_reporter() {
-  local action="${1:-report}" error_data="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$error_data" "$SKPL_AI_STACK_ROOT/errors" <<'PY'
-import json, sys, os, time, traceback, platform, hashlib
-from pathlib import Path
-
-action = sys.argv[1]
-error_data = sys.argv[2] if len(sys.argv) > 2 else ''
-errors_dir = Path(sys.argv[3])
-errors_dir.mkdir(parents=True, exist_ok=True)
-
-error_db = errors_dir / "error-reports.sqlite3"
-
-def init_db():
-    import sqlite3
-    conn = sqlite3.connect(str(error_db), timeout=10)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS error_reports (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            error_hash TEXT UNIQUE,
-            error_type TEXT,
-            error_message TEXT,
-            stack_trace TEXT,
-            component TEXT,
-            severity TEXT,
-            occurred_at INTEGER,
-            count INTEGER DEFAULT 1,
-            last_occurred INTEGER,
-            resolved INTEGER DEFAULT 0,
-            resolution_note TEXT
-        )
-    ''')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_err_hash ON error_reports(error_hash)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_err_severity ON error_reports(severity)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_err_resolved ON error_reports(resolved)')
-    conn.commit()
-    return conn
-
-def classify_error(error_msg):
-    """分类错误类型"""
-    msg_lower = error_msg.lower()
-    if 'memory' in msg_lower or 'out of memory' in msg_lower or 'oom' in msg_lower:
-        return 'resource_exhaustion', 'high'
-    if 'timeout' in msg_lower or 'timed out' in msg_lower:
-        return 'timeout', 'medium'
-    if 'connection' in msg_lower or 'refused' in msg_lower or 'network' in msg_lower:
-        return 'network_error', 'medium'
-    if 'permission' in msg_lower or 'access denied' in msg_lower or 'forbidden' in msg_lower:
-        return 'permission_error', 'high'
-    if 'not found' in msg_lower or 'no such file' in msg_lower:
-        return 'not_found', 'low'
-    if 'syntax' in msg_lower or 'indentation' in msg_lower or 'parse error' in msg_lower:
-        return 'syntax_error', 'medium'
-    if 'import' in msg_lower or 'module' in msg_lower or 'no module' in msg_lower:
-        return 'import_error', 'medium'
-    if 'config' in msg_lower or 'configuration' in msg_lower:
-        return 'config_error', 'medium'
-    if 'gpu' in msg_lower or 'cuda' in msg_lower or 'nvidia' in msg_lower:
-        return 'gpu_error', 'high'
-    return 'unknown', 'low'
-
-conn = init_db()
-
-if action == 'report':
-    # 报告一个错误
-    try:
-        data = json.loads(error_data) if error_data else {}
-    except json.JSONDecodeError:
-        data = {'message': error_data}
-
-    error_msg = data.get('message', '') or data.get('error', '') or str(error_data)
-    error_type, severity = classify_error(error_msg)
-    error_hash = hashlib.sha256(f"{error_type}:{error_msg[:200]}".encode()).hexdigest()
-
-    existing = conn.execute('SELECT id, count FROM error_reports WHERE error_hash=?', (error_hash,)).fetchone()
-    now = int(time.time())
-
-    if existing:
-        conn.execute('''
-            UPDATE error_reports SET count=count+1, last_occurred=?, error_message=?
-            WHERE error_hash=?
-        ''', (now, error_msg[:500], error_hash))
-    else:
-        conn.execute('''
-            INSERT INTO error_reports
-            (error_hash, error_type, error_message, stack_trace, component, severity,
-             occurred_at, count, last_occurred, resolved)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, 0)
-        ''', (
-            error_hash, error_type, error_msg[:500],
-            data.get('stackTrace', '')[:2000],
-            data.get('component', 'general'),
-            severity, now, now,
-        ))
-    conn.commit()
-
-    print(json.dumps({
-        'ok': True,
-        'errorHash': error_hash[:12],
-        'errorType': error_type,
-        'severity': severity,
-        'isNew': not existing,
-    }, ensure_ascii=False))
-
-elif action == 'list':
-    # 列出所有未解决的错误
-    severity_filter = sys.argv[3] if len(sys.argv) > 3 else 'all'
-    where_clause = 'WHERE resolved = 0'
-    if severity_filter != 'all':
-        where_clause += f" AND severity = '{severity_filter}'"
-
-    rows = conn.execute(f'''
-        SELECT id, error_hash, error_type, error_message, component, severity,
-               occurred_at, count, last_occurred
-        FROM error_reports {where_clause}
-        ORDER BY last_occurred DESC LIMIT 50
-    ''').fetchall()
-
-    reports = [{
-        'id': r[0], 'hash': r[1][:12], 'type': r[2], 'message': r[3][:200],
-        'component': r[4], 'severity': r[5], 'firstSeen': r[6],
-        'count': r[7], 'lastSeen': r[8],
-    } for r in rows]
-
-    total = conn.execute(f'SELECT COUNT(*) FROM error_reports {where_clause}').fetchone()[0]
-    print(json.dumps({'reports': reports, 'total': total}, ensure_ascii=False))
-
-elif action == 'resolve':
-    # 标记错误为已解决
-    error_id = sys.argv[3] if len(sys.argv) > 3 else ''
-    note = sys.argv[4] if len(sys.argv) > 4 else ''
-    if not error_id:
-        print(json.dumps({'error': 'error_id required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    conn.execute('UPDATE error_reports SET resolved=1, resolution_note=? WHERE id=?', (note, error_id))
-    conn.commit()
-    print(json.dumps({'ok': True, 'resolved': error_id}, ensure_ascii=False))
-
-elif action == 'stats':
-    # 错误统计
-    total = conn.execute('SELECT COUNT(*) FROM error_reports').fetchone()[0]
-    unresolved = conn.execute('SELECT COUNT(*) FROM error_reports WHERE resolved=0').fetchone()[0]
-    by_type = {}
-    for row in conn.execute('SELECT error_type, COUNT(*), SUM(count) FROM error_reports GROUP BY error_type').fetchall():
-        by_type[row[0]] = {'unique': row[1], 'totalOccurrences': row[2]}
-    by_severity = {}
-    for row in conn.execute('SELECT severity, COUNT(*) FROM error_reports WHERE resolved=0 GROUP BY severity').fetchall():
-        by_severity[row[0]] = row[1]
-
-    print(json.dumps({
-        'totalUnique': total,
-        'unresolved': unresolved,
-        'byType': by_type,
-        'bySeverity': by_severity,
-        'resolutionRate': round((total - unresolved) / max(total, 1) * 100, 1),
-    }, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'report|list|resolve|stats'}, ensure_ascii=False))
-
-conn.close()
-PY
-}
-
-# ========================================================================
-# 第6层 - 性能瓶颈分析器
-# ========================================================================
-openclaw_ai_stack_bottleneck_analyzer() {
-  local action="${1:-analyze}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$SKPL_AI_STACK_ROOT" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, os, time, sqlite3
-from pathlib import Path
-
-action = sys.argv[1]
-stack_root = Path(sys.argv[2])
-config_path = Path(sys.argv[3])
-
-analyzer_dir = stack_root / "bottleneck"
-analyzer_dir.mkdir(parents=True, exist_ok=True)
-analyzer_db = analyzer_dir / "bottleneck.sqlite3"
-
-def init_db():
-    conn = sqlite3.connect(str(analyzer_db), timeout=10)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS performance_samples (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp INTEGER,
-            component TEXT,
-            metric_name TEXT,
-            metric_value REAL,
-            threshold REAL,
-            status TEXT
-        )
-    ''')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_perf_comp ON performance_samples(component)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_perf_time ON performance_samples(timestamp)')
-    conn.commit()
-    return conn
-
-conn = init_db()
-
-# 瓶颈阈值定义
-THRESHOLDS = {
-    'model_loading': {'maxMs': 30000, 'component': 'model', 'severity': 'high'},
-    'cache_lookup': {'maxMs': 200, 'component': 'cache', 'severity': 'low'},
-    'route_decision': {'maxMs': 500, 'component': 'route', 'severity': 'medium'},
-    'cloud_call': {'maxMs': 15000, 'component': 'cloud', 'severity': 'medium'},
-    'tool_execution': {'maxMs': 10000, 'component': 'tool', 'severity': 'medium'},
-    'context_build': {'maxMs': 1000, 'component': 'memory', 'severity': 'low'},
-    'privacy_check': {'maxMs': 500, 'component': 'privacy', 'severity': 'low'},
-    'memory_injection': {'maxMs': 800, 'component': 'memory', 'severity': 'low'},
-    'evolve_record': {'maxMs': 300, 'component': 'evolve', 'severity': 'low'},
-}
-
-def collect_metrics():
-    """从各组件收集性能指标"""
-    metrics = []
-    now = int(time.time())
-
-    # 检查各状态文件的更新时间作为性能代理
-    state_dir = stack_root / 'state'
-    check_files = {
-        'route_decision': 'route-status.json',
-        'resource_guard': 'resource-state.json',
-        'model_lifecycle': 'lifecycle-state.json',
-        'cloud_execution': 'cloud-state.json',
-        'evolve_state': 'evolve-state.json',
-    }
-
-    for metric_name, filename in check_files.items():
-        file_path = state_dir / filename
-        if file_path.exists():
-            age_seconds = now - file_path.stat().st_mtime
-            threshold = THRESHOLDS.get(metric_name, {}).get('maxMs', 1000)
-            metrics.append({
-                'component': THRESHOLDS.get(metric_name, {}).get('component', 'unknown'),
-                'metricName': f'{metric_name}_state_age',
-                'value': age_seconds * 1000,
-                'threshold': threshold,
-                'status': 'warning' if age_seconds * 1000 > threshold else 'ok',
-            })
-
-    return metrics
-
-def analyze_bottlenecks(metrics):
-    """分析瓶颈"""
-    bottlenecks = []
-    for m in metrics:
-        if m['status'] == 'warning':
-            ratio = m['value'] / max(m['threshold'], 1)
-            bottlenecks.append({
-                'component': m['component'],
-                'metric': m['metricName'],
-                'currentValue': round(m['value']),
-                'threshold': m['threshold'],
-                'overBy': f'{round((ratio - 1) * 100)}%',
-                'suggestion': get_suggestion(m['component'], m['metricName']),
-            })
-
-    bottlenecks.sort(key=lambda b: b['currentValue'] / max(b['threshold'], 1), reverse=True)
-    return bottlenecks
-
-def get_suggestion(component, metric):
-    suggestions = {
-        'model': '考虑换用更小量化级别的模型，或增加GPU资源',
-        'cache': '增大缓存TTL或清理过期缓存条目',
-        'route': '简化路由规则或增加路由缓存命中率',
-        'cloud': '检查网络连接，考虑使用更快的API端点',
-        'tool': '优化工具执行逻辑，减少不必要的IO操作',
-        'memory': '限制上下文长度，清理中期记忆',
-        'evolve': '减少演化记录频率，使用批量写入',
-    }
-    return suggestions.get(component, '需要进一步分析')
-
-if action == 'analyze':
-    # 运行瓶颈分析
-    metrics = collect_metrics()
-
-    # 存储采样
-    for m in metrics:
-        conn.execute('''
-            INSERT INTO performance_samples (timestamp, component, metric_name, metric_value, threshold, status)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (int(time.time()), m['component'], m['metricName'], m['value'], m['threshold'], m['status']))
-
-    bottlenecks = analyze_bottlenecks(metrics)
-    overall = 'critical' if len(bottlenecks) > 3 else ('warning' if bottlenecks else 'healthy')
-
-    result = {
-        'status': overall,
-        'bottlenecks': bottlenecks[:10],
-        'bottleneckCount': len(bottlenecks),
-        'metrics': [{
-            'component': m['component'],
-            'metric': m['metricName'],
-            'value': round(m['value']),
-            'status': m['status'],
-        } for m in metrics],
-        'timestamp': int(time.time()),
-    }
-    conn.commit()
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'history':
-    # 查看历史瓶颈
-    rows = conn.execute('''
-        SELECT timestamp, component, metric_name, metric_value, status
-        FROM performance_samples
-        WHERE status = 'warning'
-        ORDER BY timestamp DESC LIMIT 30
-    ''').fetchall()
-
-    history = [{
-        'time': r[0], 'component': r[1], 'metric': r[2],
-        'value': round(r[3]), 'status': r[4],
-    } for r in rows]
-
-    print(json.dumps({'history': history, 'count': len(history)}, ensure_ascii=False))
-
-elif action == 'thresholds':
-    # 查看所有阈值设置
-    thresholds = {}
-    for name, thresh in THRESHOLDS.items():
-        thresholds[name] = {
-            'component': thresh['component'],
-            'maxMs': thresh['maxMs'],
-            'severity': thresh['severity'],
-        }
-    print(json.dumps({'thresholds': thresholds, 'count': len(thresholds)}, ensure_ascii=False))
-
-elif action == 'cleanup':
-    # 清理旧采样数据
-    cutoff = int(time.time()) - 7 * 86400
-    before = conn.execute('SELECT COUNT(*) FROM performance_samples').fetchone()[0]
-    conn.execute('DELETE FROM performance_samples WHERE timestamp < ?', (cutoff,))
-    conn.commit()
-    after = conn.execute('SELECT COUNT(*) FROM performance_samples').fetchone()[0]
-    print(json.dumps({'before': before, 'after': after, 'removed': before - after}, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'analyze|history|thresholds|cleanup'}, ensure_ascii=False))
-
-conn.close()
-PY
-}
-
-# ========================================================================
-# 第6层 - 多模型协同质量评估（独立模块）
-# ========================================================================
-openclaw_ai_stack_quality_evaluator() {
-  local action="${1:-evaluate}" eval_data="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$eval_data" "$SKPL_AI_STACK_ROOT/quality" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, os, time, hashlib, sqlite3, re
-from pathlib import Path
-
-action = sys.argv[1]
-eval_data = sys.argv[2] if len(sys.argv) > 2 else ''
-quality_dir = Path(sys.argv[3])
-config_path = Path(sys.argv[4])
-quality_dir.mkdir(parents=True, exist_ok=True)
-
-quality_db = quality_dir / "quality-eval.sqlite3"
-
-def init_db():
-    conn = sqlite3.connect(str(quality_db), timeout=10)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS quality_scores (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            eval_id TEXT UNIQUE,
-            model_name TEXT,
-            task_type TEXT,
-            prompt TEXT,
-            response TEXT,
-            scores_json TEXT,
-            evaluator_notes TEXT,
-            created_at INTEGER,
-            total_score REAL DEFAULT 0
-        )
-    ''')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_qs_model ON quality_scores(model_name)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_qs_task ON quality_scores(task_type)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_qs_score ON quality_scores(total_score)')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS model_leaderboard (
-            model_name TEXT PRIMARY KEY,
-            avg_score REAL DEFAULT 0,
-            eval_count INTEGER DEFAULT 0,
-            best_task TEXT,
-            updated_at INTEGER
-        )
-    ''')
-    conn.commit()
-    return conn
-
-conn = init_db()
-
-# 评估维度定义
-EVAL_DIMENSIONS = {
-    'accuracy': {'weight': 0.30, 'description': '准确性 - 回答是否事实正确'},
-    'relevance': {'weight': 0.25, 'description': '相关性 - 回答是否切合问题'},
-    'completeness': {'weight': 0.15, 'description': '完整性 - 回答是否全面'},
-    'clarity': {'weight': 0.10, 'description': '清晰度 - 表达是否清晰易懂'},
-    'creativity': {'weight': 0.10, 'description': '创造性 - 是否有独特见解'},
-    'efficiency': {'weight': 0.05, 'description': '效率 - token使用是否精简'},
-    'formatting': {'weight': 0.05, 'description': '格式 - 回答结构是否良好'},
-}
-
-def heuristic_score(prompt, response, model_name):
-    """基于启发式规则进行评分（无外部评估器时的后备方案）"""
-    scores = {}
-    explanations = []
-
-    # 准确性: 检查response中是否包含prompt的关键词
-    prompt_keywords = set(re.findall(r'[\u4e00-\u9fff\w]+', prompt.lower()))
-    resp_keywords = set(re.findall(r'[\u4e00-\u9fff\w]+', response.lower()))
-    if prompt_keywords:
-        overlap = len(prompt_keywords & resp_keywords) / max(len(prompt_keywords), 1)
-        scores['accuracy'] = min(1.0, 0.5 + overlap * 0.5)
-    else:
-        scores['accuracy'] = 0.7
-    explanations.append(f'accuracy: keyword overlap')
-
-    # 相关性: 检查response长度是否合理
-    resp_len = len(response)
-    prompt_len = len(prompt)
-    ratio = resp_len / max(prompt_len, 1)
-    if 0.5 <= ratio <= 5:
-        scores['relevance'] = 0.85
-    elif ratio < 0.5:
-        scores['relevance'] = 0.5
-    else:
-        scores['relevance'] = 0.7
-    explanations.append(f'relevance: length ratio {round(ratio, 1)}')
-
-    # 完整性
-    if resp_len > 100:
-        scores['completeness'] = 0.8
-    elif resp_len > 50:
-        scores['completeness'] = 0.6
-    else:
-        scores['completeness'] = 0.4
-    explanations.append(f'completeness: response length {resp_len}')
-
-    # 清晰度: 检查是否有结构化元素
-    has_structure = bool(re.search(r'[#\-\*1-9]\.?\s', response))
-    scores['clarity'] = 0.85 if has_structure else 0.65
-    explanations.append(f'clarity: structure {"yes" if has_structure else "no"}')
-
-    # 创造性: 检查是否有代码块或列表等丰富格式
-    has_code = '```' in response
-    has_list = bool(re.search(r'^\s*[-*]\s', response, re.MULTILINE))
-    scores['creativity'] = 0.8 if (has_code or has_list) else 0.6
-    explanations.append(f'creativity: code/list {"yes" if (has_code or has_list) else "no"}')
-
-    # 效率: token使用效率
-    if resp_len < 500:
-        scores['efficiency'] = 0.9
-    elif resp_len < 2000:
-        scores['efficiency'] = 0.75
-    else:
-        scores['efficiency'] = 0.55
-    explanations.append(f'efficiency: {resp_len} chars')
-
-    # 格式
-    scores['formatting'] = 0.85 if has_structure else 0.6
-    explanations.append(f'formatting: {"good" if has_structure else "basic"}')
-
-    # 计算加权总分
-    total = sum(scores.get(dim, 0) * info['weight'] for dim, info in EVAL_DIMENSIONS.items())
-
-    return {
-        'dimensions': scores,
-        'totalScore': round(total, 3),
-        'explanations': explanations,
-    }
-
-if action == 'evaluate':
-    # 评估一组模型的回答质量
-    try:
-        data = json.loads(eval_data) if eval_data else {}
-    except json.JSONDecodeError:
-        data = {'prompt': eval_data}
-
-    evaluations = []
-    models_data = data.get('models', [])
-
-    if not models_data:
-        # 评估单个回答
-        prompt = data.get('prompt', '')
-        response = data.get('response', '') or data.get('answer', '')
-        model = data.get('model', 'unknown')
-        task_type = data.get('taskType', 'general')
-
-        if prompt and response:
-            scored = heuristic_score(prompt, response, model)
-            total = scored['totalScore']
-
-            conn.execute('''
-                INSERT OR REPLACE INTO quality_scores
-                (eval_id, model_name, task_type, prompt, response, scores_json, evaluator_notes, created_at, total_score)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                hashlib.md5(f"{model}:{prompt[:100]}".encode()).hexdigest()[:8],
-                model, task_type,
-                prompt[:500], response[:1000],
-                json.dumps(scored, ensure_ascii=False),
-                'heuristic evaluation',
-                int(time.time()),
-                total,
-            ))
-
-            # 更新排行榜
-            existing = conn.execute('SELECT avg_score, eval_count FROM model_leaderboard WHERE model_name=?', (model,)).fetchone()
-            if existing:
-                new_count = existing[1] + 1
-                new_avg = (existing[0] * existing[1] + total) / new_count
-                conn.execute('UPDATE model_leaderboard SET avg_score=?, eval_count=?, updated_at=? WHERE model_name=?',
-                             (round(new_avg, 3), new_count, int(time.time()), model))
-            else:
-                conn.execute('INSERT INTO model_leaderboard (model_name, avg_score, eval_count, updated_at) VALUES (?, ?, 1, ?)',
-                             (model, round(total, 3), int(time.time())))
-
-            conn.commit()
-            evaluations.append({
-                'model': model, 'taskType': task_type,
-                'scores': scored['dimensions'],
-                'totalScore': total,
-                'explanations': scored['explanations'],
-            })
-    else:
-        # 批量评估多个模型
-        for mdata in models_data:
-            prompt = mdata.get('prompt', '')
-            response = mdata.get('response', '') or mdata.get('answer', '')
-            model = mdata.get('model', 'unknown')
-            task_type = mdata.get('taskType', 'general')
-
-            if prompt and response:
-                scored = heuristic_score(prompt, response, model)
-                total = scored['totalScore']
-                evaluations.append({
-                    'model': model, 'taskType': task_type,
-                    'scores': scored['dimensions'],
-                    'totalScore': total,
-                })
-
-    # 排序
-    evaluations.sort(key=lambda e: e['totalScore'], reverse=True)
-    result = {
-        'evaluations': evaluations,
-        'count': len(evaluations),
-        'bestModel': evaluations[0]['model'] if evaluations else '-',
-        'avgScore': round(sum(e['totalScore'] for e in evaluations) / max(len(evaluations), 1), 3),
-    }
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'leaderboard':
-    # 查看模型排行榜
-    rows = conn.execute('''
-        SELECT model_name, avg_score, eval_count, best_task, updated_at
-        FROM model_leaderboard
-        ORDER BY avg_score DESC
-    ''').fetchall()
-
-    leaderboard = [{
-        'rank': i + 1,
-        'model': r[0],
-        'avgScore': r[1],
-        'evalCount': r[2],
-        'bestTask': r[3] or '-',
-        'updatedAt': r[4],
-    } for i, r in enumerate(rows)]
-
-    # 计算全局统计
-    total_evals = conn.execute('SELECT COUNT(*) FROM quality_scores').fetchone()[0]
-    models_count = conn.execute('SELECT COUNT(DISTINCT model_name) FROM quality_scores').fetchone()[0]
-
-    print(json.dumps({
-        'leaderboard': leaderboard,
-        'totalEvaluations': total_evals,
-        'uniqueModels': models_count,
-        'dimensions': {k: v['description'] for k, v in EVAL_DIMENSIONS.items()},
-    }, ensure_ascii=False))
-
-elif action == 'history':
-    # 查看评估历史
-    model_filter = sys.argv[3] if len(sys.argv) > 3 else ''
-    where = f"WHERE model_name = '{model_filter}'" if model_filter else ''
-    rows = conn.execute(f'''
-        SELECT model_name, task_type, total_score, created_at, prompt
-        FROM quality_scores {where}
-        ORDER BY created_at DESC LIMIT 30
-    ''').fetchall()
-
-    history = [{
-        'model': r[0], 'taskType': r[1],
-        'score': r[2], 'time': r[3],
-        'prompt': r[4][:100] if r[4] else '',
-    } for r in rows]
-
-    print(json.dumps({'history': history, 'count': len(history)}, ensure_ascii=False))
-
-elif action == 'compare':
-    # 对比多个模型
-    model_names = sys.argv[3] if len(sys.argv) > 3 else ''
-    if not model_names:
-        print(json.dumps({'error': 'comma-separated model names required'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    models = [m.strip() for m in model_names.split(',')]
-    comparison = {}
-    for model in models:
-        rows = conn.execute('''
-            SELECT AVG(total_score), COUNT(*), task_type
-            FROM quality_scores WHERE model_name=?
-            GROUP BY task_type
-        ''', (model,)).fetchall()
-
-        model_data = {'byTask': {}, 'overallAvg': 0, 'totalEvals': 0}
-        total = 0
-        count = 0
-        for r in rows:
-            model_data['byTask'][r[2] or 'general'] = {'avgScore': round(r[0], 3), 'count': r[1]}
-            total += r[0] * r[1]
-            count += r[1]
-        model_data['overallAvg'] = round(total / max(count, 1), 3)
-        model_data['totalEvals'] = count
-        comparison[model] = model_data
-
-    print(json.dumps({'comparison': comparison, 'models': models}, ensure_ascii=False))
-
-elif action == 'cleanup':
-    cutoff = int(time.time()) - 90 * 86400
-    before = conn.execute('SELECT COUNT(*) FROM quality_scores').fetchone()[0]
-    conn.execute('DELETE FROM quality_scores WHERE created_at < ?', (cutoff,))
-    conn.commit()
-    after = conn.execute('SELECT COUNT(*) FROM quality_scores').fetchone()[0]
-    print(json.dumps({'before': before, 'after': after, 'removed': before - after}, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'evaluate|leaderboard|history|compare|cleanup'}, ensure_ascii=False))
-
-conn.close()
-PY
-}
-
-# ========================================================================
-# 第6层 - 实时资源面板
-# ========================================================================
-openclaw_ai_stack_resource_dashboard() {
-  local action="${1:-snapshot}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$SKPL_AI_STACK_ROOT" <<'PY'
-import json, sys, os, time, subprocess, shutil
-from pathlib import Path
-
-action = sys.argv[1]
-stack_root = Path(sys.argv[2])
-dashboard_dir = stack_root / "dashboard"
-dashboard_dir.mkdir(parents=True, exist_ok=True)
-
-def get_cpu_usage():
-    try:
-        with open('/proc/stat', 'r') as f:
-            line = f.readline()
-            fields = [int(x) for x in line.split()[1:]]
-            total = sum(fields)
-            idle = fields[3]
-            used = total - idle
-            if total > 0:
-                return round(used / total * 100, 1)
-    except Exception:
-        pass
-    return 0
-
-def get_memory():
-    mem = {'totalMb': 0, 'availableMb': 0, 'usedMb': 0, 'percentUsed': 0}
-    try:
-        with open('/proc/meminfo', 'r') as f:
-            for line in f:
-                if line.startswith('MemTotal:'):
-                    mem['totalMb'] = int(line.split()[1]) // 1024
-                elif line.startswith('MemAvailable:'):
-                    mem['availableMb'] = int(line.split()[1]) // 1024
-        if mem['totalMb'] > 0:
-            mem['usedMb'] = mem['totalMb'] - mem['availableMb']
-            mem['percentUsed'] = round(mem['usedMb'] / mem['totalMb'] * 100, 1)
-    except Exception:
-        pass
-    return mem
-
-def get_gpu():
-    try:
-        o = subprocess.check_output(
-            ['nvidia-smi', '--query-gpu=name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu,power.draw',
-             '--format=csv,noheader,nounits'], text=True, timeout=10
-        ).strip()
-        parts = [p.strip() for p in o.split(',')]
-        return {
-            'name': parts[0] if len(parts) > 0 else 'N/A',
-            'memTotalMb': int(parts[1]) if len(parts) > 1 else 0,
-            'memUsedMb': int(parts[2]) if len(parts) > 2 else 0,
-            'memFreeMb': int(parts[3]) if len(parts) > 3 else 0,
-            'utilPercent': float(parts[4]) if len(parts) > 4 else 0,
-            'tempC': float(parts[5]) if len(parts) > 5 else 0,
-            'powerW': float(parts[6]) if len(parts) > 6 else 0,
-        }
-    except Exception:
-        return None
-
-def get_ai_stack_resources():
-    """获取AI栈内资源使用情况"""
-    resources = {'modelsLoaded': [], 'cacheStats': {}, 'activeExperts': []}
-
-    # 检查ollama加载的模型
-    try:
-        r = subprocess.run(['ollama', 'ps'], capture_output=True, text=True, timeout=10)
-        for line in r.stdout.strip().split('\n')[1:]:
-            parts = line.split()
-            if parts:
-                model_name = parts[0]
-                resources['modelsLoaded'].append({
-                    'name': model_name,
-                    'size': parts[1] if len(parts) > 1 else '?',
-                    'uptime': ' '.join(parts[2:4]) if len(parts) > 3 else '?',
-                })
-    except Exception:
-        pass
-
-    # 缓存统计
-    cache_dir = stack_root / 'cache'
-    if cache_dir.exists():
-        for cd in cache_dir.iterdir():
-            if cd.is_dir():
-                files = list(cd.rglob('*'))
-                resources['cacheStats'][cd.name] = {
-                    'files': len([f for f in files if f.is_file()]),
-                    'sizeMB': round(sum(f.stat().st_size for f in files if f.is_file()) / (1024*1024), 2),
-                }
-
-    # 专家状态
-    expert_state = stack_root / 'state' / 'expert-state.json'
-    if expert_state.exists():
-        try:
-            expert_data = json.loads(expert_state.read_text(encoding='utf-8'))
-            resources['activeExperts'] = list(expert_data.get('activeExperts', {}).keys())[:10] if isinstance(expert_data, dict) else []
-        except Exception:
-            pass
-
-    return resources
-
-if action == 'snapshot':
-    # 获取实时资源快照
-    cpu = get_cpu_usage()
-    memory = get_memory()
-    gpu = get_gpu()
-    ai_resources = get_ai_stack_resources()
-
-    # 计算健康评分
-    health_score = 100
-    warnings = []
-
-    if memory['percentUsed'] > 90:
-        health_score -= 20
-        warnings.append('内存使用率过高')
-    elif memory['percentUsed'] > 80:
-        health_score -= 10
-
-    if gpu and gpu['memFreeMb'] < 1000:
-        health_score -= 15
-        warnings.append('GPU显存不足')
-    if gpu and gpu['tempC'] > 80:
-        health_score -= 10
-        warnings.append('GPU温度过高')
-    if cpu > 90:
-        health_score -= 10
-        warnings.append('CPU使用率过高')
-
-    snapshot = {
-        'timestamp': int(time.time()),
-        'healthScore': max(0, health_score),
-        'warnings': warnings,
-        'cpu': {'percent': cpu},
-        'memory': memory,
-        'gpu': gpu,
-        'aiStack': {
-            'modelsLoaded': ai_resources.get('modelsLoaded', []),
-            'modelsCount': len(ai_resources.get('modelsLoaded', [])),
-            'cacheStats': ai_resources.get('cacheStats', {}),
-            'activeExperts': ai_resources.get('activeExperts', []),
-        },
-        'system': {
-            'hostname': os.uname().nodename if hasattr(os, 'uname') else 'unknown',
-            'pythonVersion': sys.version.split()[0],
-        },
-    }
-
-    # 存储历史快照
-    snapshots_file = dashboard_dir / 'snapshots.json'
-    history = []
-    if snapshots_file.exists():
-        try:
-            history = json.loads(snapshots_file.read_text(encoding='utf-8'))
-        except Exception:
-            history = []
-    history.append({
-        'ts': snapshot['timestamp'],
-        'health': snapshot['healthScore'],
-        'cpu': cpu,
-        'mem': memory['percentUsed'],
-        'gpuMem': gpu['memFreeMb'] if gpu else 0,
-    })
-    history = history[-100:]  # 保留最近100个快照
-    snapshots_file.write_text(json.dumps(history, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-
-    print(json.dumps(snapshot, ensure_ascii=False))
-
-elif action == 'trend':
-    # 查看资源趋势
-    snapshots_file = dashboard_dir / 'snapshots.json'
-    if not snapshots_file.exists():
-        print(json.dumps({'error': 'no snapshots available', 'history': []}, ensure_ascii=False))
-        raise SystemExit(0)
-
-    history = json.loads(snapshots_file.read_text(encoding='utf-8'))
-    if len(history) < 2:
-        print(json.dumps({'history': history, 'trends': {}, 'count': len(history)}, ensure_ascii=False))
-        raise SystemExit(0)
-
-    # 计算趋势
-    first = history[0]
-    last = history[-1]
-    time_span_min = max((last['ts'] - first['ts']) / 60, 1)
-
-    trends = {
-        'health': {'start': first['health'], 'end': last['health'], 'change': last['health'] - first['health']},
-        'cpu': {'start': first['cpu'], 'end': last['cpu'], 'change': last['cpu'] - first['cpu']},
-        'memory': {'start': first['mem'], 'end': last['mem'], 'change': last['mem'] - first['mem']},
-        'timeSpanMin': round(time_span_min),
-        'snapshots': len(history),
-    }
-
-    # 平均健康评分
-    avg_health = round(sum(h['health'] for h in history) / len(history), 1)
-    min_health = min(h['health'] for h in history)
-    max_health = max(h['health'] for h in history)
-
-    trends['healthStats'] = {'avg': avg_health, 'min': min_health, 'max': max_health}
-
-    print(json.dumps({'history': history[-20:], 'trends': trends, 'count': len(history)}, ensure_ascii=False))
-
-elif action == 'alerts':
-    # 检查当前是否有需要关注的告警
-    cpu = get_cpu_usage()
-    memory = get_memory()
-    gpu = get_gpu()
-
-    alerts = []
-    if memory['percentUsed'] > 95:
-        alerts.append({'level': 'critical', 'component': 'memory', 'message': f'内存使用率 {memory["percentUsed"]}%, 可用 {memory["availableMb"]}MB'})
-    elif memory['percentUsed'] > 85:
-        alerts.append({'level': 'warning', 'component': 'memory', 'message': f'内存使用率 {memory["percentUsed"]}%'})
-
-    if gpu:
-        if gpu['memFreeMb'] < 500:
-            alerts.append({'level': 'critical', 'component': 'gpu', 'message': f'GPU显存仅剩 {gpu["memFreeMb"]}MB'})
-        elif gpu['memFreeMb'] < 1000:
-            alerts.append({'level': 'warning', 'component': 'gpu', 'message': f'GPU显存不足 {gpu["memFreeMb"]}MB'})
-        if gpu['tempC'] > 85:
-            alerts.append({'level': 'critical', 'component': 'gpu_temp', 'message': f'GPU温度 {gpu["tempC"]}°C'})
-
-    if cpu > 95:
-        alerts.append({'level': 'warning', 'component': 'cpu', 'message': f'CPU使用率 {cpu}%'})
-
-    print(json.dumps({
-        'alerts': alerts,
-        'count': len(alerts),
-        'requiresAttention': any(a['level'] == 'critical' for a in alerts),
-        'timestamp': int(time.time()),
-    }, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'snapshot|trend|alerts'}, ensure_ascii=False))
-PY
-}
-
 skpl_build_no_proxy_rule() {
   local extra_hosts="${1:-}"
   local merged
@@ -1369,30 +331,9 @@ skpl_collect_domestic_provider_hosts_from_config() {
   local config_file="$1"
   [ -s "$config_file" ] || return 0
   python3 - "$config_file" <<'PY'
-import json, re, sys
+import json
+import sys
 from urllib.parse import urlparse
-
-raw = open(sys.argv[1], 'r', encoding='utf-8').read()
-# JSON5 compat: strip // comments
-_lines = []
-in_s = False; sc = None
-for _l in raw.split('\n'):
-    _i = 0
-    while _i < len(_l):
-        ch = _l[_i]
-        if not in_s:
-            if ch in "\"'": in_s = True; sc = ch
-            elif ch == '/' and _i+1 < len(_l) and _l[_i+1] == '/': _l = _l[:_i]; break
-            _i += 1
-        else:
-            if ch == '\\' and _i+1 < len(_l): _i += 2; continue
-            elif ch == sc: in_s = False
-            _i += 1
-    _lines.append(_l)
-raw = '\n'.join(_lines)
-raw = re.sub(r'/\*.*?\*/', '', raw, flags=re.DOTALL)
-raw = re.sub(r',(\s*[}\]])', r'\1', raw)
-data = json.loads(raw)
 
 rules = [
     'model-square.app.baizhi.cloud', '.baizhi.cloud', '.aliyuncs.com', '.modelscope.cn',
@@ -1413,6 +354,9 @@ def is_domestic(host: str) -> bool:
         elif host == rule or host.endswith('.' + rule):
             return True
     return False
+
+with open(sys.argv[1], 'r', encoding='utf-8') as f:
+    data = json.load(f)
 
 providers = (((data or {}).get('models') or {}).get('providers') or {})
 hosts = []
@@ -1604,7 +548,7 @@ EOF_SKPL_GATEWAY_SERVICE
 }
 
 openclaw_ensure_local_gateway_config() {
-  local config_file gateway_port tmp_json
+  local config_file gateway_port
   config_file=$(openclaw_get_config_file)
   gateway_port="${OPENCLAW_GATEWAY_PORT:-18789}"
   mkdir -p "$(dirname "$config_file")"
@@ -1615,24 +559,20 @@ openclaw_ensure_local_gateway_config() {
     openclaw config set gateway.port "$gateway_port" --strict-json >/dev/null 2>&1 || true
   fi
 
-  # JSON5 safe: pre-process config to temp JSON before reading
-  tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-  openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-  python3 - "$config_file" "$tmp_json" "$gateway_port" <<'PY'
+  python3 - "$config_file" "$gateway_port" <<'PY'
 import json, secrets, sys
 from pathlib import Path
 
-out_path = Path(sys.argv[1])      # original config (write target)
-cfg_path = Path(sys.argv[2])      # JSON5-safe temp copy (read source)
+path = Path(sys.argv[1])
 try:
-    port = int(sys.argv[3])
+    port = int(sys.argv[2])
 except Exception:
     port = 18789
 
 data = {}
-if cfg_path.exists() and cfg_path.stat().st_size > 0:
+if path.exists() and path.stat().st_size > 0:
     try:
-        data = json.loads(cfg_path.read_text(encoding='utf-8'))
+        data = json.loads(path.read_text(encoding='utf-8'))
         if not isinstance(data, dict):
             data = {}
     except Exception:
@@ -1665,12 +605,10 @@ auth['token'] = token
 
 gateway.pop('controlUi', None)
 
-out_path.parent.mkdir(parents=True, exist_ok=True)
-out_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
-  rm -f "$tmp_json"
   mkdir -p "$HOME/.openclaw/workspace" "$HOME/.openclaw/workspace/skills" "$HOME/.openclaw/workspace/memory"
-  # 第二个 Python 块：刚才写入的是纯 JSON，直接读取没问题
   python3 - "$config_file" "$HOME/.openclaw/gateway.token" <<'PY'
 import json, sys
 from pathlib import Path
@@ -1763,89 +701,6 @@ openclaw_get_config_file() {
 
 openclaw_default_memory_model_path() {
   printf '%s\n' "${HOME}/.openclaw/models/embedding/embeddinggemma-300M-Q8_0.gguf"
-}
-
-# JSON5 -> JSON: 移除注释和尾逗号，使 openclaw 写入的 JSON5 可被 json.loads 解析
-# OpenClaw 2026.6.1 写入的配置文件包含 // 注释和尾逗号，Python json 标准库无法解析
-openclaw_json5_to_json() {
-  local input_file="$1"
-  local output_file="$2"
-  python3 - "$input_file" "$output_file" <<'PY'
-import re, sys
-
-text = open(sys.argv[1], 'r', encoding='utf-8').read()
-# 移除单行注释 (// ...) — 但保留 URL 中的 //
-lines = []
-for line in text.split('\n'):
-    in_string = False
-    string_char = None
-    i = 0
-    result = []
-    while i < len(line):
-        ch = line[i]
-        if in_string:
-            result.append(ch)
-            if ch == '\\' and i + 1 < len(line):
-                result.append(line[i + 1])
-                i += 2
-                continue
-            if ch == string_char:
-                in_string = False
-            i += 1
-            continue
-        if ch in ('"', "'"):
-            in_string = True
-            string_char = ch
-            result.append(ch)
-            i += 1
-            continue
-        if ch == '/' and i + 1 < len(line) and line[i + 1] == '/':
-            break  # 行注释，跳过剩余部分
-        result.append(ch)
-        i += 1
-    lines.append(''.join(result))
-text = '\n'.join(lines)
-
-# 移除块注释 (/* ... */)
-text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
-
-# 移除尾逗号 (在 ] 或 } 之前)
-text = re.sub(r',(\s*[}\]])', r'\1', text)
-
-# 移除空行和额外空白
-text = re.sub(r'\n\s*\n', '\n', text)
-
-open(sys.argv[2], 'w', encoding='utf-8').write(text)
-PY
-}
-
-# 安全加载 openclaw 配置（兼容 JSON5）
-openclaw_load_config_safe() {
-  local config_file="$1"
-  local tmp_json="${SKPL_HOME}/openclaw-config-tmp.json"
-  if [ ! -f "$config_file" ]; then
-    echo '{}'
-    return 0
-  fi
-  openclaw_json5_to_json "$config_file" "$tmp_json"
-  python3 -c "import json,sys; print(json.dumps(json.load(open('$tmp_json','r'))))"
-  rm -f "$tmp_json" 2>/dev/null || true
-}
-
-# 安全写入 openclaw 配置（保留 JSON 格式）
-openclaw_save_config_safe() {
-  local config_file="$1"
-  local json_str="$2"
-  local tmp_json="${SKPL_HOME}/openclaw-config-tmp.json"
-  printf '%s\n' "$json_str" > "$tmp_json"
-  python3 -c "
-import json
-cfg = json.load(open('$tmp_json','r'))
-with open('$config_file','w') as f:
-    json.dump(cfg, f, indent=2, ensure_ascii=False)
-    f.write('\n')
-"
-  rm -f "$tmp_json" 2>/dev/null || true
 }
 
 log_msg() {
@@ -2515,7 +1370,7 @@ _skpl_detect_proxy() {
     export no_proxy="localhost,127.0.0.1,::1,.local,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.aliyun.com,.tsinghua.edu.cn,.modelscope.cn,.deepseek.com"
   fi
 }
-_skpl_detect_proxy "$PROXY_PORT" || true  # 代理检测失败不影响网关启动
+_skpl_detect_proxy "$PROXY_PORT"
 
 CONFIG_FILE="${HOME}/.openclaw/openclaw.json"
 DYNAMIC_NO_PROXY="$(collect_domestic_hosts_from_config "$CONFIG_FILE" 2>/dev/null || true)"
@@ -3075,7 +1930,7 @@ default_config = {
         'layout': {
             'exactMatchMb': 128,
             'semanticMb': 256,
-            'generatedResultMb': 512,
+            'generatedResultMb': 1024,
             'toolCallMb': 128,
             'predictiveMb': 256,
             'codeSnippetMb': 128,
@@ -3092,13 +1947,13 @@ default_config = {
         'crossDeviceSync': 'optional',
     },
     'routing': {
-        'defaultTextModel': 'ollama/qwen2.5:14b',
-        'defaultVisionModel': 'ollama/llama3.2-vision:11b',
+        'defaultTextModel': 'ollama/qwen2.5:7b',
+        'defaultVisionModel': 'google/gemini-2.5-pro',
         'defaultSearchModel': 'google/gemini-2.5-flash',
-        'defaultCodeModel': 'ollama/deepseek-coder-v2:16b',
+        'defaultCodeModel': 'ollama/qwen3-coder',
         'fallbackModels': {
-            'emergency': 'ollama/qwen3:0.6b',
-            'entry': 'ollama/qwen3:0.6b',
+            'emergency': 'ollama/qwen3:0.3b',
+            'entry': 'ollama/qwen3:0.5b',
             'advanced': 'ollama/qwen3:1.8b',
             'cpuVision': 'local-ocr',
             'cpuCode': 'ollama/qwen3:1.8b'
@@ -3112,68 +1967,68 @@ default_config = {
         'baseRoles': ['general', 'document', 'tool', 'compression', 'routing-assistant', 'memory-integration'],
         'byTier': {
             'emergency-cpu': {
-                'general': {'default': 'ollama/qwen3:0.6b', 'alternatives': ['ollama/qwen3:0.6b']},
-                'code': {'default': 'cloud/code-proxy', 'alternatives': ['ollama/qwen3:0.6b']},
+                'general': {'default': 'ollama/qwen3:0.3b', 'alternatives': ['ollama/qwen3:0.5b']},
+                'code': {'default': 'ollama/qwen3:0.3b', 'alternatives': ['ollama/qwen3:0.5b']},
                 'vision': {'default': 'cloud/vision-proxy', 'alternatives': ['local-ocr']},
             },
             'entry-cpu': {
-                'general': {'default': 'ollama/qwen3:0.6b', 'alternatives': ['ollama/llama3.2:1b']},
-                'code': {'default': 'cloud/code-proxy', 'alternatives': ['ollama/qwen2.5-coder:1.5b']},
+                'general': {'default': 'ollama/qwen3:0.5b', 'alternatives': ['ollama/llama3.2:1b']},
+                'code': {'default': 'ollama/qwen3:0.5b', 'alternatives': ['ollama/qwen2.5-coder:1.5b']},
                 'vision': {'default': 'cloud/vision-proxy', 'alternatives': ['local-ocr']},
             },
             'advanced-cpu': {
-                'general': {'default': 'ollama/qwen3:1.8b', 'alternatives': ['ollama/llama3.2:3b', 'ollama/phi3:mini']},
-                'code': {'default': 'ollama/qwen2.5-coder:1.5b', 'alternatives': ['ollama/deepseek-coder:1.5b']},
+                'general': {'default': 'ollama/qwen3:1.8b', 'alternatives': ['ollama/llama3.2:3b', 'ollama/qwen2.5:3b']},
+                'code': {'default': 'ollama/qwen2.5-coder:1.5b', 'alternatives': ['ollama/qwen3-coder']},
                 'vision': {'default': 'local-ocr', 'alternatives': ['cloud/vision-proxy']},
             },
             'entry-gpu': {
                 'general': {'default': 'ollama/llama3.2:3b', 'alternatives': ['ollama/qwen2.5:3b', 'ollama/phi3:mini']},
-                'code': {'default': 'ollama/deepseek-coder:1.5b', 'alternatives': ['ollama/qwen2.5-coder:1.5b', 'ollama/codellama:7b']},
+                'code': {'default': 'ollama/qwen2.5-coder:1.5b', 'alternatives': ['ollama/deepseek-coder:6.7b']},
                 'vision': {'default': 'ollama/qwen2-vl:2b', 'alternatives': ['ollama/llava:7b', 'local-ocr']},
             },
             'advanced-gpu': {
                 'general': {'default': 'ollama/llama3.2:3b', 'alternatives': ['ollama/qwen2.5:3b', 'ollama/phi3:mini']},
-                'code': {'default': 'ollama/codellama:7b', 'alternatives': ['ollama/qwen2.5-coder:7b', 'ollama/deepseek-coder:6.7b']},
-                'vision': {'default': 'ollama/qwen2-vl:2b', 'alternatives': ['ollama/llama3.2-vision:3b', 'ollama/llava:7b']},
+                'code': {'default': 'ollama/deepseek-coder:6.7b', 'alternatives': ['ollama/qwen2.5-coder:7b']},
+                'vision': {'default': 'ollama/qwen2-vl:2b', 'alternatives': ['ollama/llava:7b']},
             },
             'golden-gpu': {
-                'general': {'default': 'ollama/qwen2.5:14b', 'alternatives': ['ollama/llama3.1:8b', 'ollama/mistral:7b']},
-                'code': {'default': 'ollama/deepseek-coder-v2:16b', 'alternatives': ['ollama/qwen2.5-coder:14b', 'ollama/codellama:13b']},
-                'vision': {'default': 'ollama/llama3.2-vision:11b', 'alternatives': ['ollama/qwen2-vl:7b', 'ollama/internvl2:8b']},
+                'general': {'default': 'ollama/qwen2.5:7b', 'alternatives': ['ollama/llama3.1:8b', 'ollama/mistral:7b']},
+                'code': {'default': 'ollama/qwen3-coder', 'alternatives': ['ollama/qwen2.5-coder:7b', 'ollama/deepseek-coder:6.7b']},
+                'vision': {'default': 'ollama/gemma3:4b', 'alternatives': ['ollama/llava:7b', 'ollama/minicpm-v']},
             },
             'flagship-gpu': {
                 'general': {'default': 'ollama/qwen2.5:14b', 'alternatives': ['ollama/llama3.1:8b', 'ollama/mistral:7b']},
-                'code': {'default': 'ollama/deepseek-coder-v2:16b', 'alternatives': ['ollama/codellama:13b', 'ollama/starcoder2:7b']},
-                'vision': {'default': 'ollama/qwen2-vl:7b', 'alternatives': ['ollama/llama3.2-vision:11b', 'ollama/internvl2:8b']},
+                'code': {'default': 'ollama/qwen3-coder', 'alternatives': ['ollama/qwen2.5-coder:7b', 'ollama/deepseek-coder:6.7b']},
+                'vision': {'default': 'ollama/gemma3:4b', 'alternatives': ['ollama/llava:7b', 'ollama/minicpm-v']},
             },
             'workstation': {
-                'general': {'default': 'ollama/llama3.1:70b', 'alternatives': ['ollama/qwen2.5:72b', 'ollama/mistral-nemo:12b']},
-                'code': {'default': 'ollama/deepseek-coder-v2:16b', 'alternatives': ['ollama/codellama:70b', 'ollama/starcoder2:15b']},
-                'vision': {'default': 'ollama/qwen2-vl:14b', 'alternatives': ['ollama/llama3.2-vision:11b', 'ollama/internvl2:12b']},
+                'general': {'default': 'ollama/qwen2.5:14b', 'alternatives': ['ollama/llama3.1:8b', 'ollama/mistral:7b']},
+                'code': {'default': 'ollama/qwen3-coder', 'alternatives': ['ollama/qwen2.5-coder:7b', 'ollama/deepseek-coder:6.7b']},
+                'vision': {'default': 'ollama/gemma3:4b', 'alternatives': ['ollama/llava:7b', 'ollama/minicpm-v']},
             },
             'server': {
-                'general': {'default': 'ollama/llama3.1:70b', 'alternatives': ['ollama/qwen2.5:72b', 'ollama/mistral-nemo:12b']},
-                'code': {'default': 'ollama/deepseek-coder-v2:16b', 'alternatives': ['ollama/codellama:70b', 'ollama/starcoder2:15b']},
-                'vision': {'default': 'ollama/qwen2-vl:14b', 'alternatives': ['ollama/llama3.2-vision:11b', 'ollama/internvl2:12b']},
+                'general': {'default': 'ollama/qwen2.5:14b', 'alternatives': ['ollama/llama3.1:8b', 'ollama/mistral:7b']},
+                'code': {'default': 'ollama/qwen3-coder', 'alternatives': ['ollama/qwen2.5-coder:7b', 'ollama/deepseek-coder:6.7b']},
+                'vision': {'default': 'ollama/gemma3:4b', 'alternatives': ['ollama/llava:7b', 'ollama/minicpm-v']},
             },
         },
     },
     'budget': {
-        'reserveGpuMb': 200,
+        'reserveGpuMb': 100,
         'reserveMemoryMb': 512,
-        'minFreeGpuMbForLocalExpert': 7200,
+        'minFreeGpuMbForLocalExpert': 4096,
         'minFreeMemoryMbForLocalExpert': 6144,
         'lowBatteryPercent': 25,
         'emergencyCleanupCooldownSeconds': 900,
-        'expertReloadThresholdGpuMb': 5000,
+        'expertReloadThresholdGpuMb': 3300,
         'expertReloadThresholdMemoryMb': 6144,
         'modelRequirementMb': {
-            'text': {'gpu': 7200, 'memory': 2048},
-            'code': {'gpu': 7200, 'memory': 2048},
-            'vision': {'gpu': 6600, 'memory': 2048},
-            'local': {'gpu': 1200, 'memory': 1024},
-            'search': {'gpu': 1200, 'memory': 1024},
-            'fallback': {'gpu': 1200, 'memory': 1024}
+            'text': {'gpu': 2867, 'memory': 2048},
+            'code': {'gpu': 2969, 'memory': 2048},
+            'vision': {'gpu': 3174, 'memory': 2048},
+            'local': {'gpu': 614, 'memory': 1024},
+            'search': {'gpu': 614, 'memory': 1024},
+            'fallback': {'gpu': 614, 'memory': 1024}
         }
     },
     'cloud': {
@@ -3241,26 +2096,6 @@ if path.exists():
         pass
 path.write_text(json.dumps(default_config, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 PY
-}
-
-# 缓存配额强制执行: 检查缓存目录大小，超出限制则按LRU淘汰
-openclaw_ai_stack_cache_enforce_quota() {
-  local cache_dir="$1" max_size_mb="${2:-128}"
-  [ -d "$cache_dir" ] || return 0
-  local current_size_mb
-  current_size_mb=$(du -sm "$cache_dir" 2>/dev/null | cut -f1)
-  [ -n "$current_size_mb" ] && [ "$current_size_mb" -gt 0 ] || return 0
-  if [ "$current_size_mb" -gt "$max_size_mb" ]; then
-    # 按修改时间排序，删除最旧的文件直到低于限制的80%
-    local target_mb=$((max_size_mb * 80 / 100))
-    find "$cache_dir" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | while IFS=' ' read -r ts filepath; do
-      [ -f "$filepath" ] || continue
-      rm -f "$filepath" 2>/dev/null || true
-      current_size_mb=$(du -sm "$cache_dir" 2>/dev/null | cut -f1)
-      [ "$current_size_mb" -le "$target_mb" ] && break
-    done
-  fi
-  return 0
 }
 
 openclaw_ai_stack_cache_key() {
@@ -3743,8 +2578,8 @@ openclaw_get_model_context_size() {
   [ -z "$model_id" ] && model_id=$(timeout 5 openclaw config get agents.defaults.models 2>/dev/null | head -1 | cut -d'"' -f2 || echo "")
   # Default context sizes for common models
   case "$model_id" in
-    *qwen3:0.6b*|*0.3b*) context_size=32768 ;;
-    *qwen3:0.6b*|*0.5b*) context_size=32768 ;;
+    *qwen3:0.3b*|*0.3b*) context_size=32768 ;;
+    *qwen3:0.5b*|*0.5b*) context_size=32768 ;;
     *qwen3:1.8b*|*1.8b*) context_size=32768 ;;
     *qwen2.5:7b*|*7b*|*llama3.2*) context_size=128000 ;;
     *qwen2.5:14b*|*14b*) context_size=128000 ;;
@@ -3983,108 +2818,6 @@ print('\n'.join(lines))
 PY
 }
 
-# ========================================================================
-# 第2层 - 长期上下文构建（独立封装）
-# ========================================================================
-openclaw_ai_stack_long_term_context_text() {
-  local query="$1" limit="${2:-5}"
-  openclaw_ai_stack_prepare
-  python3 - "$query" "$limit" "$SKPL_MEMORY_EXTENSION_CONFIG" "$SKPL_AI_STACK_STATE_DIR" "$SKPL_HYBRID_MEMORY_ROOT" <<'PY'
-import json, sys, sqlite3, time, re
-from pathlib import Path
-
-query = sys.argv[1]
-limit = int(sys.argv[2])
-config_path = Path(sys.argv[3])
-state_dir = Path(sys.argv[4])
-hybrid_memory_root = Path(sys.argv[5])
-
-# 尝试从多个可能的数据库位置加载长期记忆
-db_paths = [
-    hybrid_memory_root / "memory.db",
-    hybrid_memory_root / "hybrid-memory.sqlite3",
-    state_dir / "memory-extension.db",
-    state_dir / "memory.sqlite3",
-]
-
-all_entries = []
-
-for db_path in db_paths:
-    if not db_path.exists():
-        continue
-    try:
-        conn = sqlite3.connect(str(db_path), timeout=5)
-        # 尝试查询长期记忆表
-        tables_to_try = ['memory_entries', 'long_term_memory', 'memories', 'memory_items', 'knowledge_base']
-        for table in tables_to_try:
-            try:
-                # 尝试各种列名组合
-                cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
-                col_names = [c[1].lower() for c in cols]
-                has_content = any('content' in c or 'text' in c or 'summary' in c or 'value' in c for c in col_names)
-                has_time = any('time' in c or 'created' in c or 'timestamp' in c or 'date' in c for c in col_names)
-                if has_content and has_time:
-                    time_col = next(c for c in col_names if 'time' in c or 'created' in c or 'timestamp' in c or 'date' in c)
-                    content_col = next(c for c in col_names if 'content' in c or 'text' in c or 'summary' in c or 'value' in c)
-                    
-                    rows = conn.execute(f'''
-                        SELECT {content_col}, {time_col}
-                        FROM {table}
-                        ORDER BY {time_col} DESC
-                        LIMIT 200
-                    ''').fetchall()
-
-                    now = int(time.time())
-                    for row in rows:
-                        content = str(row[0] or '')
-                        ts = row[1]
-                        if isinstance(ts, (int, float)):
-                            age_days = (now - int(ts)) / 86400.0
-                            age_weight = max(0.1, 1.0 - age_days / 180.0)  # 180天衰减
-                        else:
-                            age_weight = 0.3
-
-                        # 查询相关度
-                        relevance = 0.3
-                        if query:
-                            query_words = set(re.findall(r'[\u4e00-\u9fff\w]+', query.lower()))
-                            content_words = set(re.findall(r'[\u4e00-\u9fff\w]+', content.lower()))
-                            if query_words and content_words:
-                                relevance = len(query_words & content_words) / max(len(query_words), 1)
-
-                        # 综合权重 = 时间衰减 * 0.4 + 相关性 * 0.6
-                        combined_weight = age_weight * 0.4 + relevance * 0.6
-                        all_entries.append({
-                            'content': content,
-                            'weight': round(combined_weight, 3),
-                            'ageDays': round(age_days, 1) if 'age_days' in dir() else 0,
-                            'source': db_path.name,
-                        })
-                    break  # 找到匹配表后不再尝试其他表
-            except sqlite3.OperationalError:
-                continue
-        conn.close()
-    except Exception:
-        continue
-
-# 按权重排序，取top-N
-all_entries.sort(key=lambda x: -x['weight'])
-
-result_entries = all_entries[:limit]
-if not result_entries:
-    raise SystemExit(0)
-
-# 构建上下文文本
-lines = ['[long_term_context]']
-for entry in result_entries:
-    content = entry['content'][:300].replace('\n', ' ')
-    weight_label = 'high' if entry['weight'] > 0.6 else ('medium' if entry['weight'] > 0.3 else 'low')
-    lines.append(f'[{weight_label}:{entry["weight"]:.2f}] {content}')
-
-print('\n'.join(lines))
-PY
-}
-
 # Fast memory context retrieval with adaptive strategy based on memory size
 openclaw_ai_stack_memory_context_text() {
   local query="$1"
@@ -4309,486 +3042,6 @@ openclaw_ai_stack_filter_memory_for_cloud() {
   printf '%s\n' "[memory_context]\n- 云端模式已启用记忆禁传，本次不上传本地长期记忆。"
 }
 
-# ========================================================================
-# 结构化数据检索引擎 — 支持JSON/CSV/表格数据的索引和查询
-# ========================================================================
-openclaw_ai_stack_structured_search() {
-  local query="$1" data_type="${2:-json}"
-  memory_extension_prepare
-  python3 - "$query" "$data_type" "$SKPL_MEMORY_EXTENSION_DB" <<'PY'
-import json, re, sqlite3, sys
-query_text = sys.argv[1].lower()
-data_type = sys.argv[2]
-db_path = sys.argv[3]
-
-conn = sqlite3.connect(db_path)
-conn.execute('''CREATE TABLE IF NOT EXISTS structured_data (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source TEXT, data_type TEXT, field_name TEXT, field_value TEXT,
-    raw_payload TEXT, indexed_at INTEGER
-)''')
-conn.execute('CREATE INDEX IF NOT EXISTS idx_structured_field ON structured_data(field_name, field_value)')
-conn.execute('CREATE INDEX IF NOT EXISTS idx_structured_type ON structured_data(data_type)')
-
-# 搜索
-query_words = re.findall(r'[\w\u4e00-\u9fff]+', query_text)
-if not query_words:
-    conn.close()
-    print(json.dumps({'results': [], 'count': 0}, ensure_ascii=False))
-    raise SystemExit(0)
-
-results = []
-for word in query_words:
-    rows = conn.execute(
-        'SELECT DISTINCT id, source, data_type, field_name, field_value, raw_payload, indexed_at FROM structured_data WHERE field_value LIKE ? OR field_name LIKE ? LIMIT 50',
-        (f'%{word}%', f'%{word}%')
-    ).fetchall()
-    for row in rows:
-        entry = {
-            'id': row[0], 'source': row[1], 'type': row[2],
-            'field': row[3], 'value': row[4][:500],
-            'payload': row[5][:2000] if row[5] else '',
-            'indexedAt': row[6],
-        }
-        # 计算相关性分数 (多词匹配加权)
-        score = 0
-        val_lower = (row[4] or '').lower()
-        for w in query_words:
-            score += val_lower.count(w)
-            if (row[3] or '').lower() == w:
-                score += 3
-        entry['score'] = score
-        if score > 0:
-            results.append(entry)
-
-results.sort(key=lambda x: -x['score'])
-
-# 去重
-seen_ids = set()
-unique_results = []
-for r in results:
-    if r['id'] not in seen_ids:
-        seen_ids.add(r['id'])
-        unique_results.append(r)
-conn.close()
-print(json.dumps({'results': unique_results[:30], 'count': len(unique_results)}, ensure_ascii=False))
-PY
-}
-
-# 结构化数据索引 (新增条目)
-openclaw_ai_stack_structured_index() {
-  local source="$1" entry_json="$2"
-  memory_extension_prepare
-  python3 - "$source" "$entry_json" "$SKPL_MEMORY_EXTENSION_DB" <<'PY'
-import json, sys, time
-source = sys.argv[1]
-entry = json.loads(sys.argv[2])
-db_path = sys.argv[3]
-conn = sqlite3.connect(db_path)
-conn.execute('''CREATE TABLE IF NOT EXISTS structured_data (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    source TEXT, data_type TEXT, field_name TEXT, field_value TEXT,
-    raw_payload TEXT, indexed_at INTEGER
-)''')
-conn.execute('CREATE INDEX IF NOT EXISTS idx_structured_field ON structured_data(field_name, field_value)')
-conn.execute('CREATE INDEX IF NOT EXISTS idx_structured_type ON structured_data(data_type)')
-
-data_type = entry.get('type', 'json')
-raw_payload = json.dumps(entry.get('data', {}), ensure_ascii=False) if entry.get('data') else ''
-payload = entry.get('data', {})
-now_ts = int(time.time())
-
-count = [0]
-def flatten(data, prefix=''):
-    if isinstance(data, dict):
-        for k, v in data.items():
-            flatten(v, f'{prefix}.{k}' if prefix else k)
-    elif isinstance(data, list):
-        for i, v in enumerate(data):
-            flatten(v, f'{prefix}[{i}]')
-    else:
-        conn.execute(
-            'INSERT INTO structured_data (source, data_type, field_name, field_value, raw_payload, indexed_at) VALUES (?,?,?,?,?,?)',
-            (source, data_type, prefix or 'root', str(data)[:2000], raw_payload, now_ts)
-        )
-        count[0] += 1
-
-flatten(payload if payload else entry)
-conn.commit()
-conn.close()
-print(json.dumps({'indexed': count[0], 'source': source}, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 多模态向量检索引擎 — 支持图像/音频等非文本数据的向量索引
-# ========================================================================
-openclaw_ai_stack_multimodal_vector_search() {
-  local query_text="$1" modality="${2:-image}"
-  openclaw_ai_stack_prepare
-  memory_extension_prepare
-  python3 - "$query_text" "$modality" "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, re, sqlite3, sys, time
-
-query_text = sys.argv[1]
-modality = sys.argv[2]
-db_path = sys.argv[3]
-cfg_path = sys.argv[4]
-cfg = json.loads(open(cfg_path, 'r', encoding='utf-8').read())
-
-conn = sqlite3.connect(db_path)
-conn.execute('''CREATE TABLE IF NOT EXISTS multimodal_vectors (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    modality TEXT, file_path TEXT, description TEXT,
-    ocr_text TEXT, features TEXT, vector TEXT,
-    source_hash TEXT, indexed_at INTEGER
-)''')
-conn.execute('CREATE INDEX IF NOT EXISTS idx_mmv_modality ON multimodal_vectors(modality)')
-conn.execute('CREATE INDEX IF NOT EXISTS idx_mmv_hash ON multimodal_vectors(source_hash)')
-
-# 搜索: 基于描述文本匹配 + OCR文本匹配
-query_words = re.findall(r'[\w\u4e00-\u9fff]+', query_text.lower())
-if not query_words:
-    conn.close()
-    print(json.dumps({'results': [], 'count': 0}, ensure_ascii=False))
-    raise SystemExit(0)
-
-results = []
-for word in query_words:
-    rows = conn.execute(
-        'SELECT id, modality, file_path, description, ocr_text, features, source_hash, indexed_at FROM multimodal_vectors WHERE (description LIKE ? OR ocr_text LIKE ?) AND modality = ? LIMIT 30',
-        (f'%{word}%', f'%{word}%', modality)
-    ).fetchall()
-    for row in rows:
-        desc = (row[3] or '').lower()
-        ocr = (row[4] or '').lower()
-        score = sum(desc.count(w) * 2 + ocr.count(w) * 3 for w in query_words)
-        results.append({
-            'id': row[0], 'modality': row[1], 'filePath': row[2],
-            'description': row[3], 'ocrText': (row[4] or '')[:200],
-            'features': row[5], 'score': score,
-            'sourceHash': row[6], 'indexedAt': row[7],
-        })
-
-results.sort(key=lambda x: -x['score'])
-unique = {}
-for r in results:
-    h = r.get('sourceHash') or str(r['id'])
-    if h not in unique or unique[h]['score'] < r['score']:
-        unique[h] = r
-
-conn.close()
-print(json.dumps({'results': list(unique.values())[:20], 'count': len(unique)}, ensure_ascii=False))
-PY
-}
-
-# 多模态向量索引 (新增条目)
-openclaw_ai_stack_multimodal_vector_index() {
-  local modality="$1" file_path="$2" description="$3" ocr_text="$4" features_json="${5:-{}}"
-  memory_extension_prepare
-  python3 - "$modality" "$file_path" "$description" "$ocr_text" "$features_json" "$SKPL_MEMORY_EXTENSION_DB" <<'PY'
-import json, hashlib, sys, time
-modality = sys.argv[1]
-file_path = sys.argv[2]
-description = sys.argv[3]
-ocr_text = sys.argv[4]
-features = sys.argv[5]
-db_path = sys.argv[6]
-source_hash = hashlib.sha256(file_path.encode()).hexdigest()[:16]
-conn = sqlite3.connect(db_path)
-conn.execute('''CREATE TABLE IF NOT EXISTS multimodal_vectors (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    modality TEXT, file_path TEXT, description TEXT,
-    ocr_text TEXT, features TEXT, vector TEXT,
-    source_hash TEXT, indexed_at INTEGER
-)''')
-conn.execute('CREATE INDEX IF NOT EXISTS idx_mmv_modality ON multimodal_vectors(modality)')
-conn.execute('CREATE INDEX IF NOT EXISTS idx_mmv_hash ON multimodal_vectors(source_hash)')
-now_ts = int(time.time())
-# 替换已有条目
-conn.execute('DELETE FROM multimodal_vectors WHERE source_hash = ?', (source_hash,))
-conn.execute(
-    'INSERT INTO multimodal_vectors (modality, file_path, description, ocr_text, features, source_hash, indexed_at) VALUES (?,?,?,?,?,?,?)',
-    (modality, file_path, description, ocr_text, features, source_hash, now_ts)
-)
-conn.commit()
-conn.close()
-print(json.dumps({'indexed': True, 'sourceHash': source_hash, 'modality': modality}, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 全局隐私控制引擎 — 统一协调所有分层隐私策略
-# ========================================================================
-openclaw_ai_stack_privacy_engine() {
-  local input_text="$1"
-  python3 - "$input_text" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, re, sys
-text = sys.argv[1].strip() if len(sys.argv) > 1 else ''
-cfg_path = sys.argv[2] if len(sys.argv) > 2 else ''
-cfg = {}
-if cfg_path:
-    try:
-        cfg = json.loads(open(cfg_path, 'r', encoding='utf-8').read())
-    except Exception:
-        pass
-privacy_settings = cfg.get('privacy', {})
-# 敏感数据分类
-patterns = {
-    'pii': [r'\b\d{15,19}\b', r'\b1[3-9]\d{9}\b', r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'],
-    'financial': [r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b', r'银行|卡号|支付|转账'],
-    'credentials': [r'(api[_\s]?key|password|secret|token|credential)s?\s*[:=]\s*\S+', r'密码[:：]\s*\S+'],
-    'location': [r'\b纬度|经度|GPS|坐标|定位\b', r'\b\d{2}\.\d{4,}[,]?\d{3}\.\d{4,}\b'],
-    'health': [r'病历|诊断|病情|症状|手术|处方|医疗'],
-}
-sensitive_categories = []
-for category, rules in patterns.items():
-    for rule in rules:
-        if re.search(rule, text, re.IGNORECASE):
-            sensitive_categories.append(category)
-            break
-sensitive_categories = list(set(sensitive_categories))
-# 隐私策略决策
-policy = {
-    'level': 'normal',
-    'allowCloud': True,
-    'allowCaching': True,
-    'allowMemoryStorage': True,
-    'allowLogging': True,
-    'maskText': False,
-    'sensitiveCategories': sensitive_categories,
-    'actions': [],
-}
-if sensitive_categories:
-    if 'credentials' in sensitive_categories or 'financial' in sensitive_categories:
-        policy['level'] = 'critical'
-        policy['allowCloud'] = False
-        policy['allowCaching'] = False
-        policy['allowLogging'] = False
-        policy['maskText'] = True
-        policy['actions'] = ['block-cloud', 'disable-cache', 'disable-logging', 'mask-content']
-    elif 'pii' in sensitive_categories or 'health' in sensitive_categories:
-        policy['level'] = 'restricted'
-        policy['allowCloud'] = False
-        policy['actions'] = ['block-cloud', 'local-only']
-    elif 'location' in sensitive_categories:
-        policy['level'] = 'caution'
-        policy['allowCloud'] = privacy_settings.get('allowLocationCloud', False)
-        policy['actions'] = ['warn-location']
-print(json.dumps(policy, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 动态组件加载器 — 按 tier + 负载决定启用哪些模块
-# ========================================================================
-openclaw_ai_stack_dynamic_loader() {
-  local tier="$1" mode="${2:-auto}"
-  python3 - "$tier" "$mode" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys
-tier = sys.argv[1]
-mode = sys.argv[2]
-cfg = json.loads(open(sys.argv[3], 'r', encoding='utf-8').read())
-# 组件定义: 依赖、最低tier级别、是否可选
-components = {
-    'privacyEngine': {'minTier': 0, 'optional': False, 'category': 'security'},
-    'expertLoader': {'minTier': 0, 'optional': False, 'category': 'core'},
-    'routingEngine': {'minTier': 0, 'optional': False, 'category': 'core'},
-    'cacheLayer': {'minTier': 0, 'optional': False, 'category': 'core'},
-    'toolSandbox': {'minTier': 2, 'optional': True, 'category': 'extension'},
-    'cloudCooperation': {'minTier': 2, 'optional': True, 'category': 'extension'},
-    'selfEvolution': {'minTier': 3, 'optional': True, 'category': 'learning'},
-    'reinforcementLearning': {'minTier': 5, 'optional': True, 'category': 'advanced'},
-    'costAnalysis': {'minTier': 4, 'optional': True, 'category': 'advanced'},
-    'streamingEngine': {'minTier': 2, 'optional': True, 'category': 'delivery'},
-    'crossDeviceSync': {'minTier': 3, 'optional': True, 'category': 'sync'},
-}
-tier_rank = {'emergency-cpu': 0, 'entry-cpu': 1, 'advanced-cpu': 2,
-             'entry-gpu': 3, 'advanced-gpu': 4, 'golden-gpu': 5,
-             'flagship-gpu': 6, 'workstation': 7, 'server': 8}
-rank = tier_rank.get(tier, 2)
-loaded = {}
-disabled = {}
-for name, comp in components.items():
-    min_rank = comp.get('minTier', 0)
-    if rank >= min_rank:
-        if mode == 'minimal' and comp.get('optional', True) and comp.get('category') != 'core':
-            disabled[name] = 'minimal-mode'
-        else:
-            loaded[name] = {'status': 'active', 'tier': tier}
-    else:
-        disabled[name] = f'tier-{tier}-below-minimum-{comp["minTier"]}'
-if mode == 'aggressive':
-    for name in disabled:
-        if name not in [n for n, c in components.items() if c.get('minTier', 0) > rank]:
-            loaded[name] = {'status': 'active-aggressive', 'tier': tier}
-            del disabled[name]
-payload = {'loaded': loaded, 'disabled': disabled, 'mode': mode, 'tier': tier}
-print(json.dumps(payload, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 实时资源监控器 — 后台持续监控 + 状态记录
-# ========================================================================
-openclaw_ai_stack_resource_monitor() {
-  local monitor_state_file="${SKPL_AI_STACK_ROOT:-/tmp/openclaw-ai}/resource_monitor.json"
-  python3 - "$monitor_state_file" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, os, subprocess, time, sys
-from pathlib import Path
-
-monitor_path = Path(sys.argv[1])
-cfg_path = Path(sys.argv[2])
-monitor_path.parent.mkdir(parents=True, exist_ok=True)
-
-def get_memory():
-    try:
-        with open('/proc/meminfo') as f:
-            lines = f.read()
-        import re
-        total = int(re.search(r'MemTotal:\s+(\d+)', lines).group(1))
-        avail = int(re.search(r'MemAvailable:\s+(\d+)', lines).group(1))
-        return {'totalKb': total, 'availableKb': avail, 'usedPercent': round(100 - avail/total*100, 1)}
-    except Exception:
-        return {'totalKb': 0, 'availableKb': 0, 'usedPercent': 0}
-
-def get_cpu():
-    try:
-        import re
-        with open('/proc/loadavg') as f:
-            parts = f.read().split()
-        load1 = float(parts[0])
-        cores = os.cpu_count() or 4
-        return {'load1': load1, 'load5': float(parts[1]), 'cores': cores, 'loadPercent': round(load1/cores*100, 1)}
-    except Exception:
-        return {'load1': 0, 'load5': 0, 'cores': 4, 'loadPercent': 0}
-
-def get_gpu():
-    try:
-        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.free,temperature.gpu,utilization.gpu', '--format=csv,noheader,nounits'],
-                              capture_output=True, text=True, timeout=10)
-        if result.returncode != 0:
-            return {'present': False}
-        rows = result.stdout.strip().split('\n')
-        gpus = []
-        for row in rows:
-            parts = [p.strip() for p in row.split(',')]
-            if len(parts) >= 4:
-                gpus.append({'usedMb': int(float(parts[0])), 'freeMb': int(float(parts[1])),
-                            'tempC': int(float(parts[2])), 'utilPercent': int(float(parts[3]))})
-        return {'present': True, 'gpus': gpus}
-    except Exception:
-        return {'present': False}
-
-def get_disk():
-    try:
-        stat = os.statvfs('/')
-        total = stat.f_blocks * stat.f_frsize // (1024**3)
-        free = stat.f_bavail * stat.f_frsize // (1024**3)
-        return {'totalGb': total, 'freeGb': free, 'usedPercent': round(100 - free/total*100, 1) if total > 0 else 0}
-    except Exception:
-        return {'totalGb': 0, 'freeGb': 0, 'usedPercent': 0}
-
-prev = {}
-if monitor_path.exists():
-    try:
-        prev = json.loads(monitor_path.read_text(encoding='utf-8'))
-    except Exception:
-        prev = {}
-now_ts = int(time.time())
-mem = get_memory()
-cpu = get_cpu()
-gpu = get_gpu()
-disk = get_disk()
-state = {
-    'timestamp': now_ts,
-    'memory': mem,
-    'cpu': cpu,
-    'gpu': gpu,
-    'disk': disk,
-    'alerts': [],
-}
-# 告警规则
-if mem.get('usedPercent', 0) > 90:
-    state['alerts'].append({'level': 'critical', 'type': 'memory', 'msg': f'内存使用率 {mem["usedPercent"]}%'})
-elif mem.get('usedPercent', 0) > 75:
-    state['alerts'].append({'level': 'warning', 'type': 'memory', 'msg': f'内存使用率 {mem["usedPercent"]}%'})
-if gpu.get('present'):
-    for i, g in enumerate(gpu.get('gpus', [])):
-        if g.get('tempC', 0) > 85:
-            state['alerts'].append({'level': 'critical', 'type': 'gpu-temp', 'msg': f'GPU{i} 温度 {g["tempC"]}°C'})
-        if g.get('utilPercent', 0) > 95:
-            state['alerts'].append({'level': 'warning', 'type': 'gpu-util', 'msg': f'GPU{i} 利用率 {g["utilPercent"]}%'})
-if disk.get('freeGb', 0) < 5:
-    state['alerts'].append({'level': 'critical', 'type': 'disk', 'msg': f'磁盘剩余 {disk["freeGb"]}GB'})
-elif disk.get('freeGb', 0) < 20:
-    state['alerts'].append({'level': 'warning', 'type': 'disk', 'msg': f'磁盘剩余 {disk["freeGb"]}GB'})
-# 趋势检测 (对比上次)
-if prev.get('timestamp'):
-    prev_mem_pct = (prev.get('memory') or {}).get('usedPercent', 0)
-    if mem.get('usedPercent', 0) - prev_mem_pct > 10:
-        state['alerts'].append({'level': 'info', 'type': 'memory-trend', 'msg': f'内存使用率上升 {round(mem["usedPercent"]-prev_mem_pct,1)}%'})
-monitor_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-print(json.dumps(state, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 负载动态均衡器 — 基于资源占用分配任务优先级
-# ========================================================================
-openclaw_ai_stack_load_balancer() {
-  local route_json="$1"
-  python3 - "$route_json" "$(cat "${SKPL_AI_STACK_ROOT:-/tmp/openclaw-ai}/resource_monitor.json" 2>/dev/null || echo '{}')" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys
-route = json.loads(sys.argv[1])
-monitor = json.loads(sys.argv[2]) if sys.argv[2].strip() else {}
-cfg = json.loads(open(sys.argv[3], 'r', encoding='utf-8').read())
-strategy = (cfg.get('frontend') or {}).get('loadBalancer', 'balanced')
-
-mem_pct = (monitor.get('memory') or {}).get('usedPercent', 0)
-cpu_pct = (monitor.get('cpu') or {}).get('loadPercent', 0)
-gpu_util = 0
-gpu_temp = 0
-gpus = (monitor.get('gpu') or {}).get('gpus', [])
-if gpus:
-    gpu_util = max(g.get('utilPercent', 0) for g in gpus)
-    gpu_temp = max(g.get('tempC', 0) for g in gpus)
-alerts = len(monitor.get('alerts', []))
-
-result = {
-    'strategy': strategy,
-    'resourcePressure': {'memory': mem_pct, 'cpu': cpu_pct, 'gpuUtil': gpu_util, 'gpuTemp': gpu_temp, 'alerts': alerts},
-    'actions': [],
-    'concurrencyLimit': 1,
-    'priority': 'normal',
-}
-
-if strategy == 'balanced':
-    if mem_pct > 85 or cpu_pct > 90 or gpu_temp > 80:
-        result['actions'] = ['reduce-fanout', 'delay-non-critical']
-        result['concurrencyLimit'] = 1
-        result['priority'] = 'restricted'
-    elif mem_pct > 60 or cpu_pct > 65:
-        result['actions'] = ['defer-expensive-cloud']
-        result['concurrencyLimit'] = 2
-    else:
-        result['concurrencyLimit'] = 4
-elif strategy == 'latency':
-    result['actions'] = ['prefer-local', 'skip-cloud-if-cached']
-    result['concurrencyLimit'] = 1
-    result['priority'] = 'high'
-elif strategy == 'throughput':
-    result['concurrencyLimit'] = 6
-    result['actions'] = ['max-fanout', 'allow-parallel-cloud']
-    if alerts:
-        result['concurrencyLimit'] = max(1, result['concurrencyLimit'] - alerts)
-        result['actions'].append(f'alert-reduction:{alerts}')
-
-route['loadBalancer'] = result
-print(json.dumps(route, ensure_ascii=False))
-PY
-}
-
 openclaw_ai_stack_reclaim_memory_pressure() {
   openclaw_ai_stack_prepare
   memory_extension_prepare
@@ -4829,8 +3082,7 @@ PY
 )
   if [ "$cleanup_allowed" = "true" ]; then
     openclaw_memory_extension_cleanup_entries >/dev/null 2>&1 || true
-    openclaw_ai_stack_idle_unload_expert_if_needed 300 >/dev/null 2>&1 || true
-    openclaw_ai_stack_cache_cleanup_all >/dev/null 2>&1 || true
+    openclaw_ai_stack_idle_unload_expert_if_needed 60 >/dev/null 2>&1 || true
   fi
   printf '%s\n' "$reclaim_json"
 }
@@ -4905,306 +3157,6 @@ unload_state = data.get('nonMemoryGpuUnload') or '-'
 previous_unload = data.get('previousExpertUnload') or '-'
 idle_state = data.get('idleUnloadPolicy') or '-'
 print(f"route={data.get('route', '-')} | usable={data.get('usableGpuMb', 0)}/{data.get('usableMemoryMb', 0)} | required={data.get('requiredGpuMb', 0)}/{data.get('requiredMemoryMb', 0)} | enough={'yes' if data.get('enough') else 'no'} | secondPass={'yes' if data.get('secondPassReady') else 'no'} | fallback={data.get('finalFallbackModel', '-')} | lock={lock_owner} | trim={unload_state} | prev={previous_unload} | idle={idle_state}")
-PY
-}
-
-# ========================================================================
-# 资源安全链 - 1638MB待机管理
-# ========================================================================
-openclaw_ai_stack_standby_manager() {
-  local action="${1:-status}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$SKPL_AI_STACK_ROOT" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, os, time, subprocess
-from pathlib import Path
-
-action = sys.argv[1]
-stack_root = Path(sys.argv[2])
-config_path = Path(sys.argv[3])
-
-STANDBY_THRESHOLD_MB = 1638  # 基础待机内存阈值
-STANDBY_DIR = stack_root / "standby"
-STANDBY_DIR.mkdir(parents=True, exist_ok=True)
-STANDBY_STATE_FILE = STANDBY_DIR / "standby-state.json"
-
-def get_current_memory():
-    """获取当前系统内存使用情况"""
-    mem = {'totalMb': 0, 'freeMb': 0, 'availableMb': 0, 'usedMb': 0}
-    try:
-        with open('/proc/meminfo', 'r') as f:
-            for line in f:
-                if line.startswith('MemTotal:'):
-                    mem['totalMb'] = int(line.split()[1]) // 1024
-                elif line.startswith('MemAvailable:'):
-                    mem['availableMb'] = int(line.split()[1]) // 1024
-                elif line.startswith('MemFree:'):
-                    mem['freeMb'] = int(line.split()[1]) // 1024
-        mem['usedMb'] = mem['totalMb'] - mem['availableMb']
-    except Exception:
-        pass
-    return mem
-
-def get_gpu_memory():
-    """获取GPU显存使用"""
-    try:
-        o = subprocess.check_output(
-            ['nvidia-smi', '--query-gpu=memory.total,memory.used,memory.free',
-             '--format=csv,noheader,nounits'], text=True, timeout=5
-        ).strip()
-        parts = [p.strip() for p in o.split(',')]
-        return {
-            'totalMb': int(parts[0]) if len(parts) > 0 else 0,
-            'usedMb': int(parts[1]) if len(parts) > 1 else 0,
-            'freeMb': int(parts[2]) if len(parts) > 2 else 0,
-        }
-    except Exception:
-        return {'totalMb': 0, 'usedMb': 0, 'freeMb': 0}
-
-def get_ollama_models():
-    """获取当前ollama加载的模型"""
-    models = []
-    try:
-        r = subprocess.run(['ollama', 'ps'], capture_output=True, text=True, timeout=5)
-        for line in r.stdout.strip().split('\n')[1:]:
-            parts = line.split()
-            if parts:
-                size_str = parts[1] if len(parts) > 1 else '0B'
-                # 解析大小
-                size_mb = 0
-                if 'GB' in size_str:
-                    size_mb = float(size_str.replace('GB', '').strip()) * 1024
-                elif 'MB' in size_str:
-                    size_mb = float(size_str.replace('MB', '').strip())
-                elif 'KB' in size_str:
-                    size_mb = float(size_str.replace('KB', '').strip()) / 1024
-                models.append({
-                    'name': parts[0],
-                    'sizeMB': round(size_mb, 1),
-                    'sizeStr': size_str,
-                    'uptime': ' '.join(parts[2:4]) if len(parts) > 3 else '-',
-                })
-    except Exception:
-        pass
-    return models
-
-def calculate_resource_state():
-    """计算资源状态"""
-    mem = get_current_memory()
-    gpu = get_gpu_memory()
-    models = get_ollama_models()
-
-    # 资源缺口计算
-    memory_gap = max(0, STANDBY_THRESHOLD_MB - mem['availableMb'])
-    gpu_gap = max(0, (gpu['totalMb'] * 0.2 if gpu['totalMb'] > 0 else 0) - gpu['freeMb'])
-
-    # 模型占用估算
-    model_memory_mb = sum(m.get('sizeMB', 0) for m in models)
-
-    state = {
-        'timestamp': int(time.time()),
-        'standbyThresholdMB': STANDBY_THRESHOLD_MB,
-        'systemMemory': mem,
-        'gpuMemory': gpu,
-        'loadedModels': models,
-        'modelCount': len(models),
-        'totalModelMemoryMB': round(model_memory_mb, 1),
-        'gaps': {
-            'systemMemoryGapMB': memory_gap,
-            'gpuMemoryGapMB': round(gpu_gap, 1),
-        },
-    }
-
-    # 判断待机状态
-    if memory_gap > 0 or gpu_gap > 100:
-        state['standbyStatus'] = 'degraded'
-        state['actions'] = []
-
-        if memory_gap > 0:
-            state['actions'].append({
-                'type': 'memory_pressure',
-                'gapMB': memory_gap,
-                'suggestion': f'需要释放 {memory_gap}MB 系统内存以达到 {STANDBY_THRESHOLD_MB}MB 待机阈值',
-                'autoAction': 'attempt_memory_reclaim',
-            })
-        if gpu_gap > 100:
-            state['actions'].append({
-                'type': 'gpu_pressure',
-                'gapMB': round(gpu_gap, 1),
-                'suggestion': f'GPU显存不足，考虑卸载非必要模型',
-                'autoAction': 'attempt_gpu_model_unload',
-            })
-
-        if len(models) > 1:
-            # 建议卸载最不常用的模型
-            state['actions'].append({
-                'type': 'model_consolidation',
-                'suggestion': f'当前加载 {len(models)} 个模型，建议卸载非活跃模型以释放资源',
-                'autoAction': 'unload_idle_models',
-            })
-    elif mem['availableMb'] > STANDBY_THRESHOLD_MB * 2:
-        state['standbyStatus'] = 'comfortable'
-        state['headroom'] = mem['availableMb'] - STANDBY_THRESHOLD_MB
-    else:
-        state['standbyStatus'] = 'ok'
-
-    return state
-
-def reclaim_memory():
-    """尝试回收内存"""
-    results = []
-    # 清理系统缓存
-    try:
-        subprocess.run(['sync'], capture_output=True, timeout=5)
-        if os.path.exists('/proc/sys/vm/drop_caches'):
-            with open('/proc/sys/vm/drop_caches', 'w') as f:
-                f.write('1')
-            results.append({'action': 'drop_caches', 'ok': True})
-    except Exception as e:
-        results.append({'action': 'drop_caches', 'ok': False, 'error': str(e)})
-
-    # 清理AI栈缓存
-    cache_dir = stack_root / 'cache'
-    if cache_dir.exists():
-        freed = 0
-        for cf in cache_dir.rglob('*'):
-            if cf.is_file() and time.time() - cf.stat().st_mtime > 86400:
-                try:
-                    size = cf.stat().st_size
-                    cf.unlink()
-                    freed += size
-                except Exception:
-                    pass
-        results.append({'action': 'cleanup_stale_cache', 'ok': True, 'freedMB': round(freed / (1024*1024), 1)})
-
-    return results
-
-if action == 'status':
-    state = calculate_resource_state()
-    # 保存状态
-    STANDBY_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps(state, ensure_ascii=False))
-
-elif action == 'check':
-    # 快速检查是否满足待机要求
-    mem = get_current_memory()
-    meets_threshold = mem['availableMb'] >= STANDBY_THRESHOLD_MB
-    result = {
-        'meetsStandby': meets_threshold,
-        'availableMB': mem['availableMb'],
-        'thresholdMB': STANDBY_THRESHOLD_MB,
-        'gapMB': max(0, STANDBY_THRESHOLD_MB - mem['availableMb']),
-        'percentOfThreshold': round(mem['availableMb'] / STANDBY_THRESHOLD_MB * 100, 1),
-    }
-    if not meets_threshold:
-        result['suggestion'] = f'需要额外 {result["gapMB"]}MB 内存以满足 1638MB 待机要求'
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'reclaim':
-    # 尝试回收内存以达标
-    before = get_current_memory()
-    reclaim_results = reclaim_memory()
-    after = get_current_memory()
-    result = {
-        'before': {'availableMB': before['availableMb']},
-        'after': {'availableMB': after['availableMb']},
-        'freedMB': after['availableMb'] - before['availableMb'],
-        'actions': reclaim_results,
-        'meetsStandby': after['availableMb'] >= STANDBY_THRESHOLD_MB,
-    }
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'unload-idle':
-    # 卸载空闲模型以释放GPU资源
-    models = get_ollama_models()
-    if not models:
-        print(json.dumps({'unloaded': [], 'message': 'no models loaded'}, ensure_ascii=False))
-        raise SystemExit(0)
-
-    # 读取活动状态确定哪些模型是活跃的
-    expert_state = stack_root / 'state' / 'expert-state.json'
-    active_model = None
-    if expert_state.exists():
-        try:
-            ed = json.loads(expert_state.read_text(encoding='utf-8'))
-            active_model = (ed.get('currentExpert') or {}).get('model') if isinstance(ed, dict) else None
-        except Exception:
-            pass
-
-    unloaded = []
-    for model in models:
-        model_name = model['name']
-        if model_name != active_model and not model_name.startswith('nomic-embed'):
-            # 卸载非活跃模型
-            try:
-                subprocess.run(
-                    ['curl', '-s', 'http://127.0.0.1:11434/api/generate',
-                     '-H', 'Content-Type: application/json',
-                     '-d', json.dumps({'model': model_name, 'prompt': '', 'keep_alive': 0})],
-                    timeout=10, capture_output=True
-                )
-                unloaded.append({'model': model_name, 'freedMB': model['sizeMB']})
-            except Exception as e:
-                unloaded.append({'model': model_name, 'error': str(e)})
-
-    total_freed = sum(u.get('freedMB', 0) for u in unloaded)
-    print(json.dumps({
-        'unloaded': unloaded,
-        'count': len(unloaded),
-        'totalFreedMB': round(total_freed, 1),
-        'activeModel': active_model,
-    }, ensure_ascii=False))
-
-elif action == 'monitor':
-    # 持续监控模式（单次采样）
-    state = calculate_resource_state()
-
-    # 自动触发操作
-    auto_actions = []
-    if state.get('gaps', {}).get('systemMemoryGapMB', 0) > 100:
-        reclaim_results = reclaim_memory()
-        auto_actions.extend(reclaim_results)
-
-    mem_after = get_current_memory()
-    state['autoActions'] = auto_actions
-    state['memoryAfterActions'] = mem_after
-    state['standbyThresholdMet'] = mem_after['availableMb'] >= STANDBY_THRESHOLD_MB
-
-    STANDBY_STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps(state, ensure_ascii=False))
-
-elif action == 'history':
-    # 查看待机状态历史
-    if not STANDBY_STATE_FILE.exists():
-        print(json.dumps({'history': [], 'count': 0}, ensure_ascii=False))
-        raise SystemExit(0)
-    state = json.loads(STANDBY_STATE_FILE.read_text(encoding='utf-8'))
-    summary = {
-        'lastCheck': state.get('timestamp'),
-        'status': state.get('standbyStatus'),
-        'availableMB': state.get('systemMemory', {}).get('availableMb'),
-        'thresholdMB': state.get('standbyThresholdMB'),
-        'modelsLoaded': state.get('modelCount'),
-        'gaps': state.get('gaps'),
-    }
-    print(json.dumps({'summary': summary, 'fullState': state}, ensure_ascii=False))
-
-elif action == 'threshold':
-    # 查看/修改待机阈值
-    new_threshold = sys.argv[3] if len(sys.argv) > 3 else ''
-    if new_threshold:
-        try:
-            new_val = int(new_threshold)
-            # 更新阈值（运行时）
-            nonlocal_threshold = {'value': STANDBY_THRESHOLD_MB}
-            nonlocal_threshold['value'] = new_val
-            print(json.dumps({'ok': True, 'oldThreshold': STANDBY_THRESHOLD_MB, 'newThreshold': new_val}, ensure_ascii=False))
-        except ValueError:
-            print(json.dumps({'error': 'invalid threshold value, must be integer MB'}, ensure_ascii=False))
-    else:
-        print(json.dumps({'thresholdMB': STANDBY_THRESHOLD_MB, 'description': '1638MB is the minimum standby memory for base model'}, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'status|check|reclaim|unload-idle|monitor|history|threshold'}, ensure_ascii=False))
 PY
 }
 
@@ -5343,7 +3295,6 @@ mapping = {'general': 'defaultTextModel', 'code': 'defaultCodeModel', 'vision': 
 target_field = mapping.get(kind)
 if target_field:
     routing[target_field] = model
-path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 print(json.dumps({'tier': tier, 'kind': kind, 'model': model}, ensure_ascii=False))
 PY
@@ -5380,515 +3331,6 @@ state = {
 state_path.parent.mkdir(parents=True, exist_ok=True)
 state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 print(json.dumps(state, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 第2层 - 模型版本控制器
-# ========================================================================
-openclaw_ai_stack_model_version_controller() {
-  local action="${1:-list}" model_name="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$model_name" "$SKPL_AI_STACK_ROOT/versions" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, os, time, hashlib, shutil
-from pathlib import Path
-
-action = sys.argv[1]
-model_name = sys.argv[2]
-versions_dir = Path(sys.argv[3])
-config_path = Path(sys.argv[4])
-
-versions_dir.mkdir(parents=True, exist_ok=True)
-versions_file = versions_dir / "versions.json"
-
-# 加载版本信息
-versions = {}
-if versions_file.exists():
-    try:
-        versions = json.loads(versions_file.read_text(encoding='utf-8'))
-        if not isinstance(versions, dict):
-            versions = {}
-    except Exception:
-        versions = {}
-
-# 加载配置
-cfg = {}
-if config_path.exists():
-    try:
-        cfg = json.loads(config_path.read_text(encoding='utf-8'))
-    except Exception:
-        pass
-
-if action == 'list':
-    # 列出所有模型的版本历史
-    result = {'models': {}, 'totalVersions': 0}
-    for m_name, m_data in versions.items():
-        ver_list = sorted(m_data.get('versions', []), key=lambda v: v.get('timestamp', 0), reverse=True)
-        result['models'][m_name] = {
-            'current': m_data.get('current'),
-            'versions': [{'tag': v.get('tag'), 'timestamp': v.get('timestamp'), 'checksum': v.get('checksum'), 'active': v.get('tag') == m_data.get('current')} for v in ver_list],
-            'count': len(ver_list),
-        }
-        result['totalVersions'] += len(ver_list)
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'check':
-    # 检查指定模型有无可用更新（通过ollama list对比）
-    if not model_name:
-        print(json.dumps({'error': 'model_name required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    m_data = versions.get(model_name, {'versions': [], 'current': None})
-    current = m_data.get('current')
-    result = {'model': model_name, 'currentLocal': current, 'updatesAvailable': False}
-    # 尝试通过ollama检查
-    try:
-        import subprocess
-        ollama_list = subprocess.check_output(['ollama', 'list'], text=True, timeout=15).strip()
-        for line in ollama_list.split('\n')[1:]:
-            parts = line.split()
-            if parts and parts[0].startswith(model_name.replace('ollama/', '')):
-                latest = parts[0]
-                if current and latest != current:
-                    result['updatesAvailable'] = True
-                    result['latestRemote'] = latest
-                break
-    except Exception:
-        result['checkFailed'] = True
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'tag':
-    # 为当前加载的模型打版本标签
-    if not model_name:
-        print(json.dumps({'error': 'model_name required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    tag = f"v{int(time.time())}"
-    m_data = versions.get(model_name, {'versions': [], 'current': model_name})
-    m_data.setdefault('versions', [])
-    checksum = hashlib.md5(model_name.encode()).hexdigest()[:8]
-    new_version = {'tag': tag, 'timestamp': int(time.time()), 'checksum': checksum, 'model': model_name}
-    m_data['versions'].append(new_version)
-    m_data['current'] = tag
-    versions[model_name] = m_data
-    versions_file.write_text(json.dumps(versions, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps({'model': model_name, 'tagged': tag, 'ok': True}, ensure_ascii=False))
-
-elif action == 'rollback':
-    # 回滚到指定版本标签
-    if not model_name:
-        print(json.dumps({'error': 'model_name and tag required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    tag = sys.argv[5] if len(sys.argv) > 5 else ''
-    if not tag:
-        print(json.dumps({'error': 'tag required for rollback'}, ensure_ascii=False))
-        raise SystemExit(1)
-    m_data = versions.get(model_name, {'versions': [], 'current': None})
-    found = None
-    for v in m_data.get('versions', []):
-        if v.get('tag') == tag:
-            found = v
-            break
-    if not found:
-        print(json.dumps({'error': f'version {tag} not found', 'ok': False}, ensure_ascii=False))
-        raise SystemExit(1)
-    m_data['current'] = tag
-    versions[model_name] = m_data
-    versions_file.write_text(json.dumps(versions, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps({'model': model_name, 'rolledBackTo': tag, 'modelFile': found.get('model'), 'ok': True}, ensure_ascii=False))
-
-elif action == 'compare':
-    # 对比两个版本
-    v1 = sys.argv[5] if len(sys.argv) > 5 else ''
-    v2 = sys.argv[6] if len(sys.argv) > 6 else ''
-    m_data = versions.get(model_name, {'versions': []})
-    ver_list = m_data.get('versions', [])
-    f1 = next((v for v in ver_list if v.get('tag') == v1), None)
-    f2 = next((v for v in ver_list if v.get('tag') == v2), None)
-    result = {
-        'model': model_name,
-        'v1': {'tag': v1, 'info': f1} if f1 else {'tag': v1, 'found': False},
-        'v2': {'tag': v2, 'info': f2} if f2 else {'tag': v2, 'found': False},
-        'same': f1 and f2 and f1.get('checksum') == f2.get('checksum'),
-    }
-    print(json.dumps(result, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'list|check|tag|rollback|compare'}, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 第2层 - 模型量化工具
-# ========================================================================
-openclaw_ai_stack_quantization_tool() {
-  local action="${1:-estimate}" model_name="${2:-}" quant_level="${3:-q4}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$model_name" "$quant_level" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, math
-from pathlib import Path
-
-action = sys.argv[1]
-model_name = sys.argv[2]
-quant_level = sys.argv[3]
-config_path = Path(sys.argv[4])
-
-# 量化级别定义：(bits_per_weight, 压缩比, 质量保留率)
-QUANT_PRESETS = {
-    'fp16': {'bits': 16, 'compression': 0.50, 'quality': 0.999, 'label': 'FP16 (半精度)', 'gguf': 'f16'},
-    'q8': {'bits': 8, 'compression': 0.25, 'quality': 0.995, 'label': 'Q8_0 (8-bit)', 'gguf': 'Q8_0'},
-    'q6': {'bits': 6, 'compression': 0.1875, 'quality': 0.985, 'label': 'Q6_K (6-bit)', 'gguf': 'Q6_K'},
-    'q5': {'bits': 5, 'compression': 0.15625, 'quality': 0.975, 'label': 'Q5_K_M (5-bit)', 'gguf': 'Q5_K_M'},
-    'q4': {'bits': 4, 'compression': 0.125, 'quality': 0.960, 'label': 'Q4_K_M (4-bit)', 'gguf': 'Q4_K_M'},
-    'q3': {'bits': 3, 'compression': 0.09375, 'quality': 0.930, 'label': 'Q3_K_M (3-bit)', 'gguf': 'Q3_K_M'},
-    'q2': {'bits': 2, 'compression': 0.0625, 'quality': 0.880, 'label': 'Q2_K (2-bit)', 'gguf': 'Q2_K'},
-}
-
-# 已知模型的原始参数量和FP16大小估算
-KNOWN_MODELS = {
-    'llama3.2:latest': {'params': 3.2, 'fp16_gb': 6.4},
-    'llama3.1:8b': {'params': 8.0, 'fp16_gb': 16.0},
-    'qwen2.5:7b': {'params': 7.6, 'fp16_gb': 15.2},
-    'qwen2.5:14b': {'params': 14.2, 'fp16_gb': 28.4},
-    'codellama:7b': {'params': 7.0, 'fp16_gb': 14.0},
-    'codellama:13b': {'params': 13.0, 'fp16_gb': 26.0},
-    'deepseek-coder:6.7b': {'params': 6.7, 'fp16_gb': 13.4},
-    'llava:7b': {'params': 7.0, 'fp16_gb': 14.0},
-    'llava:13b': {'params': 13.0, 'fp16_gb': 26.0},
-    'gemma2:9b': {'params': 9.2, 'fp16_gb': 18.4},
-    'mistral:7b': {'params': 7.3, 'fp16_gb': 14.6},
-    'phi3:3.8b': {'params': 3.8, 'fp16_gb': 7.6},
-    'phi3:14b': {'params': 14.0, 'fp16_gb': 28.0},
-    'yi:6b': {'params': 6.0, 'fp16_gb': 12.0},
-    'yi:9b': {'params': 9.0, 'fp16_gb': 18.0},
-    'yi:34b': {'params': 34.0, 'fp16_gb': 68.0},
-    'command-r:35b': {'params': 35.0, 'fp16_gb': 70.0},
-}
-
-def estimate_vram(params_b, bits, overhead_mb=512):
-    """估算量化后VRAM用量"""
-    weight_mb = (params_b * bits) / 8 * 1000  # 参数数(billion) * bits / 8 = GB, * 1000 = MB
-    kv_cache_mb = params_b * 80  # KV cache 估算约80MB/B参数
-    return int(weight_mb + kv_cache_mb + overhead_mb)
-
-def find_best_quant(params_b, available_vram_mb):
-    """根据可用VRAM找到最佳量化级别"""
-    best = None
-    for qname in ['fp16', 'q8', 'q6', 'q5', 'q4', 'q3', 'q2']:
-        preset = QUANT_PRESETS[qname]
-        vram_mb = estimate_vram(params_b, preset['bits'])
-        if vram_mb <= available_vram_mb:
-            best = {'level': qname, 'vram_mb': vram_mb, 'quality': preset['quality'], 'label': preset['label'], 'gguf': preset['gguf']}
-    return best
-
-if action == 'estimate':
-    # 估算模型的量化后VRAM
-    model_info = KNOWN_MODELS.get(model_name.replace('ollama/', ''), None)
-    if model_info is None:
-        # 尝试解析参数量
-        params = 7.0  # 默认
-        for key, info in KNOWN_MODELS.items():
-            if model_name in key or key in model_name:
-                model_info = info
-                break
-        if model_info is None:
-            params = 7.0
-        else:
-            params = model_info['params']
-    else:
-        params = model_info['params']
-
-    preset = QUANT_PRESETS.get(quant_level, QUANT_PRESETS['q4'])
-    vram_mb = estimate_vram(params, preset['bits'])
-    fp16_vram = estimate_vram(params, 16)
-    result = {
-        'model': model_name,
-        'paramsB': params,
-        'fp16VRAM': fp16_vram,
-        'quant': {
-            'level': quant_level,
-            'bits': preset['bits'],
-            'label': preset['label'],
-            'ggufTag': preset['gguf'],
-            'estimatedVRAM': vram_mb,
-            'savingsPercent': round((1 - vram_mb / fp16_vram) * 100, 1),
-            'qualityRetention': preset['quality'],
-        },
-        'allLevels': [],
-    }
-    for qname, qpreset in QUANT_PRESETS.items():
-        qvram = estimate_vram(params, qpreset['bits'])
-        result['allLevels'].append({
-            'level': qname,
-            'label': qpreset['label'],
-            'vramMB': qvram,
-            'quality': qpreset['quality'],
-            'gguf': qpreset['gguf'],
-        })
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'recommend':
-    # 根据可用VRAM推荐最佳量化级别
-    try:
-        import subprocess
-        gpu_mem = 0
-        o = subprocess.check_output(['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader'], text=True, timeout=5).strip()
-        if o:
-            gpu_mem = int(o.replace('MiB', '').replace('MB', '').strip())
-    except Exception:
-        gpu_mem = 4096  # 默认4GB
-
-    params = 7.0
-    for key, info in KNOWN_MODELS.items():
-        if model_name in key or key in model_name:
-            params = info['params']
-            break
-
-    best = find_best_quant(params, int(gpu_mem * 0.85))
-    all_opts = []
-    for qname in ['fp16', 'q8', 'q6', 'q5', 'q4', 'q3', 'q2']:
-        preset = QUANT_PRESETS[qname]
-        vram = estimate_vram(params, preset['bits'])
-        all_opts.append({
-            'level': qname,
-            'label': preset['label'],
-            'vramMB': vram,
-            'fits': vram <= gpu_mem * 0.85,
-            'quality': preset['quality'],
-        })
-
-    result = {
-        'model': model_name,
-        'paramsB': params,
-        'availableVRAM': int(gpu_mem * 0.85),
-        'totalVRAM': gpu_mem,
-        'recommended': best,
-        'allOptions': all_opts,
-    }
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'convert':
-    # GGUF转换说明（实际转换需要llama.cpp工具链）
-    preset = QUANT_PRESETS.get(quant_level, QUANT_PRESETS['q4'])
-    result = {
-        'action': 'convert',
-        'model': model_name,
-        'targetQuant': quant_level,
-        'targetGGUF': preset['gguf'],
-        'steps': [
-            '1. 导出模型为原始权重: python convert.py --model ' + model_name,
-            f'2. 量化到{quant_level}: ./quantize model-f16.gguf model-{preset["gguf"]}.gguf {preset["gguf"]}',
-            f'3. 创建Modelfile: FROM ./model-{preset["gguf"]}.gguf',
-            '4. 注册到ollama: ollama create ' + model_name + '-' + quant_level + ' -f Modelfile',
-        ],
-        'estimatedVRAM': estimate_vram(
-            next((info['params'] for key, info in KNOWN_MODELS.items() if model_name in key or key in model_name), 7.0),
-            preset['bits']
-        ),
-        'note': '量化转换需要llama.cpp工具链，请确保已安装。'
-    }
-    print(json.dumps(result, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'estimate|recommend|convert'}, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 第2层 - 自定义模型导入器（扩展：支持外部文件导入）
-# ========================================================================
-openclaw_ai_stack_custom_model_importer() {
-  local action="${1:-detect}" import_path="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$import_path" "$SKPL_AI_STACK_ROOT" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, os, hashlib, shutil, glob as glob_mod
-from pathlib import Path
-
-action = sys.argv[1]
-import_path = sys.argv[2] if len(sys.argv) > 2 else ''
-stack_root = Path(sys.argv[3])
-config_path = Path(sys.argv[4])
-imports_dir = stack_root / "imports"
-imports_dir.mkdir(parents=True, exist_ok=True)
-
-SUPPORTED_FORMATS = {
-    '.gguf': {'type': 'GGUF量化模型', 'method': 'ollama_import'},
-    '.safetensors': {'type': 'SafeTensors权重', 'method': 'manual_convert'},
-    '.bin': {'type': 'PyTorch权重', 'method': 'manual_convert'},
-    '.pt': {'type': 'PyTorch模型', 'method': 'manual_convert'},
-    '.onnx': {'type': 'ONNX模型', 'method': 'onnx_runtime'},
-    '.Modelfile': {'type': 'Ollama Modelfile', 'method': 'ollama_create'},
-    '.tar.gz': {'type': '模型压缩包', 'method': 'extract_detect'},
-    '.zip': {'type': '模型压缩包', 'method': 'extract_detect'},
-}
-
-if action == 'detect':
-    # 扫描常见路径下可导入的模型文件
-    scan_paths = [
-        str(Path.home() / 'Downloads'),
-        str(Path.home() / 'models'),
-        str(Path.home()),
-        '/tmp/models',
-        str(stack_root / 'models'),
-    ]
-    found = []
-    for scan_root in scan_paths:
-        sp = Path(scan_root)
-        if not sp.exists():
-            continue
-        for ext, info in SUPPORTED_FORMATS.items():
-            try:
-                for fpath in sp.rglob(f'*{ext}'):
-                    if fpath.is_file():
-                        found.append({
-                            'path': str(fpath),
-                            'name': fpath.name,
-                            'sizeMB': round(fpath.stat().st_size / (1024 * 1024), 1),
-                            'format': ext,
-                            'type': info['type'],
-                            'method': info['method'],
-                        })
-            except PermissionError:
-                pass
-    # 限制返回数量
-    found = found[:50]
-    result = {'files': found, 'count': len(found), 'supportedFormats': list(SUPPORTED_FORMATS.keys())}
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'inspect':
-    # 检查指定文件的导入可行性
-    if not import_path:
-        print(json.dumps({'error': 'path required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    fp = Path(import_path)
-    if not fp.exists():
-        print(json.dumps({'error': f'file not found: {import_path}'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    ext = fp.suffix.lower()
-    if ext == '.tar.gz' and fp.name.endswith('.tar.gz'):
-        ext = '.tar.gz'
-
-    info = SUPPORTED_FORMATS.get(ext, {'type': '未知格式', 'method': 'unknown'})
-    file_size = fp.stat().st_size
-    checksum = hashlib.sha256(fp.read_bytes()[:65536]).hexdigest()[:16]  # 部分校验
-
-    result = {
-        'path': str(fp),
-        'name': fp.name,
-        'sizeMB': round(file_size / (1024 * 1024), 1),
-        'format': ext,
-        'type': info['type'],
-        'importMethod': info['method'],
-        'partialChecksum': checksum,
-        'canImport': info['method'] != 'unknown',
-        'steps': [],
-    }
-
-    if ext == '.gguf':
-        result['steps'] = [
-            '1. 创建Modelfile: FROM ' + str(fp),
-            f'2. 注册到ollama: ollama create {fp.stem} -f Modelfile',
-            f'3. 验证: ollama run {fp.stem} "hello"',
-        ]
-    elif ext == '.Modelfile':
-        result['steps'] = [
-            f'1. 注册到ollama: ollama create {fp.stem} -f {str(fp)}',
-            f'2. 验证: ollama run {fp.stem} "hello"',
-        ]
-    elif ext in ('.safetensors', '.bin', '.pt'):
-        result['steps'] = [
-            '1. 安装llama.cpp或对应转换工具',
-            '2. 将权重转换为GGUF格式',
-            '3. 使用ollama create注册模型',
-            '注意: 此格式需手动转换为GGUF后才能导入',
-        ]
-    elif ext == '.onnx':
-        result['steps'] = [
-            '1. ONNX模型可通过onnxruntime直接加载',
-            '2. 或转换为GGUF格式后通过ollama加载',
-        ]
-
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'import':
-    # 执行导入操作（GGUF和Modelfile）
-    if not import_path:
-        print(json.dumps({'error': 'path required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    fp = Path(import_path)
-    if not fp.exists():
-        print(json.dumps({'error': f'file not found: {import_path}'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    ext = fp.suffix.lower()
-    if fp.name.endswith('.tar.gz'):
-        ext = '.tar.gz'
-
-    result = {'path': str(fp), 'name': fp.name, 'format': ext, 'ok': False}
-
-    if ext == '.gguf':
-        # 创建Modelfile并导入
-        model_name = fp.stem.replace(' ', '_').replace('-', '_')
-        modelfile_path = imports_dir / f'{model_name}.Modelfile'
-        modelfile_path.write_text(f'FROM {fp}\n', encoding='utf-8')
-        try:
-            import subprocess
-            subprocess.check_output(['ollama', 'create', model_name, '-f', str(modelfile_path)], text=True, timeout=300, stderr=subprocess.STDOUT)
-            result['ok'] = True
-            result['modelName'] = model_name
-            result['modelfile'] = str(modelfile_path)
-            result['message'] = f'模型已成功导入为 ollama run {model_name}'
-        except subprocess.CalledProcessError as e:
-            result['error'] = str(e.output)
-        except FileNotFoundError:
-            result['error'] = 'ollama未安装，请先安装ollama'
-
-    elif ext == '.Modelfile':
-        # 直接使用Modelfile创建
-        model_name = fp.stem.replace(' ', '_')
-        try:
-            import subprocess
-            subprocess.check_output(['ollama', 'create', model_name, '-f', str(fp)], text=True, timeout=300, stderr=subprocess.STDOUT)
-            result['ok'] = True
-            result['modelName'] = model_name
-            result['message'] = f'模型已成功导入为 ollama run {model_name}'
-        except subprocess.CalledProcessError as e:
-            result['error'] = str(e.output)
-        except FileNotFoundError:
-            result['error'] = 'ollama未安装，请先安装ollama'
-
-    else:
-        result['error'] = f'不支持自动导入的格式: {ext}，请先手动转换为GGUF'
-        result['suggestion'] = '参考: ollama.com/docs/import'
-
-    # 记录导入历史
-    history_file = imports_dir / 'import_history.json'
-    history = []
-    if history_file.exists():
-        try:
-            history = json.loads(history_file.read_text(encoding='utf-8'))
-        except Exception:
-            history = []
-    history.append({
-        'path': str(fp),
-        'name': fp.name,
-        'format': ext,
-        'timestamp': __import__('time').time(),
-        'ok': result['ok'],
-    })
-    history_file.write_text(json.dumps(history, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'history':
-    # 查看导入历史
-    history_file = imports_dir / 'import_history.json'
-    if not history_file.exists():
-        print(json.dumps({'history': [], 'count': 0}, ensure_ascii=False))
-        raise SystemExit(0)
-    history = json.loads(history_file.read_text(encoding='utf-8'))
-    print(json.dumps({'history': history[-20:], 'count': len(history)}, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'detect|inspect|import|history'}, ensure_ascii=False))
 PY
 }
 
@@ -6290,7 +3732,7 @@ if resource_guard['secondPassReady']:
         route['model'] = routing_cfg.get('defaultVisionModel', route.get('model') or 'google/gemini-2.5-pro')
         route['execution'] = 'cloud' if str(route.get('model') or '').startswith(('google/', 'openrouter/', 'deepseek/', 'siliconflow/')) else 'local'
     elif route_name == 'code':
-        route['model'] = routing_cfg.get('defaultCodeModel', route.get('model') or 'ollama/qwen2.5-coder:1.5b')
+        route['model'] = routing_cfg.get('defaultCodeModel', route.get('model') or 'ollama/qwen3-coder')
         route['execution'] = 'local'
     elif route_name in ('text', 'local'):
         route['model'] = routing_cfg.get('defaultTextModel', route.get('model') or 'ollama/qwen2.5:7b')
@@ -6298,9 +3740,9 @@ if resource_guard['secondPassReady']:
     route['reason'] = 'resource-guard-second-pass-ready'
 else:
     if tier == 'emergency-cpu':
-        fallback_model = fallback_cfg.get('emergency', 'ollama/qwen3:0.6b')
+        fallback_model = fallback_cfg.get('emergency', 'ollama/qwen3:0.3b')
     elif tier == 'entry-cpu':
-        fallback_model = fallback_cfg.get('entry', 'ollama/qwen3:0.6b')
+        fallback_model = fallback_cfg.get('entry', 'ollama/qwen3:0.5b')
     else:
         fallback_model = fallback_cfg.get('advanced', 'ollama/qwen3:1.8b')
     if route_name == 'vision':
@@ -6506,7 +3948,7 @@ openclaw_ai_stack_mark_activity() {
 }
 
 openclaw_ai_stack_idle_unload_expert_if_needed() {
-  local idle_seconds="${1:-300}"
+  local idle_seconds="${1:-900}"
   openclaw_ai_stack_prepare
   local idle_model
   idle_model=$(python3 - "$SKPL_AI_STACK_STATE_DIR/last-activity.stamp" "$SKPL_AI_STACK_ROUTE_STATUS_FILE" "$idle_seconds" <<'PY'
@@ -6543,18 +3985,6 @@ PY
   if [ -n "$idle_model" ]; then
     openclaw_ai_stack_unload_local_model "$idle_model" >/dev/null 2>&1 || true
     openclaw_ai_stack_lifecycle_write_state "idle-unload" "$idle_model" "general" "unloaded" >/dev/null 2>&1 || true
-    # 规范要求: 空闲卸载后重新加载混合检索层和自进化层GPU部件
-    local default_embed_model
-    default_embed_model=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys
-cfg = json.loads(open(sys.argv[1], 'r', encoding='utf-8').read())
-print(cfg.get('retrieval', {}).get('defaultVectorModel', 'nomic-embed-text'))
-PY
-)
-    [ -n "$default_embed_model" ] && {
-      curl -sf --max-time 10 "http://localhost:11434/api/generate" \
-        -d "{\"model\":\"${default_embed_model}\",\"keep_alive\":300000}" >/dev/null 2>&1 || true
-    }
     python3 - "$SKPL_AI_STACK_RESOURCE_STATE_FILE" "$idle_seconds" <<'PY'
 import json
 import sys
@@ -6569,7 +3999,6 @@ if path.exists():
     except Exception:
         data = {}
 data['idleUnloadPolicy'] = f'after-{idle_seconds}s:done'
-data['baseLayersReloaded'] = True
 path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 PY
@@ -7086,7 +4515,7 @@ current_expert = current.get('activeExpert') or ''
 if current_model and current_model != model:
     actions.append({'type': 'release-model', 'model': current_model})
 if current_expert and current_expert != target_expert:
-    actions.append({'type': 'release-expert', 'model': current_model, 'expert': current_expert})
+    actions.append({'type': 'release-expert', 'expert': current_expert})
 if model:
     actions.append({'type': 'load-model', 'model': model, 'expert': target_expert})
 
@@ -7265,45 +4694,9 @@ print(json.dumps(payload, ensure_ascii=False))
 PY
 }
 
-# 卸载所有非必要GPU模型（检索层向量模型+自进化层评估模型）
-# 保留 safe_model 指定的基础路由模型
-openclaw_ai_stack_unload_non_essential_gpu_models() {
-  local safe_model="$1"
-  [ -z "$safe_model" ] && safe_model="ollama/qwen2.5:14b"
-  local safe_name
-  safe_name=$(echo "$safe_model" | sed 's|^ollama/||')
-  # 查询 Ollama 当前加载的模型列表
-  local loaded_models
-  loaded_models=$(curl -sf --max-time 5 http://localhost:11434/api/ps 2>/dev/null | \
-    python3 -c "import json,sys; [print(m.get('name','')) for m in json.load(sys.stdin).get('models',[])]" 2>/dev/null || true)
-  [ -z "$loaded_models" ] && return 0
-  # 需要保留的模型: 基础路由模型(安全模型)
-  echo "$loaded_models" | while IFS= read -r model_name; do
-    [ -z "$model_name" ] && continue
-    # 跳过基础路由安全模型
-    if [ "$model_name" = "$safe_name" ] || [ "$model_name" = "${safe_name}:latest" ]; then
-      continue
-    fi
-    # 卸载非必要模型: 嵌入模型、评估模型、旧的专家模型
-    if echo "$model_name" | grep -qiE 'embed|nomic|bge-|e5-|all-mini|text2vec|eval|judge|cross-encoder' 2>/dev/null; then
-      curl -sf --max-time 10 "http://localhost:11434/api/generate" \
-        -d "{\"model\":\"${model_name}\",\"keep_alive\":0}" >/dev/null 2>&1 || true
-    fi
-  done
-  return 0
-}
-
 openclaw_ai_stack_apply_expert_actions() {
   local expert_state_json="$1"
   [ -n "$expert_state_json" ] || return 0
-  # 规范要求: 模型互斥加载引擎 — 获取独占锁
-  local lock_acquired=false
-  if openclaw_ai_stack_lock_acquire "expert-loader" 300 >/dev/null 2>&1; then
-    lock_acquired=true
-  else
-    skpl_log_warn "未能获取专家模型独占锁，跳过加载"
-    return 1
-  fi
   python3 - "$expert_state_json" <<'PY' >/tmp/openclaw-ai-expert-actions.tsv
 import json
 import sys
@@ -7323,9 +4716,7 @@ PY
 )
   local lines=()
   mapfile -t lines < /tmp/openclaw-ai-expert-actions.tsv
-  local idx=0 action_type action_model action_expert last_loaded_model="" safe_text_model="ollama/qwen2.5:14b" current_route_json precheck_json
-  # 规范要求: 完全卸载所有非必要GPU组件(检索+自进化层的GPU模型)
-  openclaw_ai_stack_unload_non_essential_gpu_models "$safe_text_model" >/dev/null 2>&1 || true
+  local idx=0 action_type action_model action_expert last_loaded_model="" safe_text_model="ollama/qwen2.5:7b" current_route_json precheck_json
   while [ $idx -lt ${#lines[@]} ]; do
     action_type="${lines[$idx]}"
     action_model="${lines[$((idx+1))]}"
@@ -7361,9 +4752,9 @@ fallback_map = (cfg.get('routing') or {}).get('fallbackModels') or {}
 tier = profile.get('tier') or 'entry-cpu'
 fallback_model = fallback_map.get('advanced', 'ollama/qwen3:1.8b')
 if tier == 'emergency-cpu':
-    fallback_model = fallback_map.get('emergency', 'ollama/qwen3:0.6b')
+    fallback_model = fallback_map.get('emergency', 'ollama/qwen3:0.3b')
 elif tier == 'entry-cpu':
-    fallback_model = fallback_map.get('entry', 'ollama/qwen3:0.6b')
+    fallback_model = fallback_map.get('entry', 'ollama/qwen3:0.5b')
 elif route_name == 'vision':
     fallback_model = fallback_map.get('cpuVision', 'local-ocr')
 elif route_name == 'code':
@@ -7387,7 +4778,7 @@ profile = json.loads(sys.argv[1])
 budget = profile.get('budget') or {}
 gpu = int(budget.get('usableGpuMb', 0) or 0)
 mem = int(budget.get('usableMemoryMb', 0) or 0)
-raise SystemExit(0 if gpu >= 5000 or mem >= 6144 else 1)
+raise SystemExit(0 if gpu >= 3300 or mem >= 6144 else 1)
 PY
         then
           action_model=$(python3 - "$precheck_json" <<'PY'
@@ -7437,10 +4828,6 @@ PY
   done
   if [ -n "$last_loaded_model" ]; then
     openclaw_apply_and_restart >/dev/null 2>&1 || true
-  fi
-  # 规范要求: 释放独占锁
-  if [ "$lock_acquired" = "true" ]; then
-    openclaw_ai_stack_lock_release "expert-loader" >/dev/null 2>&1 || true
   fi
 }
 
@@ -7674,1222 +5061,6 @@ allowed = len(data.get('allowedPlugins') or [])
 installed = len(data.get('installedPlugins') or [])
 security = ((data.get('approvalDefaults') or {}).get('security') or '-')
 print(f"allow={allowed} | installed={installed} | security={security}")
-PY
-}
-
-# ========================================================================
-# 插件市场连接器 — 连接远程插件仓库获取可用插件列表
-# ========================================================================
-openclaw_ai_stack_plugin_marketplace() {
-  local action="${1:-list}"
-  openclaw_ai_stack_prepare
-  local market_dir="${SKPL_AI_STACK_ROOT:-/tmp/openclaw-ai}/plugin_marketplace"
-  python3 - "$action" "$market_dir" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, time, hashlib
-from pathlib import Path
-import urllib.request
-
-action = sys.argv[1]
-market_dir = Path(sys.argv[2])
-market_dir.mkdir(parents=True, exist_ok=True)
-cfg = json.loads(open(sys.argv[3], 'r', encoding='utf-8').read())
-registry_url = (cfg.get('plugins') or {}).get('registryUrl', 'https://raw.githubusercontent.com/openclaw/plugins-registry/main/index.json')
-
-def fetch_registry():
-    try:
-        req = urllib.request.Request(registry_url, headers={'User-Agent': 'OpenClaw-PluginMarket/1.0'})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode('utf-8'))
-    except Exception:
-        return None
-
-if action == 'list':
-    # 优先使用缓存
-    cached_path = market_dir / 'registry_cache.json'
-    registry = None
-    if cached_path.exists():
-        try:
-            cached = json.loads(cached_path.read_text(encoding='utf-8'))
-            if int(time.time()) - cached.get('fetchedAt', 0) < 3600:  # 1小时缓存
-                registry = cached.get('registry')
-        except Exception:
-            pass
-    if registry is None:
-        registry = fetch_registry()
-        if registry:
-            cached_path.write_text(json.dumps({'fetchedAt': int(time.time()), 'registry': registry}, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-
-    if not registry:
-        print(json.dumps({'plugins': [], 'offline': True}, ensure_ascii=False))
-        raise SystemExit(0)
-
-    # 分类展示
-    categories = {}
-    for p in registry.get('plugins', []):
-        cat = p.get('category', 'uncategorized')
-        categories.setdefault(cat, []).append({
-            'name': p.get('name', ''),
-            'version': p.get('version', ''),
-            'description': p.get('description', ''),
-            'author': p.get('author', ''),
-            'rating': p.get('rating', 0),
-            'downloads': p.get('downloads', 0),
-            'verified': p.get('verified', False),
-            'manifestUrl': p.get('manifestUrl', ''),
-        })
-
-    print(json.dumps({'plugins': registry.get('plugins', []), 'categories': categories, 'totalCount': len(registry.get('plugins', [])), 'updatedAt': registry.get('updatedAt', '')}, ensure_ascii=False))
-
-elif action == 'install':
-    # 本地模拟安装: 创建插件目录和 manifest
-    plugin_name = sys.argv[4] if len(sys.argv) > 4 else ''
-    if not plugin_name:
-        print(json.dumps({'error': 'missing plugin name'}, ensure_ascii=False))
-        raise SystemExit(1)
-    registry = fetch_registry()
-    if not registry:
-        print(json.dumps({'error': 'registry unavailable'}, ensure_ascii=False))
-        raise SystemExit(1)
-    # 查找插件
-    plugin_info = None
-    for p in registry.get('plugins', []):
-        if p.get('name', '').lower() == plugin_name.lower():
-            plugin_info = p
-            break
-    if not plugin_info:
-        print(json.dumps({'error': f'plugin {plugin_name} not found in registry'}, ensure_ascii=False))
-        raise SystemExit(1)
-    # 安全扫描
-    security_flags = []
-    for tag in plugin_info.get('tags', []):
-        if tag in ('system-access', 'network', 'filesystem'):
-            security_flags.append(tag)
-    risk = 'critical' if 'system-access' in security_flags else ('high' if security_flags else 'low')
-    result = {
-        'plugin': plugin_info['name'],
-        'version': plugin_info.get('version'),
-        'installed': True,
-        'securityScan': {'risk': risk, 'flags': security_flags, 'recommendation': 'review before use' if risk != 'low' else 'safe'},
-        'manifestUrl': plugin_info.get('manifestUrl', ''),
-    }
-    print(json.dumps(result, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 二进制分析工具集 + 十六进制编辑工具
-# ========================================================================
-openclaw_ai_stack_binary_tools() {
-  local action="$1" file_path="$2"
-  [ -z "$file_path" ] && { echo '{}'; return 1; }
-  python3 - "$action" "$file_path" <<'PY'
-import json, sys, os, hashlib
-
-action = sys.argv[1]
-file_path = sys.argv[2]
-result = {'action': action, 'file': file_path, 'ok': False}
-
-if not os.path.isfile(file_path):
-    result['error'] = 'file not found'
-    print(json.dumps(result, ensure_ascii=False))
-    raise SystemExit(0)
-
-try:
-    file_size = os.path.getsize(file_path)
-    result['fileSize'] = file_size
-    result['fileHash'] = hashlib.sha256(open(file_path, 'rb').read()).hexdigest()
-
-    if action == 'info':
-        result['ok'] = True
-        result['info'] = {
-            'sizeBytes': file_size,
-            'sha256': result['fileHash'],
-            'isExecutable': os.access(file_path, os.X_OK),
-            'magicBytes': open(file_path, 'rb').read(16).hex(),
-        }
-        # 常见文件类型检测
-        magic = open(file_path, 'rb').read(8)
-        if magic[:2] == b'MZ':
-            result['info']['fileType'] = 'PE (Windows executable)'
-        elif magic[:4] == b'\x7fELF':
-            result['info']['fileType'] = 'ELF (Linux executable)'
-        elif magic[:4] == b'\xca\xfe\xba\xbe' or magic[:4] == b'\xfe\xed\xfa\xce':
-            result['info']['fileType'] = 'Mach-O (macOS executable)'
-        elif magic[:2] == b'PK':
-            result['info']['fileType'] = 'ZIP archive'
-        elif magic[:3] == b'\x1f\x8b\x08':
-            result['info']['fileType'] = 'GZip compressed'
-        else:
-            result['info']['fileType'] = 'Unknown binary'
-
-    elif action == 'hexdump':
-        max_bytes = min(file_size, 4096)
-        data = open(file_path, 'rb').read(max_bytes)
-        offset = 0
-        lines = []
-        while offset < len(data):
-            chunk = data[offset:offset+16]
-            hex_part = ' '.join(f'{b:02x}' for b in chunk)
-            ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
-            lines.append({'offset': f'{offset:08x}', 'hex': hex_part, 'ascii': ascii_part})
-            offset += 16
-        result['ok'] = True
-        result['hexdump'] = lines
-        result['totalBytes'] = file_size
-
-    elif action == 'checksums':
-        algos = ['md5', 'sha1', 'sha256', 'sha512']
-        data = open(file_path, 'rb').read()
-        checksums = {}
-        for algo in algos:
-            h = getattr(hashlib, algo)()
-            h.update(data)
-            checksums[algo] = h.hexdigest()
-        result['ok'] = True
-        result['checksums'] = checksums
-
-    elif action == 'strings':
-        import re
-        data = open(file_path, 'rb').read()[:1048576]  # 前1MB
-        matches = re.findall(b'[ -~]{4,}', data)
-        strings_list = [s.decode('ascii', errors='replace') for s in matches[:200]]
-        result['ok'] = True
-        result['strings'] = strings_list[:100]
-
-    else:
-        result['error'] = f'unknown action: {action}'
-
-except Exception as e:
-    result['error'] = str(e)
-
-print(json.dumps(result, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 第4层 - 自定义工具链
-# ========================================================================
-openclaw_ai_stack_custom_toolchain() {
-  local action="${1:-list}" tool_name="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$tool_name" "$SKPL_AI_STACK_ROOT/toolchain" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, os, time, hashlib
-from pathlib import Path
-
-action = sys.argv[1]
-tool_name = sys.argv[2] if len(sys.argv) > 2 else ''
-toolchain_dir = Path(sys.argv[3])
-config_path = Path(sys.argv[4])
-
-toolchain_dir.mkdir(parents=True, exist_ok=True)
-registry_file = toolchain_dir / "toolchain.json"
-
-# 加载注册表
-registry = {'tools': {}, 'pipelines': []}
-if registry_file.exists():
-    try:
-        registry = json.loads(registry_file.read_text(encoding='utf-8'))
-    except Exception:
-        pass
-
-if action == 'list':
-    tools = []
-    for name, info in registry.get('tools', {}).items():
-        tools.append({
-            'name': name,
-            'type': info.get('type', 'unknown'),
-            'language': info.get('language', 'shell'),
-            'description': info.get('description', ''),
-            'created': info.get('created', 0),
-            'lastUsed': info.get('lastUsed', 0),
-        })
-    pipelines = registry.get('pipelines', [])
-    print(json.dumps({
-        'tools': tools, 'count': len(tools),
-        'pipelines': pipelines, 'pipelineCount': len(pipelines),
-    }, ensure_ascii=False))
-
-elif action == 'register':
-    # 注册一个新工具
-    if not tool_name:
-        print(json.dumps({'error': 'tool_name required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    tool_type = sys.argv[5] if len(sys.argv) > 5 else 'script'
-    tool_lang = sys.argv[6] if len(sys.argv) > 6 else 'shell'
-    tool_desc = sys.argv[7] if len(sys.argv) > 7 else ''
-
-    registry.setdefault('tools', {})
-    registry['tools'][tool_name] = {
-        'type': tool_type,
-        'language': tool_lang,
-        'description': tool_desc,
-        'created': int(time.time()),
-        'lastUsed': 0,
-        'version': '1.0.0',
-    }
-    registry_file.write_text(json.dumps(registry, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps({'ok': True, 'tool': tool_name, 'type': tool_type}, ensure_ascii=False))
-
-elif action == 'unregister':
-    if not tool_name:
-        print(json.dumps({'error': 'tool_name required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    if tool_name in registry.get('tools', {}):
-        del registry['tools'][tool_name]
-        registry_file.write_text(json.dumps(registry, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-        print(json.dumps({'ok': True, 'removed': tool_name}, ensure_ascii=False))
-    else:
-        print(json.dumps({'error': f'tool not found: {tool_name}'}, ensure_ascii=False))
-
-elif action == 'pipeline':
-    # 定义工具管道
-    pipeline_name = tool_name
-    steps_raw = sys.argv[5] if len(sys.argv) > 5 else '[]'
-    try:
-        steps = json.loads(steps_raw)
-    except Exception:
-        print(json.dumps({'error': 'invalid steps JSON'}, ensure_ascii=False))
-        raise SystemExit(1)
-    pipeline = {'name': pipeline_name, 'steps': steps, 'created': int(time.time())}
-    registry.setdefault('pipelines', [])
-    # 替换同名管道
-    registry['pipelines'] = [p for p in registry['pipelines'] if p.get('name') != pipeline_name]
-    registry['pipelines'].append(pipeline)
-    registry_file.write_text(json.dumps(registry, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps({'ok': True, 'pipeline': pipeline_name, 'steps': len(steps)}, ensure_ascii=False))
-
-elif action == 'run':
-    # 运行一个工具（安全沙箱执行）
-    if not tool_name:
-        print(json.dumps({'error': 'tool_name required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    tool_info = registry.get('tools', {}).get(tool_name)
-    if not tool_info:
-        print(json.dumps({'error': f'tool not registered: {tool_name}'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    tool_path = toolchain_dir / f'{tool_name}.{tool_info.get("language", "sh")}'
-    if not tool_path.exists():
-        print(json.dumps({'error': f'tool script not found: {tool_path}', 'ok': False}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    # 更新最后使用时间
-    tool_info['lastUsed'] = int(time.time())
-    registry_file.write_text(json.dumps(registry, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-
-    # 安全执行（超时30秒）
-    try:
-        import subprocess, tempfile
-        result = subprocess.run(
-            ['bash', str(tool_path)],
-            capture_output=True, text=True, timeout=30,
-            cwd=str(toolchain_dir),
-        )
-        print(json.dumps({
-            'ok': result.returncode == 0,
-            'exitCode': result.returncode,
-            'stdout': result.stdout[:2000],
-            'stderr': result.stderr[:1000],
-        }, ensure_ascii=False))
-    except subprocess.TimeoutExpired:
-        print(json.dumps({'error': 'execution timeout (30s)', 'ok': False}, ensure_ascii=False))
-    except Exception as e:
-        print(json.dumps({'error': str(e), 'ok': False}, ensure_ascii=False))
-
-elif action == 'create':
-    # 创建新的工具脚本
-    if not tool_name:
-        print(json.dumps({'error': 'tool_name required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    tool_lang = sys.argv[5] if len(sys.argv) > 5 else 'shell'
-    tool_content = sys.argv[6] if len(sys.argv) > 6 else '#!/bin/bash\necho "hello"'
-
-    ext_map = {'shell': 'sh', 'python': 'py', 'js': 'js', 'node': 'js'}
-    ext = ext_map.get(tool_lang, 'sh')
-    tool_path = toolchain_dir / f'{tool_name}.{ext}'
-    tool_path.write_text(tool_content, encoding='utf-8')
-    tool_path.chmod(0o755)
-
-    # 自动注册
-    registry.setdefault('tools', {})
-    registry['tools'][tool_name] = {
-        'type': 'script',
-        'language': tool_lang,
-        'description': '',
-        'created': int(time.time()),
-        'lastUsed': 0,
-        'version': '1.0.0',
-    }
-    registry_file.write_text(json.dumps(registry, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps({'ok': True, 'tool': tool_name, 'path': str(tool_path)}, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'list|register|unregister|pipeline|run|create'}, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 第4层 - 依赖管理工具
-# ========================================================================
-openclaw_ai_stack_dependency_manager() {
-  local action="${1:-check}" pkg_name="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$pkg_name" "$SKPL_AI_STACK_ROOT/deps" <<'PY'
-import json, sys, os, time, subprocess, shutil
-from pathlib import Path
-
-action = sys.argv[1]
-pkg_name = sys.argv[2] if len(sys.argv) > 2 else ''
-deps_dir = Path(sys.argv[3])
-deps_dir.mkdir(parents=True, exist_ok=True)
-
-SUPPORTED_PACKAGE_MANAGERS = {
-    'pip': {'cmd': 'pip3', 'install': 'install', 'check': 'show', 'list': 'list'},
-    'apt': {'cmd': 'apt-get', 'install': 'install -y', 'check': 'list --installed', 'list': 'list --installed'},
-    'npm': {'cmd': 'npm', 'install': 'install -g', 'check': 'list -g', 'list': 'list -g --depth=0'},
-    'brew': {'cmd': 'brew', 'install': 'install', 'check': 'list', 'list': 'list'},
-}
-
-def check_package(manager, pkg):
-    pm = SUPPORTED_PACKAGE_MANAGERS.get(manager)
-    if not pm:
-        return False
-    try:
-        if manager == 'pip':
-            r = subprocess.run([pm['cmd'], 'show', pkg], capture_output=True, text=True, timeout=15)
-            return r.returncode == 0 and 'Name:' in r.stdout
-        elif manager == 'apt':
-            r = subprocess.run(['dpkg', '-l', pkg], capture_output=True, text=True, timeout=15)
-            return 'ii' in r.stdout[:30]
-        elif manager == 'npm':
-            r = subprocess.run([pm['cmd'], 'list', '-g', pkg], capture_output=True, text=True, timeout=15)
-            return pkg in r.stdout
-    except Exception:
-        return False
-    return False
-
-if action == 'check':
-    # 检查所有关键依赖
-    deps_state_file = deps_dir / "dependencies.json"
-    required_deps = {
-        'runtime': ['python3', 'ollama', 'curl', 'jq'],
-        'python_pkgs': ['json', 'hashlib', 'sqlite3', 'subprocess', 'pathlib'],
-        'optional': ['nvidia-smi', 'docker', 'git', 'wget'],
-    }
-
-    results = {'runtime': {}, 'python': {}, 'optional': {}, 'allOk': True}
-    for dep in required_deps['runtime']:
-        ok = shutil.which(dep) is not None
-        results['runtime'][dep] = ok
-        if not ok:
-            results['allOk'] = False
-
-    for dep in required_deps['python_pkgs']:
-        try:
-            __import__(dep)
-            results['python'][dep] = True
-        except ImportError:
-            results['python'][dep] = False
-            if dep not in ('lancedb', 'onnxruntime'):
-                results['allOk'] = False
-
-    for dep in required_deps['optional']:
-        ok = shutil.which(dep) is not None
-        results['optional'][dep] = ok
-
-    results['timestamp'] = int(time.time())
-    deps_state_file.write_text(json.dumps(results, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps(results, ensure_ascii=False))
-
-elif action == 'install':
-    # 安装指定依赖
-    if not pkg_name:
-        print(json.dumps({'error': 'package name required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    manager = sys.argv[4] if len(sys.argv) > 4 else 'pip'
-    pm = SUPPORTED_PACKAGE_MANAGERS.get(manager)
-    if not pm:
-        print(json.dumps({'error': f'unsupported manager: {manager}', 'supported': list(SUPPORTED_PACKAGE_MANAGERS.keys())}, ensure_ascii=False))
-        raise SystemExit(1)
-    result = {'package': pkg_name, 'manager': manager, 'ok': False}
-    try:
-        cmd = [pm['cmd']] + pm['install'].split() + [pkg_name]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        result['ok'] = r.returncode == 0
-        result['stdout'] = r.stdout[-500:]
-        result['stderr'] = r.stderr[-500:]
-    except Exception as e:
-        result['error'] = str(e)
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'list':
-    # 列出所有已安装的pip包（AI相关）
-    try:
-        r = subprocess.run(['pip3', 'list', '--format=json'], capture_output=True, text=True, timeout=30)
-        all_pkgs = json.loads(r.stdout) if r.returncode == 0 else []
-        ai_keywords = ['torch', 'transformers', 'llama', 'ollama', 'openai', 'langchain', 'vllm', 'tensorrt',
-                       'onnx', 'cuda', 'numpy', 'scipy', 'pandas', 'scikit', 'sentence', 'tokenizers',
-                       'accelerate', 'bitsandbytes', 'peft', 'lora', 'gguf', 'lancedb', 'chromadb']
-        filtered = [p for p in all_pkgs if any(kw in p.get('name', '').lower() for kw in ai_keywords)]
-        print(json.dumps({'packages': filtered, 'count': len(filtered), 'total': len(all_pkgs)}, ensure_ascii=False))
-    except Exception as e:
-        print(json.dumps({'error': str(e)}, ensure_ascii=False))
-
-elif action == 'verify':
-    # 验证关键包版本兼容性
-    checks = {
-        'python': {'min': '3.8', 'current': sys.version.split()[0]},
-        'pip': {},
-    }
-    try:
-        r = subprocess.run(['pip3', '--version'], capture_output=True, text=True, timeout=5)
-        checks['pip']['current'] = r.stdout.split()[1] if r.stdout else 'unknown'
-    except Exception:
-        checks['pip']['current'] = 'not found'
-
-    pkgs_to_check = ['numpy', 'torch']
-    for pkg in pkgs_to_check:
-        try:
-            r = subprocess.run(['pip3', 'show', pkg], capture_output=True, text=True, timeout=10)
-            for line in r.stdout.split('\n'):
-                if line.startswith('Version:'):
-                    checks[pkg] = {'current': line.split(':')[1].strip()}
-                    break
-        except Exception:
-            checks[pkg] = {'current': 'not installed'}
-
-    print(json.dumps({'checks': checks, 'ok': True}, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'check|install|list|verify'}, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 第4层 - 系统运维工具
-# ========================================================================
-openclaw_ai_stack_system_ops() {
-  local action="${1:-health}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$SKPL_AI_STACK_ROOT" <<'PY'
-import json, sys, os, time, shutil, subprocess, platform
-from pathlib import Path
-
-action = sys.argv[1]
-stack_root = Path(sys.argv[2])
-
-def get_memory_info():
-    mem = {'totalMb': 0, 'availableMb': 0, 'usedMb': 0, 'percentUsed': 0}
-    try:
-        with open('/proc/meminfo', 'r') as f:
-            for line in f:
-                if line.startswith('MemTotal:'):
-                    mem['totalMb'] = int(line.split()[1]) // 1024
-                elif line.startswith('MemAvailable:'):
-                    mem['availableMb'] = int(line.split()[1]) // 1024
-        if mem['totalMb'] > 0:
-            mem['usedMb'] = mem['totalMb'] - mem['availableMb']
-            mem['percentUsed'] = round(mem['usedMb'] / mem['totalMb'] * 100, 1)
-    except Exception:
-        pass
-    return mem
-
-def get_disk_info(path='/'):
-    try:
-        usage = shutil.disk_usage(path)
-        return {
-            'totalGb': round(usage.total / (1024**3), 1),
-            'usedGb': round(usage.used / (1024**3), 1),
-            'freeGb': round(usage.free / (1024**3), 1),
-            'percentUsed': round(usage.used / usage.total * 100, 1),
-        }
-    except Exception:
-        return {'error': 'unavailable'}
-
-def get_gpu_info():
-    try:
-        o = subprocess.check_output(
-            ['nvidia-smi', '--query-gpu=name,memory.total,memory.used,memory.free,utilization.gpu,temperature.gpu',
-             '--format=csv,noheader,nounits'], text=True, timeout=10
-        ).strip()
-        parts = [p.strip() for p in o.split(',')]
-        return {
-            'name': parts[0] if len(parts) > 0 else 'unknown',
-            'memoryTotalMb': int(parts[1]) if len(parts) > 1 else 0,
-            'memoryUsedMb': int(parts[2]) if len(parts) > 2 else 0,
-            'memoryFreeMb': int(parts[3]) if len(parts) > 3 else 0,
-            'gpuUtilization': int(parts[4]) if len(parts) > 4 else 0,
-            'temperature': int(parts[5]) if len(parts) > 5 else 0,
-        }
-    except Exception:
-        return None
-
-def get_process_info():
-    try:
-        r = subprocess.run(['ps', 'aux', '--sort=-%mem'], capture_output=True, text=True, timeout=10)
-        lines = r.stdout.strip().split('\n')
-        top = []
-        for line in lines[1:6]:
-            parts = line.split()
-            if len(parts) >= 11:
-                top.append({
-                    'user': parts[0], 'pid': parts[1],
-                    'cpu': parts[2], 'mem': parts[3],
-                    'command': ' '.join(parts[10:])[:80],
-                })
-        # 检查ollama进程
-        ollama_running = any('ollama' in ' '.join(parts) for parts in [line.split() for line in lines[1:]])
-        return {'topProcesses': top, 'ollamaRunning': ollama_running}
-    except Exception:
-        return {'error': 'unavailable'}
-
-if action == 'health':
-    # 综合健康检查
-    memory = get_memory_info()
-    disk = get_disk_info()
-    gpu = get_gpu_info()
-    procs = get_process_info()
-    uptime_seconds = int(time.time() - os.stat('/proc/1').st_ctime) if os.path.exists('/proc/1') else 0
-
-    issues = []
-    if memory['percentUsed'] > 90:
-        issues.append({'level': 'warning', 'component': 'memory', 'message': f'内存使用率 {memory["percentUsed"]}%'})
-    if memory['percentUsed'] > 95:
-        issues.append({'level': 'critical', 'component': 'memory', 'message': f'内存严重不足 {memory["percentUsed"]}%'})
-    if disk['percentUsed'] > 85:
-        issues.append({'level': 'warning', 'component': 'disk', 'message': f'磁盘使用率 {disk["percentUsed"]}%'})
-    if gpu and gpu['temperature'] > 80:
-        issues.append({'level': 'warning', 'component': 'gpu', 'message': f'GPU温度 {gpu["temperature"]}°C'})
-    if gpu and gpu['memoryFreeMb'] < 500:
-        issues.append({'level': 'warning', 'component': 'gpu', 'message': f'GPU显存不足 {gpu["memoryFreeMb"]}MB'})
-
-    health_status = 'critical' if any(i['level'] == 'critical' for i in issues) else (
-        'warning' if issues else 'healthy'
-    )
-
-    result = {
-        'status': health_status,
-        'timestamp': int(time.time()),
-        'hostname': platform.node(),
-        'system': platform.system(),
-        'uptimeHours': round(uptime_seconds / 3600, 1),
-        'memory': memory,
-        'disk': disk,
-        'gpu': gpu,
-        'processes': procs,
-        'issues': issues,
-    }
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'cleanup':
-    # 清理临时文件和缓存
-    cleanup_results = []
-    temp_dirs = [
-        stack_root / 'cache' / 'temp',
-        stack_root / 'cache' / 'route',
-        Path('/tmp/skpl'),
-    ]
-    total_freed = 0
-    for d in temp_dirs:
-        if not d.exists():
-            continue
-        size_before = sum(f.stat().st_size for f in d.rglob('*') if f.is_file())
-        removed = 0
-        for f in d.rglob('*'):
-            if f.is_file():
-                try:
-                    # 只清理超过1小时的文件
-                    if time.time() - f.stat().st_mtime > 3600:
-                        f.unlink()
-                        removed += 1
-                except Exception:
-                    pass
-        total_freed += size_before
-        cleanup_results.append({'dir': str(d), 'filesRemoved': removed, 'freedMB': round(size_before / 1024 / 1024, 1)})
-
-    print(json.dumps({
-        'cleaned': cleanup_results,
-        'totalFreedMB': round(total_freed / 1024 / 1024, 1),
-        'ok': True,
-    }, ensure_ascii=False))
-
-elif action == 'restart-services':
-    # 重启关键服务
-    services = {'ollama': ['systemctl', 'restart', 'ollama']}
-    results = {}
-    for svc, cmd in services.items():
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            results[svc] = {'restarted': r.returncode == 0, 'exitCode': r.returncode}
-        except Exception as e:
-            results[svc] = {'restarted': False, 'error': str(e)}
-
-    print(json.dumps({'services': results, 'ok': all(v.get('restarted') for v in results.values())}, ensure_ascii=False))
-
-elif action == 'backup-config':
-    # 备份AI栈配置
-    backup_dir = stack_root / 'backups'
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    config_file = stack_root / 'config.json'
-    if config_file.exists():
-        import shutil
-        ts = int(time.time())
-        backup_path = backup_dir / f'config-backup-{ts}.json'
-        shutil.copy2(str(config_file), str(backup_path))
-
-        # 清理旧备份（保留最近10个）
-        backups = sorted(backup_dir.glob('config-backup-*.json'), key=lambda p: p.stat().st_mtime, reverse=True)
-        for old in backups[10:]:
-            old.unlink()
-
-        print(json.dumps({'ok': True, 'backup': str(backup_path), 'retained': min(len(backups), 10)}, ensure_ascii=False))
-    else:
-        print(json.dumps({'error': 'config.json not found', 'ok': False}, ensure_ascii=False))
-
-elif action == 'logs':
-    # 查看最近的系统日志
-    log_sources = {
-        'dmesg': ['dmesg', '--level=err,warn'],
-        'journalctl': ['journalctl', '-n', '20', '--no-pager'],
-    }
-    logs = {}
-    for name, cmd in log_sources.items():
-        try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            logs[name] = r.stdout[-1000:] if r.stdout else '(empty)'
-        except Exception as e:
-            logs[name] = f'(error: {e})'
-
-    print(json.dumps({'logs': logs, 'ok': True}, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'health|cleanup|restart-services|backup-config|logs'}, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 第4层 - 多语言代码执行器
-# ========================================================================
-openclaw_ai_stack_multi_lang_executor() {
-  local lang="${1:-python}" code="${2:-}" timeout_sec="${3:-30}"
-  openclaw_ai_stack_prepare
-  python3 - "$lang" "$code" "$timeout_sec" "$SKPL_AI_STACK_ROOT/code-exec" <<'PY'
-import json, sys, os, subprocess, tempfile, time
-from pathlib import Path
-
-lang = sys.argv[1]
-code = sys.argv[2]
-timeout_sec = int(sys.argv[3])
-exec_dir = Path(sys.argv[4])
-exec_dir.mkdir(parents=True, exist_ok=True)
-
-result = {'lang': lang, 'ok': False, 'output': '', 'error': '', 'exitCode': -1, 'timeMs': 0}
-
-if not code:
-    result['error'] = 'no code provided'
-    print(json.dumps(result, ensure_ascii=False))
-    raise SystemExit(0)
-
-# 安全限制：禁止危险操作
-DANGEROUS_PATTERNS = [
-    'rm -rf /', 'mkfs.', 'dd if=', ':(){ :|:& };:', 'chmod 777 /',
-    '> /dev/sda', 'wget -O /etc/', 'curl.*> /etc/',
-    '__import__("os").system', 'eval(', 'exec(',
-]
-code_lower = code.lower()
-for pattern in DANGEROUS_PATTERNS:
-    if pattern.lower() in code_lower:
-        result['error'] = f'Blocked dangerous pattern: {pattern}'
-        result['blocked'] = True
-        print(json.dumps(result, ensure_ascii=False))
-        raise SystemExit(0)
-
-start_time = time.time()
-
-try:
-    if lang == 'python':
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, dir=str(exec_dir)) as f:
-            f.write(code)
-            f.flush()
-            script_path = f.name
-        proc = subprocess.run(
-            ['python3', script_path],
-            capture_output=True, text=True, timeout=timeout_sec,
-            cwd=str(exec_dir),
-        )
-        result['output'] = proc.stdout[:5000]
-        result['error'] = proc.stderr[:2000]
-        result['exitCode'] = proc.returncode
-        result['ok'] = proc.returncode == 0
-        os.unlink(script_path)
-
-    elif lang == 'bash' or lang == 'shell':
-        proc = subprocess.run(
-            ['bash', '-c', code],
-            capture_output=True, text=True, timeout=timeout_sec,
-            cwd=str(exec_dir),
-        )
-        result['output'] = proc.stdout[:5000]
-        result['error'] = proc.stderr[:2000]
-        result['exitCode'] = proc.returncode
-        result['ok'] = proc.returncode == 0
-
-    elif lang == 'javascript' or lang == 'js':
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False, dir=str(exec_dir)) as f:
-            f.write(code)
-            f.flush()
-            script_path = f.name
-        proc = subprocess.run(
-            ['node', script_path],
-            capture_output=True, text=True, timeout=timeout_sec,
-        )
-        result['output'] = proc.stdout[:5000]
-        result['error'] = proc.stderr[:2000]
-        result['exitCode'] = proc.returncode
-        result['ok'] = proc.returncode == 0
-        os.unlink(script_path)
-
-    elif lang == 'ruby':
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.rb', delete=False, dir=str(exec_dir)) as f:
-            f.write(code)
-            f.flush()
-            script_path = f.name
-        proc = subprocess.run(
-            ['ruby', script_path],
-            capture_output=True, text=True, timeout=timeout_sec,
-        )
-        result['output'] = proc.stdout[:5000]
-        result['error'] = proc.stderr[:2000]
-        result['exitCode'] = proc.returncode
-        result['ok'] = proc.returncode == 0
-        os.unlink(script_path)
-
-    elif lang == 'perl':
-        proc = subprocess.run(
-            ['perl', '-e', code],
-            capture_output=True, text=True, timeout=timeout_sec,
-        )
-        result['output'] = proc.stdout[:5000]
-        result['error'] = proc.stderr[:2000]
-        result['exitCode'] = proc.returncode
-        result['ok'] = proc.returncode == 0
-
-    else:
-        result['error'] = f'unsupported language: {lang}. Supported: python, bash, javascript, ruby, perl'
-        result['supportedLanguages'] = ['python', 'bash', 'shell', 'javascript', 'js', 'ruby', 'perl']
-
-except subprocess.TimeoutExpired:
-    result['error'] = f'execution timed out after {timeout_sec}s'
-    result['ok'] = False
-except FileNotFoundError as e:
-    result['error'] = f'runtime not found: {e}'
-    result['ok'] = False
-except Exception as e:
-    result['error'] = str(e)
-    result['ok'] = False
-
-result['timeMs'] = round((time.time() - start_time) * 1000)
-print(json.dumps(result, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 第4层 - 调试工具集
-# ========================================================================
-openclaw_ai_stack_debug_toolset() {
-  local action="${1:-trace}" target="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$target" "$SKPL_AI_STACK_ROOT/debug" "$SKPL_AI_STACK_ROOT" <<'PY'
-import json, sys, os, time, hashlib, traceback, pdb as pdb_module
-from pathlib import Path
-
-action = sys.argv[1]
-target = sys.argv[2] if len(sys.argv) > 2 else ''
-debug_dir = Path(sys.argv[3])
-stack_root = Path(sys.argv[4])
-debug_dir.mkdir(parents=True, exist_ok=True)
-
-if action == 'trace':
-    # 分析Python调用追踪
-    trace_log = debug_dir / "trace.log"
-    result = {'traces': [], 'count': 0}
-
-    # 检查最近的错误日志
-    error_logs = sorted(stack_root.glob('**/*.log'), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
-    for log_file in error_logs[:3]:
-        if not log_file.exists():
-            continue
-        try:
-            content = log_file.read_text(encoding='utf-8', errors='ignore')
-            for line in content.split('\n')[-50:]:
-                if 'error' in line.lower() or 'traceback' in line.lower() or 'exception' in line.lower():
-                    result['traces'].append({
-                        'source': str(log_file.name),
-                        'line': line[:200],
-                    })
-        except Exception:
-            pass
-
-    # 检查Python异常信息
-    try:
-        import traceback as tb
-        result['pythonVersion'] = sys.version
-        result['platform'] = sys.platform
-    except Exception:
-        pass
-
-    result['count'] = len(result['traces'])
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'inspect':
-    # 检查指定模块/文件的基本信息
-    if not target:
-        print(json.dumps({'error': 'target required'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    target_path = Path(target)
-    result = {'target': target, 'exists': target_path.exists()}
-
-    if target_path.exists():
-        stat = target_path.stat()
-        result['size'] = stat.st_size
-        result['modified'] = stat.st_mtime
-        result['isFile'] = target_path.is_file()
-        result['isDir'] = target_path.is_dir()
-
-        if target_path.is_file():
-            try:
-                content = target_path.read_text(encoding='utf-8', errors='ignore')
-                result['lines'] = len(content.split('\n'))
-                result['chars'] = len(content)
-                result['checksum'] = hashlib.md5(content.encode()).hexdigest()[:8]
-                # 检测文件类型
-                if content.startswith('#!'):
-                    result['interpreter'] = content.split('\n')[0][2:].strip()
-                if target_path.suffix == '.py':
-                    result['language'] = 'python'
-                elif target_path.suffix in ('.sh', '.bash'):
-                    result['language'] = 'shell'
-                elif target_path.suffix == '.js':
-                    result['language'] = 'javascript'
-                elif target_path.suffix == '.json':
-                    result['language'] = 'json'
-                    try:
-                        parsed = json.loads(content)
-                        if isinstance(parsed, dict):
-                            result['jsonKeys'] = list(parsed.keys())[:20]
-                        elif isinstance(parsed, list):
-                            result['jsonItems'] = len(parsed)
-                    except Exception:
-                        result['jsonValid'] = False
-            except Exception as e:
-                result['readError'] = str(e)
-    else:
-        # 尝试作为模块查找
-        try:
-            mod = __import__(target, fromlist=[''])
-            result['moduleFound'] = True
-            result['moduleFile'] = getattr(mod, '__file__', 'unknown')
-            result['moduleAttrs'] = [a for a in dir(mod) if not a.startswith('_')][:30]
-        except ImportError:
-            result['moduleFound'] = False
-
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'benchmark':
-    # 简单性能基准测试
-    result = {
-        'pythonVersion': sys.version,
-        'tests': {},
-    }
-
-    # Python基本运算速度
-    start = time.time()
-    total = 0
-    for i in range(1000000):
-        total += i
-    result['tests']['loop1M'] = round((time.time() - start) * 1000, 1)
-
-    # 字符串操作
-    start = time.time()
-    s = ''.join(str(i) for i in range(10000))
-    result['tests']['stringJoin10K'] = round((time.time() - start) * 1000, 1)
-
-    # JSON序列化
-    test_obj = {'key' + str(i): 'value' + str(i * 2) for i in range(1000)}
-    start = time.time()
-    json.dumps(test_obj)
-    result['tests']['jsonDump1K'] = round((time.time() - start) * 1000, 1)
-
-    # 文件I/O
-    test_file = debug_dir / 'benchmark-test.tmp'
-    start = time.time()
-    test_file.write_text('x' * 100000, encoding='utf-8')
-    test_file.read_text(encoding='utf-8')
-    result['tests']['fileIO100KB'] = round((time.time() - start) * 1000, 1)
-    test_file.unlink(missing_ok=True)
-
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'profile':
-    # 分析当前AI栈的性能概况
-    config_path = stack_root / 'config.json'
-    profile = {
-        'configSize': config_path.stat().st_size if config_path.exists() else 0,
-        'cacheStats': {},
-        'stateFiles': [],
-    }
-
-    # 缓存统计
-    for cache_name in ['route', 'result', 'tool', 'semantic', 'predictive', 'code-snippet', 'multimodal']:
-        cache_dir = stack_root / 'cache' / cache_name
-        if cache_dir.exists():
-            files = list(cache_dir.rglob('*'))
-            profile['cacheStats'][cache_name] = {
-                'files': len([f for f in files if f.is_file()]),
-                'sizeMB': round(sum(f.stat().st_size for f in files if f.is_file()) / (1024*1024), 2),
-            }
-
-    # 状态文件
-    state_dir = stack_root / 'state'
-    if state_dir.exists():
-        for sf in state_dir.glob('*.json'):
-            profile['stateFiles'].append({
-                'name': sf.name,
-                'size': sf.stat().st_size,
-                'modified': sf.stat().st_mtime,
-            })
-
-    print(json.dumps(profile, ensure_ascii=False))
-
-elif action == 'breakpoint':
-    # 设置调试断点（记录当前AI栈状态快照）
-    snapshot = {
-        'timestamp': int(time.time()),
-        'stackRoot': str(stack_root),
-        'config': None,
-    }
-    config_path = stack_root / 'config.json'
-    if config_path.exists():
-        try:
-            snapshot['config'] = json.loads(config_path.read_text(encoding='utf-8'))
-        except Exception:
-            snapshot['config'] = 'parse_error'
-
-    snapshot_path = debug_dir / f'breakpoint-{int(time.time())}.json'
-    snapshot_path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps({'ok': True, 'snapshot': str(snapshot_path), 'id': snapshot['timestamp']}, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'trace|inspect|benchmark|profile|breakpoint'}, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 第4层 - 独立插件安全扫描器
-# ========================================================================
-openclaw_ai_stack_plugin_security_scanner() {
-  local action="${1:-scan}" plugin_name="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$plugin_name" "$SKPL_AI_STACK_ROOT/plugins" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, os, re, hashlib
-from pathlib import Path
-
-action = sys.argv[1]
-plugin_name = sys.argv[2] if len(sys.argv) > 2 else ''
-plugins_dir = Path(sys.argv[3])
-config_path = Path(sys.argv[4])
-plugins_dir.mkdir(parents=True, exist_ok=True)
-
-# 安全规则定义
-SECURITY_RULES = {
-    'system_access': {
-        'patterns': [r'os\.system\(', r'subprocess\.(call|run|Popen)\(', r'eval\(', r'exec\('],
-        'risk': 'high',
-        'description': '系统命令执行能力',
-    },
-    'file_access': {
-        'patterns': [r'open\(', r'pathlib\.Path.*read', r'open\s*\(', r'\.write_text\(', r'\.read_text\('],
-        'risk': 'medium',
-        'description': '文件系统访问',
-    },
-    'network_access': {
-        'patterns': [r'requests\.(get|post|put|delete)', r'urllib\.', r'socket\.', r'http\.client', r'curl'],
-        'risk': 'medium',
-        'description': '网络访问能力',
-    },
-    'data_exfiltration': {
-        'patterns': [r'\.upload\(', r'sendmail', r'smtp\.', r'ftp\.', r'scp\.', r'\.export\('],
-        'risk': 'high',
-        'description': '数据外传能力',
-    },
-    'privilege_escalation': {
-        'patterns': [r'sudo\s', r'chmod\s+777', r'setuid', r'geteuid', r'os\.setuid'],
-        'risk': 'critical',
-        'description': '权限提升尝试',
-    },
-    'crypto_mining': {
-        'patterns': [r'hashlib\.sha256.*while', r'bitcoin', r'cryptocurrency', r'miner'],
-        'risk': 'critical',
-        'description': '可能的加密货币挖矿代码',
-    },
-    'obfuscation': {
-        'patterns': [r'base64\.b64decode', r'exec\(.*decode', r'eval\(.*decode', r'__import__\(', r'globals\(\)\['],
-        'risk': 'high',
-        'description': '代码混淆/动态执行',
-    },
-    'dependency_hijack': {
-        'patterns': [r'pip\s+install\s+--user', r'npm\s+install\s+-g', r'pip\.main\(', r'setup\(.*install'],
-        'risk': 'medium',
-        'description': '未经授权的包安装',
-    },
-}
-
-def scan_code(content, language='python'):
-    """扫描代码中的安全风险"""
-    flags = []
-    for rule_name, rule in SECURITY_RULES.items():
-        for pattern in rule['patterns']:
-            matches = re.findall(pattern, content, re.IGNORECASE)
-            if matches:
-                flags.append({
-                    'rule': rule_name,
-                    'risk': rule['risk'],
-                    'description': rule['description'],
-                    'matchCount': len(matches),
-                    'example': matches[0][:80] if matches else '',
-                })
-                break
-    return flags
-
-def risk_score(flags):
-    weights = {'critical': 10, 'high': 5, 'medium': 2, 'low': 1}
-    total = sum(weights.get(f['risk'], 1) * f.get('matchCount', 1) for f in flags)
-    return total
-
-if action == 'scan':
-    # 扫描所有已安装插件
-    results = {'plugins': {}, 'totalPlugins': 0, 'highRiskCount': 0}
-
-    for plugin_path in plugins_dir.iterdir():
-        if not plugin_path.is_dir():
-            continue
-        pname = plugin_path.name
-        plugin_flags = []
-        total_risk = 0
-
-        for code_file in plugin_path.rglob('*'):
-            if not code_file.is_file():
-                continue
-            ext = code_file.suffix.lower()
-            if ext not in ('.py', '.js', '.sh', '.bash', '.rb', '.pl'):
-                continue
-            try:
-                content = code_file.read_text(encoding='utf-8', errors='ignore')
-                lang = {'py': 'python', 'js': 'javascript', 'sh': 'shell', 'bash': 'shell', 'rb': 'ruby', 'pl': 'perl'}.get(ext.lstrip('.'), 'unknown')
-                flags = scan_code(content, language=lang)
-                for f in flags:
-                    f['file'] = str(code_file.relative_to(plugin_path))
-                plugin_flags.extend(flags)
-                total_risk += risk_score(flags)
-            except Exception:
-                pass
-
-        risk_level = 'critical' if total_risk >= 20 else ('high' if total_risk >= 10 else ('medium' if total_risk >= 5 else ('low' if total_risk > 0 else 'safe')))
-
-        results['plugins'][pname] = {
-            'flags': plugin_flags,
-            'totalFlags': len(plugin_flags),
-            'riskScore': total_risk,
-            'riskLevel': risk_level,
-        }
-        results['totalPlugins'] += 1
-        if risk_level in ('high', 'critical'):
-            results['highRiskCount'] += 1
-
-    print(json.dumps(results, ensure_ascii=False))
-
-elif action == 'audit':
-    # 对指定插件进行深入审计
-    if not plugin_name:
-        print(json.dumps({'error': 'plugin_name required'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    plugin_path = plugins_dir / plugin_name
-    if not plugin_path.is_dir():
-        print(json.dumps({'error': f'plugin not found: {plugin_name}'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    audit = {
-        'plugin': plugin_name,
-        'files': [],
-        'permissions': [],
-        'imports': set(),
-        'totalRisk': 0,
-    }
-
-    for code_file in plugin_path.rglob('*'):
-        if not code_file.is_file():
-            continue
-        ext = code_file.suffix.lower()
-        if ext not in ('.py', '.js', '.sh', '.json', '.yaml', '.yml', '.toml', '.cfg'):
-            continue
-        try:
-            content = code_file.read_text(encoding='utf-8', errors='ignore')
-            flags = scan_code(content)
-
-            # 提取imports
-            imports = re.findall(r'^(?:import|from)\s+(\S+)', content, re.MULTILINE)
-            # 提取权限声明
-            perms = re.findall(r'(?:permission|capability|requires?)[:=]\s*["\'](\w+)["\']', content, re.IGNORECASE)
-
-            audit['files'].append({
-                'path': str(code_file.relative_to(plugin_path)),
-                'size': code_file.stat().st_size,
-                'flags': flags,
-                'imports': imports[:10],
-            })
-            audit['imports'].update(imports[:20])
-            audit['permissions'].extend(perms)
-            audit['totalRisk'] += risk_score(flags)
-        except Exception:
-            pass
-
-    audit['imports'] = list(audit['imports'])
-    audit['riskLevel'] = 'critical' if audit['totalRisk'] >= 20 else ('high' if audit['totalRisk'] >= 10 else ('medium' if audit['totalRisk'] >= 5 else ('low' if audit['totalRisk'] > 0 else 'safe')))
-    audit['fileCount'] = len(audit['files'])
-
-    print(json.dumps(audit, ensure_ascii=False))
-
-elif action == 'summary':
-    # 整体安全概览
-    scan_result = {'plugins': {}, 'totalPlugins': 0, 'safeCount': 0, 'warningCount': 0, 'criticalCount': 0}
-    for plugin_path in plugins_dir.iterdir():
-        if not plugin_path.is_dir():
-            continue
-        pname = plugin_path.name
-        total_risk = 0
-        for code_file in plugin_path.rglob('*.py'):
-            try:
-                content = code_file.read_text(encoding='utf-8', errors='ignore')
-                total_risk += risk_score(scan_code(content))
-            except Exception:
-                pass
-
-        level = 'safe' if total_risk == 0 else ('low' if total_risk < 5 else ('medium' if total_risk < 10 else ('high' if total_risk < 20 else 'critical')))
-        scan_result['plugins'][pname] = {'riskScore': total_risk, 'riskLevel': level}
-        scan_result['totalPlugins'] += 1
-        if level == 'safe':
-            scan_result['safeCount'] += 1
-        elif level in ('high', 'critical'):
-            scan_result['criticalCount'] += 1
-        else:
-            scan_result['warningCount'] += 1
-
-    print(json.dumps(scan_result, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'scan|audit|summary'}, ensure_ascii=False))
 PY
 }
 
@@ -9177,7 +5348,6 @@ route = json.loads(sys.argv[1])
 prompt = sys.argv[2]
 profile_tier = str(route.get('profileTier') or '')
 complexity = str(route.get('complexity') or 'normal')
-intent = str(route.get('intent') or 'general')
 
 def dedupe_lines(text):
     seen = set()
@@ -9193,67 +5363,21 @@ def dedupe_lines(text):
         out.append(line)
     return out
 
-def split_sentences(text):
-    return re.split(r'(?<=[。！？.!?])\s*', text)
-
-def smart_truncate(text, max_chars, mode='standard'):
-    """按句子边界智能截断"""
-    if len(text) <= max_chars:
-        return text
-    sentences = split_sentences(text)
-    result = []
-    current_len = 0
-    for s in sentences:
-        s = s.strip()
-        if not s:
-            continue
-        new_len = current_len + len(s)
-        if new_len > max_chars:
-            if mode == 'extreme' and result:
-                # 极致模式: 跳过中间句子, 仅保留首尾
-                remaining = max_chars - current_len
-                if remaining > 40:
-                    result.append('...')
-                break
-            else:
-                # 标准/无损: 尽力保留完整句子
-                if current_len > 0:
-                    break
-                else:
-                    result.append(s[:max_chars])
-                    break
-        result.append(s)
-        current_len = new_len
-    return '\n'.join(result)
-
-# 三级压缩: 映射到规范的三级语义保留模式
+lines = dedupe_lines(prompt)
 if profile_tier in ('entry-cpu', 'emergency-cpu'):
     limit = 1200
     mode = 'extreme'
-    retention = '92%'
-elif profile_tier in ('server', 'workstation'):
-    limit = len(prompt) + 100  # 几乎不截断
+elif complexity == 'complex':
+    limit = 4000
     mode = 'lossless'
-    retention = '100%'
 else:
     limit = 2200
     mode = 'standard'
-    retention = '98%'
-
-lines = dedupe_lines(prompt)
 compressed = '\n'.join(lines)
 compressed = re.sub(r'\n{3,}', '\n\n', compressed).strip()
-# 智能截断（保留句子边界）
-compressed = smart_truncate(compressed, limit, mode)
-# 去冗余空白
-compressed = re.sub(r'[ \t]{2,}', ' ', compressed).strip()
-print(json.dumps({
-    'mode': mode,
-    'retention': retention,
-    'text': compressed,
-    'sourceLength': len(prompt),
-    'finalLength': len(compressed),
-}, ensure_ascii=False))
+if len(compressed) > limit:
+    compressed = compressed[:limit]
+print(json.dumps({'mode': mode, 'text': compressed, 'sourceLength': len(prompt), 'finalLength': len(compressed)}, ensure_ascii=False))
 PY
 }
 
@@ -9475,1831 +5599,6 @@ print(json.dumps(payload, ensure_ascii=False))
 PY
 }
 
-# ========================================================================
-# 第5层 - Token优化：关键信息保留
-# ========================================================================
-openclaw_ai_stack_key_info_retention() {
-  local action="${1:-extract}" input_text="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$input_text" "$SKPL_AI_STACK_ROOT" <<'PY'
-import json, sys, re, hashlib
-from pathlib import Path
-
-action = sys.argv[1]
-input_text = sys.argv[2] if len(sys.argv) > 2 else ''
-stack_root = Path(sys.argv[3])
-retention_dir = stack_root / "retention"
-retention_dir.mkdir(parents=True, exist_ok=True)
-
-# 关键信息提取规则
-KEY_PATTERNS = {
-    'names': {
-        'pattern': r'(?:名叫|姓名|称呼|叫|我是|我是叫)\s*[\u4e00-\u9fff]{2,4}',
-        'weight': 0.9,
-        'category': 'identity',
-    },
-    'phones': {
-        'pattern': r'(?:电话|手机|联系方式)[：:]\s*\d[\d\-]{7,15}|\b1[3-9]\d{9}\b',
-        'weight': 1.0,
-        'category': 'contact',
-    },
-    'emails': {
-        'pattern': r'[\w\.-]+@[\w\.-]+\.\w+',
-        'weight': 0.9,
-        'category': 'contact',
-    },
-    'addresses': {
-        'pattern': r'(?:地址|位于|住址)[：:]\s*[\u4e00-\u9fff\d\-]{5,50}',
-        'weight': 0.8,
-        'category': 'location',
-    },
-    'preferences': {
-        'pattern': r'(?:喜欢|偏好|倾向于|惯用|常用|习惯)[：:]?\s*[\u4e00-\u9fff\w]{2,30}',
-        'weight': 0.7,
-        'category': 'preference',
-    },
-    'facts': {
-        'pattern': r'(?:事实|实际情况|实际上是|本质上)[：:]\s*.{10,100}',
-        'weight': 0.8,
-        'category': 'fact',
-    },
-    'decisions': {
-        'pattern': r'(?:决定|确认|选择|选择的是|最终选择)[：:]\s*.{5,80}',
-        'weight': 0.85,
-        'category': 'decision',
-    },
-    'constraints': {
-        'pattern': r'(?:限制|约束|要求|必须|不能|不可以|禁止)[：:]?\s*.{5,100}',
-        'weight': 0.75,
-        'category': 'constraint',
-    },
-    'code_blocks': {
-        'pattern': r'```[\s\S]*?```',
-        'weight': 0.95,
-        'category': 'code',
-    },
-    'numbers': {
-        'pattern': r'(?:金额|费用|价格|总数|合计)[：:]\s*\d[\d,.]*',
-        'weight': 0.85,
-        'category': 'numeric',
-    },
-    'dates': {
-        'pattern': r'(?:日期|时间|截止|到期)[：:]\s*\d{4}[-/]\d{1,2}[-/]\d{1,2}',
-        'weight': 0.9,
-        'category': 'temporal',
-    },
-}
-
-def extract_key_info(text):
-    """从文本中提取关键信息"""
-    extracted = []
-    seen = set()
-
-    for info_type, rule in KEY_PATTERNS.items():
-        matches = re.findall(rule['pattern'], text, re.IGNORECASE | re.MULTILINE)
-        for match in matches:
-            if isinstance(match, tuple):
-                match = match[0]
-            match_clean = match.strip()
-            match_hash = hashlib.md5((info_type + match_clean).encode()).hexdigest()[:8]
-            if match_hash not in seen:
-                seen.add(match_hash)
-                extracted.append({
-                    'type': info_type,
-                    'category': rule['category'],
-                    'value': match_clean[:200],
-                    'weight': rule['weight'],
-                    'position': text.find(match_clean),
-                })
-
-    # 按权重排序
-    extracted.sort(key=lambda x: (-x['weight'], x['position']))
-    return extracted
-
-def compress_with_retention(text, retention_items, target_ratio=0.5):
-    """保留关键信息的同时压缩文本"""
-    if not retention_items or not text:
-        return text
-
-    # 标记保留区域
-    preserved_ranges = []
-    for item in retention_items:
-        pos = item['position']
-        if pos >= 0:
-            # 保留上下文前后各30字符
-            start = max(0, pos - 30)
-            end = min(len(text), pos + len(item['value']) + 30)
-            preserved_ranges.append((start, end))
-
-    # 合并重叠区间
-    preserved_ranges.sort()
-    merged = []
-    for r in preserved_ranges:
-        if merged and r[0] <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], r[1]))
-        else:
-            merged.append(r)
-
-    # 生成压缩文本：保留区间完整，非保留区间按比例压缩
-    result_parts = []
-    last_end = 0
-    for start, end in merged:
-        # 添加非保留区间（压缩）
-        if last_end < start:
-            skipped = text[last_end:start]
-            if len(skipped) > 100:
-                # 取首尾各一段
-                mid_point = len(skipped) // 2
-                compressed = skipped[:50] + '\n...[部分内容已压缩]...\n' + skipped[-50:]
-                result_parts.append(compressed)
-            else:
-                result_parts.append(skipped)
-        # 添加保留区间（完整）
-        result_parts.append(text[start:end])
-        last_end = end
-
-    if last_end < len(text):
-        remaining = text[last_end:]
-        if len(remaining) > 100:
-            result_parts.append(remaining[:50] + '\n...[部分内容已压缩]...\n' + remaining[-50:])
-        else:
-            result_parts.append(remaining)
-
-    return ''.join(result_parts)
-
-if action == 'extract':
-    # 从文本中提取关键信息
-    if not input_text:
-        print(json.dumps({'error': 'input_text required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    info = extract_key_info(input_text)
-    categories = {}
-    for item in info:
-        cat = item['category']
-        categories.setdefault(cat, 0)
-        categories[cat] += 1
-
-    result = {
-        'items': info,
-        'count': len(info),
-        'categories': categories,
-        'originalLength': len(input_text),
-        'retentionRatio': round(len(info) / max(len(input_text.split()), 1), 4),
-    }
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'compress':
-    # 保留关键信息的同时压缩文本
-    if not input_text:
-        print(json.dumps({'error': 'input_text required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    info = extract_key_info(input_text)
-    compressed = compress_with_retention(input_text, info)
-    saved = len(input_text) - len(compressed)
-    result = {
-        'originalLength': len(input_text),
-        'compressedLength': len(compressed),
-        'savedChars': saved,
-        'compressionRatio': round(len(compressed) / max(len(input_text), 1), 3),
-        'retainedItems': len(info),
-        'compressedText': compressed[:5000],
-    }
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'summary':
-    # 生成关键信息摘要
-    if not input_text:
-        print(json.dumps({'error': 'input_text required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    info = extract_key_info(input_text)
-    by_category = {}
-    for item in info:
-        cat = item['category']
-        by_category.setdefault(cat, [])
-        by_category[cat].append(item['value'][:100])
-
-    summary_lines = []
-    for cat, values in by_category.items():
-        summary_lines.append(f'[{cat}] ' + ' | '.join(values[:5]))
-
-    result = {
-        'summary': '\n'.join(summary_lines),
-        'totalItems': len(info),
-        'categories': {k: len(v) for k, v in by_category.items()},
-    }
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'store':
-    # 将提取的关键信息持久化存储
-    if not input_text:
-        print(json.dumps({'error': 'input_text required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    info = extract_key_info(input_text)
-    store_file = retention_dir / 'key-info-store.json'
-    existing = []
-    if store_file.exists():
-        try:
-            existing = json.loads(store_file.read_text(encoding='utf-8'))
-        except Exception:
-            existing = []
-
-    import time
-    for item in info:
-        item['storedAt'] = int(time.time())
-        existing.append(item)
-
-    # 保留最近1000条
-    existing = existing[-1000:]
-    store_file.write_text(json.dumps(existing, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps({'stored': len(info), 'total': len(existing), 'ok': True}, ensure_ascii=False))
-
-elif action == 'recall':
-    # 召回已存储的关键信息
-    store_file = retention_dir / 'key-info-store.json'
-    if not store_file.exists():
-        print(json.dumps({'items': [], 'count': 0}, ensure_ascii=False))
-        raise SystemExit(0)
-    existing = json.loads(store_file.read_text(encoding='utf-8'))
-    query = input_text
-    if query:
-        # 按关键词过滤
-        filtered = []
-        for item in existing:
-            if query.lower() in item.get('value', '').lower() or query.lower() in item.get('category', '').lower():
-                filtered.append(item)
-        existing = filtered
-
-    categories = {}
-    for item in existing:
-        cat = item['category']
-        categories.setdefault(cat, 0)
-        categories[cat] += 1
-
-    print(json.dumps({
-        'items': existing[-50:],
-        'count': len(existing),
-        'categories': categories,
-    }, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'extract|compress|summary|store|recall'}, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 第5层 - 信息交叉验证
-# ========================================================================
-openclaw_ai_stack_cross_validation() {
-  local action="${1:-validate}" source_data="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$source_data" "$SKPL_AI_STACK_ROOT/validation" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, re, hashlib, time, sqlite3
-from pathlib import Path
-from difflib import SequenceMatcher
-
-action = sys.argv[1]
-source_data = sys.argv[2] if len(sys.argv) > 2 else ''
-validation_dir = Path(sys.argv[3])
-config_path = Path(sys.argv[4])
-validation_dir.mkdir(parents=True, exist_ok=True)
-
-val_db = validation_dir / "cross-validation.sqlite3"
-
-def init_db():
-    conn = sqlite3.connect(str(val_db), timeout=10)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS validation_records (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_hash TEXT,
-            source_text TEXT,
-            validated_text TEXT,
-            source_model TEXT,
-            validator_model TEXT,
-            confidence REAL DEFAULT 0.5,
-            agreement_score REAL DEFAULT 0.0,
-            contradictions TEXT DEFAULT '[]',
-            created_at INTEGER,
-            category TEXT DEFAULT 'general'
-        )
-    ''')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_val_hash ON validation_records(source_hash)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_val_confidence ON validation_records(confidence)')
-    conn.commit()
-    return conn
-
-conn = init_db()
-
-def compute_similarity(text1, text2):
-    """计算两段文本的相似度"""
-    return SequenceMatcher(None, text1, text2).ratio()
-
-def detect_contradictions(text1, text2):
-    """检测两段文本间的矛盾"""
-    contradictions = []
-
-    # 数字矛盾检测
-    nums1 = re.findall(r'\d+\.?\d*', text1)
-    nums2 = re.findall(r'\d+\.?\d*', text2)
-    if nums1 and nums2:
-        for n1 in nums1:
-            for n2 in nums2:
-                try:
-                    v1, v2 = float(n1), float(n2)
-                    if v1 > 0 and v2 > 0 and abs(v1 - v2) / max(v1, v2) > 0.5:
-                        contradictions.append({
-                            'type': 'numeric_conflict',
-                            'values': [n1, n2],
-                            'difference': round(abs(v1 - v2), 2),
-                        })
-                except ValueError:
-                    pass
-
-    # 日期矛盾检测
-    dates1 = re.findall(r'\d{4}[-/]\d{1,2}[-/]\d{1,2}', text1)
-    dates2 = re.findall(r'\d{4}[-/]\d{1,2}[-/]\d{1,2}', text2)
-    if dates1 and dates2 and dates1 != dates2:
-        contradictions.append({
-            'type': 'date_conflict',
-            'sourceDate': dates1[0] if dates1 else '',
-            'validatorDate': dates2[0] if dates2 else '',
-        })
-
-    # 布尔/极性矛盾
-    positive_words = ['是', '对', '正确', '可以', '能', '会', 'yes', 'true', 'correct']
-    negative_words = ['不是', '不对', '错误', '不可以', '不能', '不会', 'no', 'false', 'incorrect']
-    pos_in_1 = any(w in text1 for w in positive_words)
-    neg_in_1 = any(w in text1 for w in negative_words)
-    pos_in_2 = any(w in text2 for w in positive_words)
-    neg_in_2 = any(w in text2 for w in negative_words)
-    if (pos_in_1 and neg_in_2) or (neg_in_1 and pos_in_2):
-        contradictions.append({
-            'type': 'polarity_conflict',
-            'sourcePositive': pos_in_1,
-            'validatorPositive': pos_in_2,
-        })
-
-    return contradictions
-
-if action == 'validate':
-    # 对数据进行交叉验证（需要有多个来源/模型的结果）
-    try:
-        data = json.loads(source_data) if source_data else {}
-    except json.JSONDecodeError:
-        data = {'text': source_data}
-
-    source_text = data.get('text', '') or data.get('content', '') or source_data
-    source_model = data.get('model', 'unknown')
-    validator_text = data.get('validatorText', '') or data.get('alternative', '')
-    validator_model = data.get('validatorModel', 'unknown')
-
-    result = {
-        'sourceText': source_text[:200],
-        'sourceModel': source_model,
-        'validated': False,
-    }
-
-    if source_text and validator_text:
-        similarity = compute_similarity(source_text, validator_text)
-        contradictions = detect_contradictions(source_text, validator_text)
-        confidence = similarity * (1 - len(contradictions) * 0.1)
-
-        result['validated'] = True
-        result['similarity'] = round(similarity, 4)
-        result['confidence'] = round(max(0, confidence), 4)
-        result['contradictions'] = contradictions
-        result['contradictionCount'] = len(contradictions)
-        result['agreementLevel'] = (
-            'high' if similarity > 0.9 and len(contradictions) == 0 else
-            'medium' if similarity > 0.7 and len(contradictions) <= 1 else
-            'low' if similarity > 0.5 else 'conflicting'
-        )
-
-        # 存储验证记录
-        source_hash = hashlib.sha256(source_text.encode()).hexdigest()
-        conn.execute('''
-            INSERT INTO validation_records
-            (source_hash, source_text, validated_text, source_model, validator_model, confidence,
-             agreement_score, contradictions, created_at, category)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            source_hash, source_text[:1000], validator_text[:1000],
-            source_model, validator_model, confidence,
-            similarity, json.dumps(contradictions, ensure_ascii=False),
-            int(time.time()), data.get('category', 'general'),
-        ))
-        conn.commit()
-    else:
-        result['error'] = 'both source and validator texts are required for validation'
-
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'history':
-    # 查看验证历史
-    rows = conn.execute('''
-        SELECT source_model, validator_model, confidence, agreement_score,
-               contradiction_count, created_at, category
-        FROM (
-            SELECT *, json_array_length(contradictions) as contradiction_count
-            FROM validation_records
-        ) ORDER BY created_at DESC LIMIT 30
-    ''').fetchall()
-
-    history = [{
-        'sourceModel': r[0], 'validatorModel': r[1],
-        'confidence': r[2], 'agreementScore': r[3],
-        'contradictions': r[4], 'createdAt': r[5], 'category': r[6],
-    } for r in rows]
-
-    print(json.dumps({'history': history, 'count': len(history)}, ensure_ascii=False))
-
-elif action == 'stats':
-    # 验证统计
-    total = conn.execute('SELECT COUNT(*) FROM validation_records').fetchone()[0]
-    avg_confidence = conn.execute('SELECT AVG(confidence) FROM validation_records').fetchone()[0] or 0
-    avg_agreement = conn.execute('SELECT AVG(agreement_score) FROM validation_records').fetchone()[0] or 0
-
-    # 按来源模型统计
-    model_stats = {}
-    for row in conn.execute('SELECT source_model, COUNT(*), AVG(confidence) FROM validation_records GROUP BY source_model').fetchall():
-        model_stats[row[0]] = {'count': row[1], 'avgConfidence': round(row[2], 3)}
-
-    cat_stats = {}
-    for row in conn.execute('SELECT category, COUNT(*) FROM validation_records GROUP BY category').fetchall():
-        cat_stats[row[0] or 'general'] = row[1]
-
-    print(json.dumps({
-        'totalValidations': total,
-        'avgConfidence': round(avg_confidence, 3),
-        'avgAgreement': round(avg_agreement, 3),
-        'bySourceModel': model_stats,
-        'byCategory': cat_stats,
-    }, ensure_ascii=False))
-
-elif action == 'compare-models':
-    # 比较不同模型间的一致性
-    model_pairs = {}
-    for row in conn.execute('''
-        SELECT source_model, validator_model, AVG(agreement_score), COUNT(*)
-        FROM validation_records GROUP BY source_model, validator_model
-    ''').fetchall():
-        key = f"{row[0]} vs {row[1]}"
-        model_pairs[key] = {
-            'avgAgreement': round(row[2], 3),
-            'count': row[3],
-        }
-
-    print(json.dumps({'modelComparisons': model_pairs, 'pairCount': len(model_pairs)}, ensure_ascii=False))
-
-elif action == 'cleanup':
-    # 清理过期验证记录（90天）
-    cutoff = int(time.time()) - 90 * 86400
-    before = conn.execute('SELECT COUNT(*) FROM validation_records').fetchone()[0]
-    conn.execute('DELETE FROM validation_records WHERE created_at < ?', (cutoff,))
-    conn.commit()
-    after = conn.execute('SELECT COUNT(*) FROM validation_records').fetchone()[0]
-    print(json.dumps({'before': before, 'after': after, 'removed': before - after}, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'validate|history|stats|compare-models|cleanup'}, ensure_ascii=False))
-
-conn.close()
-PY
-}
-
-# ========================================================================
-# 流式无缝切换 — 本地模型和云端模型之间流式输出自动切换
-# ========================================================================
-openclaw_ai_stack_streaming_switch() {
-  local route_json="$1" stream_target="$2"
-  openclaw_ai_stack_prepare
-  python3 - "$route_json" "$stream_target" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys
-route = json.loads(sys.argv[1])
-target = sys.argv[2]
-cfg = json.loads(open(sys.argv[3], 'r', encoding='utf-8').read())
-streaming_cfg = (cfg.get('streaming') or {})
-
-result = {
-    'mode': streaming_cfg.get('mode', 'auto'),
-    'currentSource': route.get('execution', 'local'),
-    'target': target,
-    'actions': [],
-}
-
-if result['mode'] == 'auto':
-    execution = route.get('execution', 'local')
-    if execution == 'local' and target == 'cloud':
-        result['actions'] = ['compress-local-context', 'switch-to-cloud', 'resume-streaming']
-        result['transitional'] = True
-    elif execution == 'cloud' and target == 'local':
-        result['actions'] = ['warm-local-model', 'switch-to-local', 'resume-from-checkpoint']
-        result['transitional'] = True
-    else:
-        result['actions'] = ['no-switch-needed']
-elif result['mode'] == 'local-only':
-    result['actions'] = ['block-streaming-switch', 'local-only-mode']
-    result['transitional'] = False
-elif result['mode'] == 'cloud-first':
-    if target == 'cloud':
-        result['actions'] = ['prefer-cloud-streaming']
-    else:
-        result['actions'] = ['fallback-to-local', 'reduce-quality']
-        result['transitional'] = True
-
-print(json.dumps(result, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 批量请求合并 — 多个小请求合并为单次云端调用
-# ========================================================================
-openclaw_ai_stack_batch_merge() {
-  local batch_json="$1"
-  openclaw_ai_stack_prepare
-  python3 - "$batch_json" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys
-batch = json.loads(sys.argv[1])
-cfg = json.loads(open(sys.argv[2], 'r', encoding='utf-8').read())
-
-requests = batch.get('requests', [])
-max_tokens = int((cfg.get('cloud') or {}).get('tokenOptimizer', {}).get('maxBatchTokens', 12000) or 12000)
-
-result = {
-    'originalCount': len(requests),
-    'mergedCount': 0,
-    'batches': [],
-    'estimatedSavings': {'requests': 0, 'tokens': 0},
-}
-
-by_model = {}
-for req in requests:
-    model = req.get('model', req.get('provider', 'default'))
-    by_model.setdefault(model, []).append(req)
-
-for model, reqs in by_model.items():
-    current_batch = []
-    current_tokens = 0
-    for req in reqs:
-        est_tokens = len((req.get('text') or req.get('prompt') or '')) // 2
-        if current_tokens + est_tokens > max_tokens and current_batch:
-            result['batches'].append({
-                'model': model,
-                'requests': [{'id': r.get('id'), 'text': (r.get('text') or r.get('prompt') or '')[:200]} for r in current_batch],
-                'mergedPrompt': '\n---SEPARATOR---\n'.join(r.get('text') or r.get('prompt') or '' for r in current_batch),
-                'count': len(current_batch),
-                'estimatedTokens': current_tokens,
-            })
-            result['mergedCount'] += 1
-            current_batch = []
-            current_tokens = 0
-        current_batch.append(req)
-        current_tokens += est_tokens
-    if current_batch:
-        result['batches'].append({
-            'model': model,
-            'requests': [{'id': r.get('id'), 'text': (r.get('text') or r.get('prompt') or '')[:200]} for r in current_batch],
-            'mergedPrompt': '\n---SEPARATOR---\n'.join(r.get('text') or r.get('prompt') or '' for r in current_batch),
-            'count': len(current_batch),
-            'estimatedTokens': current_tokens,
-        })
-        result['mergedCount'] += 1
-
-result['estimatedSavings']['requests'] = result['originalCount'] - result['mergedCount']
-result['estimatedSavings']['tokens'] = sum(b.get('estimatedTokens', 0) // 3 for b in result['batches'])
-print(json.dumps(result, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 第3层 - 云端回答知识库（主动同步 + 检索增强）
-# ========================================================================
-openclaw_ai_stack_cloud_knowledge_base() {
-  local action="${1:-sync}" query="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$query" "$SKPL_AI_STACK_ROOT/knowledge-cloud" "$SKPL_AI_STACK_STATE_DIR/kb-sync-state.json" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, os, time, hashlib, sqlite3
-from pathlib import Path
-
-action = sys.argv[1]
-query = sys.argv[2] if len(sys.argv) > 2 else ''
-kb_dir = Path(sys.argv[3])
-sync_state_path = Path(sys.argv[4])
-config_path = Path(sys.argv[5])
-
-kb_dir.mkdir(parents=True, exist_ok=True)
-kb_db = kb_dir / "cloud-knowledge.sqlite3"
-
-# 初始化数据库
-def init_db():
-    conn = sqlite3.connect(str(kb_db), timeout=10)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS cloud_qa (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            question_hash TEXT UNIQUE,
-            question TEXT,
-            answer TEXT,
-            model_name TEXT,
-            provider TEXT,
-            confidence REAL DEFAULT 0.7,
-            tokens_used INTEGER DEFAULT 0,
-            response_time_ms REAL DEFAULT 0,
-            created_at INTEGER,
-            access_count INTEGER DEFAULT 0,
-            last_accessed INTEGER,
-            tags TEXT DEFAULT '[]',
-            source_route TEXT DEFAULT '',
-            quality_score REAL DEFAULT 0.5
-        )
-    ''')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS kb_metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT,
-            updated_at INTEGER
-        )
-    ''')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_qa_hash ON cloud_qa(question_hash)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_qa_tags ON cloud_qa(tags)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_qa_accessed ON cloud_qa(last_accessed)')
-    conn.commit()
-    return conn
-
-conn = init_db()
-
-def hash_q(text):
-    return hashlib.sha256(text.strip().lower().encode('utf-8')).hexdigest()
-
-if action == 'sync':
-    # 从云端调用结果同步到知识库
-    cloud_state_file = Path(sys.argv[3]).parent.parent / "state" / "cloud-state.json"
-    entries_added = 0
-
-    # 尝试从最近的云端调用状态中提取有价值的问答对
-    if cloud_state_file.exists():
-        try:
-            cloud_data = json.loads(cloud_state_file.read_text(encoding='utf-8'))
-            best = cloud_data.get('best') or {}
-            jobs = cloud_data.get('jobs') or []
-
-            # 从每个作业提取问答
-            for job in jobs:
-                result = job.get('result') or {}
-                prompt = job.get('prompt', '')
-                answer = result.get('text', '') or result.get('content', '')
-                if prompt and answer:
-                    qhash = hash_q(prompt)
-                    existing = conn.execute('SELECT id FROM cloud_qa WHERE question_hash=?', (qhash,)).fetchone()
-                    if not existing:
-                        conn.execute('''
-                            INSERT INTO cloud_qa (question_hash, question, answer, model_name, provider, confidence,
-                                tokens_used, response_time_ms, created_at, access_count, last_accessed, source_route)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-                        ''', (
-                            qhash, prompt, answer,
-                            job.get('model', ''), job.get('provider', ''),
-                            result.get('confidence', 0.7),
-                            result.get('tokens', 0), result.get('timeMs', 0),
-                            int(time.time()), int(time.time()),
-                            cloud_data.get('route', ''),
-                        ))
-                        entries_added += 1
-
-            # 从best作业同步
-            best_prompt = best.get('prompt', '')
-            best_answer = best.get('text', '') or best.get('content', '')
-            if best_prompt and best_answer:
-                qhash = hash_q(best_prompt)
-                existing = conn.execute('SELECT id FROM cloud_qa WHERE question_hash=?', (qhash,)).fetchone()
-                if not existing:
-                    conn.execute('''
-                        INSERT INTO cloud_qa (question_hash, question, answer, model_name, provider, confidence,
-                            tokens_used, response_time_ms, created_at, access_count, last_accessed, source_route)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-                    ''', (
-                        qhash, best_prompt, best_answer,
-                        best.get('model', ''), best.get('provider', ''),
-                        best.get('confidence', 0.7),
-                        best.get('tokens', 0), best.get('timeMs', 0),
-                        int(time.time()), int(time.time()),
-                        cloud_data.get('route', ''),
-                    ))
-                    entries_added += 1
-        except Exception as e:
-            pass
-
-    # 更新元数据
-    now = int(time.time())
-    conn.execute('INSERT OR REPLACE INTO kb_metadata (key, value, updated_at) VALUES (?, ?, ?)',
-                 ('last_sync', str(now), now))
-    total = conn.execute('SELECT COUNT(*) FROM cloud_qa').fetchone()[0]
-
-    # 清理过期条目（超过90天未访问）
-    cutoff = int(time.time()) - 90 * 86400
-    conn.execute('DELETE FROM cloud_qa WHERE access_count = 0 AND created_at < ?', (cutoff,))
-
-    conn.commit()
-    result = {
-        'synced': entries_added,
-        'totalEntries': total,
-        'dbPath': str(kb_db),
-        'dbSize': os.path.getsize(str(kb_db)) if kb_db.exists() else 0,
-        'lastSync': now,
-    }
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'search':
-    # 在知识库中搜索相似问题
-    if not query:
-        print(json.dumps({'error': 'query required'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    qhash = hash_q(query)
-    # 精确匹配
-    exact = conn.execute('SELECT * FROM cloud_qa WHERE question_hash=?', (qhash,)).fetchone()
-    results = []
-    if exact:
-        conn.execute('UPDATE cloud_qa SET access_count = access_count + 1, last_accessed = ? WHERE question_hash=?',
-                     (int(time.time()), qhash))
-        conn.commit()
-        results.append({
-            'id': exact[0], 'question': exact[2], 'answer': exact[3],
-            'model': exact[4], 'confidence': exact[6],
-            'match': 'exact', 'score': 1.0,
-        })
-
-    # 模糊匹配（关键词重叠）
-    query_words = set(query.lower().split())
-    if len(query_words) >= 2:
-        all_rows = conn.execute('SELECT * FROM cloud_qa ORDER BY last_accessed DESC LIMIT 200').fetchall()
-        for row in all_rows:
-            if len(results) >= 5:
-                break
-            q_words = set((row[2] or '').lower().split())
-            if not q_words:
-                continue
-            overlap = len(query_words & q_words) / max(len(query_words), len(q_words))
-            if overlap > 0.4 and row[0] not in {r['id'] for r in results}:
-                results.append({
-                    'id': row[0], 'question': row[2], 'answer': row[3],
-                    'model': row[4], 'confidence': row[6],
-                    'match': 'fuzzy', 'score': round(overlap, 3),
-                })
-
-    # 更新访问记录
-    for r in results:
-        if r['match'] == 'fuzzy':
-            conn.execute('UPDATE cloud_qa SET access_count = access_count + 1, last_accessed = ? WHERE id=?',
-                         (int(time.time()), r['id']))
-    conn.commit()
-
-    print(json.dumps({'query': query, 'results': results, 'count': len(results)}, ensure_ascii=False))
-
-elif action == 'stats':
-    # 知识库统计信息
-    total = conn.execute('SELECT COUNT(*) FROM cloud_qa').fetchone()[0]
-    avg_confidence = conn.execute('SELECT AVG(confidence) FROM cloud_qa').fetchone()[0] or 0
-    total_access = conn.execute('SELECT SUM(access_count) FROM cloud_qa').fetchone()[0] or 0
-    model_dist = {}
-    for row in conn.execute('SELECT model_name, COUNT(*) as cnt FROM cloud_qa GROUP BY model_name').fetchall():
-        model_dist[row[0]] = row[1]
-    provider_dist = {}
-    for row in conn.execute('SELECT provider, COUNT(*) as cnt FROM cloud_qa GROUP BY provider').fetchall():
-        provider_dist[row[0] or 'unknown'] = row[1]
-    recent = conn.execute('SELECT question, model_name, created_at FROM cloud_qa ORDER BY created_at DESC LIMIT 5').fetchall()
-
-    meta = {}
-    for row in conn.execute('SELECT key, value FROM kb_metadata').fetchall():
-        meta[row[0]] = row[1]
-
-    print(json.dumps({
-        'totalEntries': total,
-        'avgConfidence': round(avg_confidence, 3),
-        'totalAccesses': total_access,
-        'modelDistribution': model_dist,
-        'providerDistribution': provider_dist,
-        'recentEntries': [{'q': r[0][:80], 'model': r[1], 'ts': r[2]} for r in recent],
-        'metadata': meta,
-    }, ensure_ascii=False))
-
-elif action == 'cleanup':
-    # 清理低质量条目
-    before = conn.execute('SELECT COUNT(*) FROM cloud_qa').fetchone()[0]
-    # 删除置信度低于0.3且从未被访问的条目
-    conn.execute('DELETE FROM cloud_qa WHERE confidence < 0.3 AND access_count = 0 AND created_at < ?',
-                 (int(time.time()) - 30 * 86400,))
-    conn.commit()
-    after = conn.execute('SELECT COUNT(*) FROM cloud_qa').fetchone()[0]
-    print(json.dumps({'before': before, 'after': after, 'removed': before - after}, ensure_ascii=False))
-
-elif action == 'export':
-    # 导出知识库为JSON
-    export_path = kb_dir / 'knowledge-export.json'
-    rows = conn.execute('SELECT question, answer, model_name, provider, confidence, created_at FROM cloud_qa ORDER BY access_count DESC LIMIT 500').fetchall()
-    entries = [{
-        'question': r[0], 'answer': r[1], 'model': r[2],
-        'provider': r[3], 'confidence': r[4], 'createdAt': r[5],
-    } for r in rows]
-    export_path.write_text(json.dumps(entries, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps({'exported': len(entries), 'path': str(export_path)}, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'sync|search|stats|cleanup|export'}, ensure_ascii=False))
-
-conn.close()
-PY
-}
-
-# ========================================================================
-# 第3层 - 知识图谱检索
-# ========================================================================
-openclaw_ai_stack_knowledge_graph() {
-  local action="${1:-search}" query="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$query" "$SKPL_KNOWLEDGE_GRAPH_DIR" "$SKPL_HYBRID_MEMORY_ROOT" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
-import json, sys, os, time, sqlite3, re
-from pathlib import Path
-
-action = sys.argv[1]
-query = sys.argv[2] if len(sys.argv) > 2 else ''
-graph_dir = Path(sys.argv[3])
-hybrid_root = Path(sys.argv[4])
-config_path = Path(sys.argv[5])
-
-graph_dir.mkdir(parents=True, exist_ok=True)
-graph_db = graph_dir / "knowledge-graph.sqlite3"
-
-def init_db():
-    conn = sqlite3.connect(str(graph_db), timeout=10)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS nodes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE,
-            node_type TEXT,
-            properties TEXT DEFAULT '{}',
-            embedding_hint TEXT,
-            created_at INTEGER,
-            updated_at INTEGER
-        )
-    ''')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS edges (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id INTEGER,
-            target_id INTEGER,
-            relation TEXT,
-            weight REAL DEFAULT 1.0,
-            properties TEXT DEFAULT '{}',
-            created_at INTEGER,
-            FOREIGN KEY(source_id) REFERENCES nodes(id),
-            FOREIGN KEY(target_id) REFERENCES nodes(id)
-        )
-    ''')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(source_id)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_edges_tgt ON edges(target_id)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_edges_rel ON edges(relation)')
-    conn.commit()
-    return conn
-
-conn = init_db()
-
-def extract_entities_relations(text):
-    """从文本中提取实体和关系（基于规则）"""
-    entities = []
-    relations = []
-
-    # 提取命名实体：中文人名（2-3字+职位后缀）
-    for m in re.finditer(r'([\u4e00-\u9fff]{2,4})(?:先生|女士|教授|博士|经理|总监|工程师|专家)', text):
-        entities.append({'name': m.group(0), 'type': 'person'})
-
-    # 提取组织/产品名：括号内的中文
-    for m in re.finditer(r'[（(]([\u4e00-\u9fff\w]{2,20})[）)]', text):
-        entities.append({'name': m.group(1), 'type': 'organization'})
-
-    # 提取技术术语：英文大写缩写/驼峰命名
-    for m in re.finditer(r'\b([A-Z][A-Za-z0-9]{1,20}|[A-Z]{2,10})\b', text):
-        entities.append({'name': m.group(1), 'type': 'concept'})
-
-    # 提取数字+单位组合
-    for m in re.finditer(r'(\d+\.?\d*)\s*(GB|MB|TB|GHz|核|线程|亿)', text):
-        entities.append({'name': m.group(0), 'type': 'metric'})
-
-    # 关系提取：A是B、A由B组成、A包含B、A使用B
-    rel_patterns = [
-        (r'([\u4e00-\u9fff\w]+)是([\u4e00-\u9fff\w]+)', 'is_a'),
-        (r'([\u4e00-\u9fff\w]+)包含([\u4e00-\u9fff\w]+)', 'contains'),
-        (r'([\u4e00-\u9fff\w]+)使用([\u4e00-\u9fff\w]+)', 'uses'),
-        (r'([\u4e00-\u9fff\w]+)属于([\u4e00-\u9fff\w]+)', 'belongs_to'),
-        (r'([\u4e00-\u9fff\w]+)依赖([\u4e00-\u9fff\w]+)', 'depends_on'),
-        (r'([\u4e00-\u9fff\w]+)支持([\u4e00-\u9fff\w]+)', 'supports'),
-    ]
-    for pattern, rel_type in rel_patterns:
-        for m in re.finditer(pattern, text):
-            relations.append({'source': m.group(1), 'target': m.group(2), 'type': rel_type})
-
-    return entities, relations
-
-if action == 'build':
-    # 从混合记忆数据库构建知识图谱
-    memory_sources = [
-        hybrid_root / "memory.db",
-        hybrid_root / "hybrid-memory.sqlite3",
-    ]
-    nodes_added = 0
-    edges_added = 0
-
-    for mem_db in memory_sources:
-        if not mem_db.exists():
-            continue
-        try:
-            mem_conn = sqlite3.connect(str(mem_db), timeout=5)
-            tables_to_try = ['memory_entries', 'memories', 'memory_items', 'knowledge_base']
-            for table in tables_to_try:
-                try:
-                    rows = mem_conn.execute(f'SELECT * FROM {table} LIMIT 500').fetchall()
-                    cols = [c[1].lower() for c in mem_conn.execute(f"PRAGMA table_info({table})").fetchall()]
-                    content_col = next((c for c in cols if 'content' in c or 'text' in c or 'summary' in c or 'value' in c), None)
-                    if not content_col:
-                        continue
-                    ci = cols.index(content_col)
-                    for row in rows:
-                        text = str(row[ci] or '')
-                        if len(text) < 10:
-                            continue
-                        entities, relations = extract_entities_relations(text)
-                        for ent in entities:
-                            try:
-                                conn.execute(
-                                    'INSERT OR IGNORE INTO nodes (name, node_type, created_at, updated_at) VALUES (?, ?, ?, ?)',
-                                    (ent['name'][:80], ent['type'], int(time.time()), int(time.time()))
-                                )
-                                if conn.total_changes > 0:
-                                    nodes_added += 1
-                            except Exception:
-                                pass
-                        for rel in relations:
-                            src = conn.execute('SELECT id FROM nodes WHERE name=?', (rel['source'][:80],)).fetchone()
-                            tgt = conn.execute('SELECT id FROM nodes WHERE name=?', (rel['target'][:80],)).fetchone()
-                            if src and tgt:
-                                try:
-                                    conn.execute(
-                                        'INSERT OR IGNORE INTO edges (source_id, target_id, relation, weight, created_at) VALUES (?, ?, ?, ?, ?)',
-                                        (src[0], tgt[0], rel['type'], 1.0, int(time.time()))
-                                    )
-                                    if conn.total_changes > 0:
-                                        edges_added += 1
-                                except Exception:
-                                    pass
-                    break
-                except sqlite3.OperationalError:
-                    continue
-            mem_conn.close()
-        except Exception:
-            continue
-
-    conn.commit()
-    total_nodes = conn.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]
-    total_edges = conn.execute('SELECT COUNT(*) FROM edges').fetchone()[0]
-    print(json.dumps({
-        'ok': True, 'nodesAdded': nodes_added, 'edgesAdded': edges_added,
-        'totalNodes': total_nodes, 'totalEdges': total_edges,
-    }, ensure_ascii=False))
-
-elif action == 'search':
-    # 在知识图谱中搜索
-    if not query:
-        print(json.dumps({'error': 'query required'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    results = {'nodes': [], 'edges': [], 'paths': []}
-
-    # 模糊匹配节点
-    node_rows = conn.execute(
-        'SELECT id, name, node_type FROM nodes WHERE name LIKE ? LIMIT 10',
-        (f'%{query}%',)
-    ).fetchall()
-    for r in node_rows:
-        # 获取与该节点相关的边
-        edges_out = conn.execute(
-            'SELECT e.relation, n.name, e.weight FROM edges e JOIN nodes n ON e.target_id=n.id WHERE e.source_id=? LIMIT 10',
-            (r[0],)
-        ).fetchall()
-        edges_in = conn.execute(
-            'SELECT e.relation, n.name, e.weight FROM edges e JOIN nodes n ON e.source_id=n.id WHERE e.target_id=? LIMIT 10',
-            (r[0],)
-        ).fetchall()
-        results['nodes'].append({
-            'name': r[1], 'type': r[2],
-            'outgoing': [{'relation': e[0], 'target': e[1], 'weight': e[2]} for e in edges_out],
-            'incoming': [{'relation': e[0], 'source': e[1], 'weight': e[2]} for e in edges_in],
-        })
-
-    # 搜索关系
-    rel_rows = conn.execute(
-        '''SELECT n1.name, e.relation, n2.name, e.weight
-           FROM edges e
-           JOIN nodes n1 ON e.source_id=n1.id
-           JOIN nodes n2 ON e.target_id=n2.id
-           WHERE e.relation LIKE ? LIMIT 10''',
-        (f'%{query}%',)
-    ).fetchall()
-    for r in rel_rows:
-        results['edges'].append({'source': r[0], 'relation': r[1], 'target': r[2], 'weight': r[3]})
-
-    print(json.dumps(results, ensure_ascii=False))
-
-elif action == 'traverse':
-    # 图遍历：从某个节点出发，沿指定关系类型遍历
-    start_name = query
-    relation_filter = sys.argv[5] if len(sys.argv) > 5 else ''
-    max_depth = int(sys.argv[6]) if len(sys.argv) > 6 else 2
-
-    if not start_name:
-        print(json.dumps({'error': 'start node name required'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    visited = set()
-    paths = []
-
-    def dfs(node_id, depth, path):
-        if depth > max_depth:
-            return
-        visited.add(node_id)
-        node_name = conn.execute('SELECT name FROM nodes WHERE id=?', (node_id,)).fetchone()
-        node_name = node_name[0] if node_name else '?'
-        paths.append({'path': path + [node_name], 'depth': depth})
-
-        where = 'WHERE e.source_id=?'
-        params = [node_id]
-        if relation_filter:
-            where += ' AND e.relation=?'
-            params.append(relation_filter)
-        for row in conn.execute(f'SELECT e.target_id, e.relation FROM edges e {where}', params).fetchall():
-            if row[0] not in visited:
-                dfs(row[0], depth + 1, path + [node_name])
-
-    start_node = conn.execute('SELECT id FROM nodes WHERE name=?', (start_name,)).fetchone()
-    if start_node:
-        dfs(start_node[0], 0, [])
-    else:
-        # 模糊匹配
-        matches = conn.execute('SELECT id, name FROM nodes WHERE name LIKE ? LIMIT 3', (f'%{start_name}%',)).fetchall()
-        for m in matches:
-            dfs(m[0], 0, [m[1]])
-
-    print(json.dumps({'startNode': start_name, 'maxDepth': max_depth, 'paths': paths, 'count': len(paths)}, ensure_ascii=False))
-
-elif action == 'stats':
-    total_nodes = conn.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]
-    total_edges = conn.execute('SELECT COUNT(*) FROM edges').fetchone()[0]
-    by_type = {}
-    for row in conn.execute('SELECT node_type, COUNT(*) FROM nodes GROUP BY node_type').fetchall():
-        by_type[row[0]] = row[1]
-    by_rel = {}
-    for row in conn.execute('SELECT relation, COUNT(*) FROM edges GROUP BY relation').fetchall():
-        by_rel[row[0]] = row[1]
-    print(json.dumps({
-        'totalNodes': total_nodes, 'totalEdges': total_edges,
-        'nodeTypes': by_type, 'relationTypes': by_rel,
-        'dbPath': str(graph_db),
-    }, ensure_ascii=False))
-
-elif action == 'cleanup':
-    before_nodes = conn.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]
-    before_edges = conn.execute('SELECT COUNT(*) FROM edges').fetchone()[0]
-    conn.execute('DELETE FROM edges WHERE id NOT IN (SELECT DISTINCT e.id FROM edges e JOIN nodes n1 ON e.source_id=n1.id JOIN nodes n2 ON e.target_id=n2.id)')
-    conn.commit()
-    after_nodes = conn.execute('SELECT COUNT(*) FROM nodes').fetchone()[0]
-    after_edges = conn.execute('SELECT COUNT(*) FROM edges').fetchone()[0]
-    print(json.dumps({
-        'nodesBefore': before_nodes, 'nodesAfter': after_nodes,
-        'edgesBefore': before_edges, 'edgesAfter': after_edges,
-    }, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'build|search|traverse|stats|cleanup'}, ensure_ascii=False))
-
-conn.close()
-PY
-}
-
-# ========================================================================
-# 第3层 - 联邦记忆检索
-# ========================================================================
-openclaw_ai_stack_federated_memory() {
-  local action="${1:-search}" query="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$query" "$SKPL_FEDERATED_MEMORY_DIR" "$SKPL_HYBRID_MEMORY_ROOT" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, os, time, hashlib, sqlite3
-from pathlib import Path
-
-action = sys.argv[1]
-query = sys.argv[2] if len(sys.argv) > 2 else ''
-federated_dir = Path(sys.argv[3])
-hybrid_root = Path(sys.argv[4])
-config_path = Path(sys.argv[5])
-
-federated_dir.mkdir(parents=True, exist_ok=True)
-fed_db = federated_dir / "federated.sqlite3"
-
-def init_db():
-    conn = sqlite3.connect(str(fed_db), timeout=10)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS federated_sources (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_name TEXT UNIQUE,
-            source_type TEXT,
-            endpoint TEXT,
-            auth_config TEXT DEFAULT '{}',
-            priority INTEGER DEFAULT 5,
-            timeout_ms INTEGER DEFAULT 5000,
-            enabled INTEGER DEFAULT 1,
-            last_sync_at INTEGER,
-            sync_status TEXT,
-            created_at INTEGER
-        )
-    ''')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS federated_index (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            source_id INTEGER,
-            content_hash TEXT,
-            content_preview TEXT,
-            content_size INTEGER,
-            metadata TEXT DEFAULT '{}',
-            indexed_at INTEGER,
-            source_name TEXT,
-            FOREIGN KEY(source_id) REFERENCES federated_sources(id)
-        )
-    ''')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_fed_hash ON federated_index(content_hash)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_fed_source ON federated_index(source_id)')
-    conn.commit()
-    return conn
-
-conn = init_db()
-
-if action == 'search':
-    # 跨本地+远程联邦检索
-    if not query:
-        print(json.dumps({'error': 'query required'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    results = {'local': [], 'federated': [], 'total': 0}
-
-    # 本地搜索：扫描本地混合记忆
-    local_sources = [
-        hybrid_root / "memory.db",
-        hybrid_root / "hybrid-memory.sqlite3",
-    ]
-    for loc_db in local_sources:
-        if not loc_db.exists():
-            continue
-        try:
-            loc_conn = sqlite3.connect(str(loc_db), timeout=5)
-            for table in ['memory_entries', 'memories', 'memory_items']:
-                try:
-                    rows = loc_conn.execute(
-                        f'SELECT * FROM {table} WHERE content LIKE ? OR summary LIKE ? LIMIT 10',
-                        (f'%{query}%', f'%{query}%')
-                    ).fetchall()
-                    for row in rows:
-                        content = ''
-                        for val in row:
-                            if isinstance(val, str) and len(val) > len(content):
-                                content = val
-                        if content:
-                            results['local'].append({
-                                'source': f'local:{loc_db.name}/{table}',
-                                'preview': content[:200],
-                                'score': 0.7,
-                            })
-                    break
-                except sqlite3.OperationalError:
-                    continue
-            loc_conn.close()
-        except Exception:
-            continue
-
-    # 联邦索引搜索
-    idx_rows = conn.execute(
-        'SELECT content_preview, source_name, content_hash FROM federated_index WHERE content_preview LIKE ? LIMIT 20',
-        (f'%{query}%',)
-    ).fetchall()
-    for r in idx_rows:
-        results['federated'].append({
-            'source': r[1] or 'remote',
-            'preview': r[0][:200],
-            'hash': r[2][:12] if r[2] else '',
-            'score': 0.5,
-        })
-
-    results['total'] = len(results['local']) + len(results['federated'])
-    print(json.dumps(results, ensure_ascii=False))
-
-elif action == 'sync':
-    # 从已注册的联邦源同步索引
-    sources = conn.execute('SELECT id, source_name, source_type, endpoint, enabled, last_sync_at FROM federated_sources WHERE enabled=1').fetchall()
-    synced = 0
-    for src in sources:
-        src_id, src_name, src_type, endpoint, enabled, last_sync = src
-        if src_type == 'local-db' and endpoint:
-            # 从本地数据库同步
-            ep = Path(endpoint)
-            if ep.exists():
-                try:
-                    src_conn = sqlite3.connect(str(ep), timeout=5)
-                    for table in ['memory_entries', 'memories']:
-                        try:
-                            rows = src_conn.execute(f'SELECT * FROM {table} ORDER BY rowid DESC LIMIT 100').fetchall()
-                            for row in rows:
-                                content = ''
-                                for val in row:
-                                    if isinstance(val, str) and len(val) > len(content) and len(val) < 1000:
-                                        content = val
-                                if content:
-                                    ch = hashlib.md5(content.encode()).hexdigest()
-                                    existing = conn.execute('SELECT id FROM federated_index WHERE content_hash=?', (ch,)).fetchone()
-                                    if not existing:
-                                        conn.execute(
-                                            'INSERT INTO federated_index (source_id, content_hash, content_preview, content_size, metadata, indexed_at, source_name) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                                            (src_id, ch, content[:500], len(content), '{}', int(time.time()), src_name)
-                                        )
-                                        synced += 1
-                            break
-                        except sqlite3.OperationalError:
-                            continue
-                    src_conn.close()
-                    conn.execute('UPDATE federated_sources SET last_sync_at=?, sync_status=? WHERE id=?',
-                                 (int(time.time()), 'ok', src_id))
-                except Exception as e:
-                    conn.execute('UPDATE federated_sources SET last_sync_at=?, sync_status=? WHERE id=?',
-                                 (int(time.time()), f'error: {str(e)[:100]}', src_id))
-        elif src_type == 'file-store' and endpoint:
-            # 从文件目录同步
-            ep = Path(endpoint)
-            if ep.is_dir():
-                for fpath in ep.rglob('*.json'):
-                    try:
-                        content = fpath.read_text(encoding='utf-8', errors='ignore')
-                        ch = hashlib.md5(content.encode()).hexdigest()
-                        existing = conn.execute('SELECT id FROM federated_index WHERE content_hash=?', (ch,)).fetchone()
-                        if not existing:
-                            conn.execute(
-                                'INSERT INTO federated_index (source_id, content_hash, content_preview, content_size, metadata, indexed_at, source_name) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                                (src_id, ch, content[:500], len(content), json.dumps({'file': str(fpath)}), int(time.time()), src_name)
-                            )
-                            synced += 1
-                    except Exception:
-                        pass
-                conn.execute('UPDATE federated_sources SET last_sync_at=?, sync_status=? WHERE id=?',
-                             (int(time.time()), 'ok', src_id))
-
-    conn.commit()
-    total_idx = conn.execute('SELECT COUNT(*) FROM federated_index').fetchone()[0]
-    print(json.dumps({'synced': synced, 'totalIndexed': total_idx, 'sources': len(sources)}, ensure_ascii=False))
-
-elif action == 'providers':
-    # 列出/管理联邦数据源
-    sub_action = sys.argv[4] if len(sys.argv) > 4 else 'list'
-    if sub_action == 'list':
-        sources = conn.execute('SELECT id, source_name, source_type, endpoint, priority, enabled, last_sync_at, sync_status FROM federated_sources ORDER BY priority').fetchall()
-        result = [{
-            'id': s[0], 'name': s[1], 'type': s[2], 'endpoint': s[3],
-            'priority': s[4], 'enabled': bool(s[5]), 'lastSync': s[6], 'status': s[7],
-        } for s in sources]
-        print(json.dumps({'sources': result, 'count': len(result)}, ensure_ascii=False))
-
-    elif sub_action == 'add':
-        src_name = sys.argv[5] if len(sys.argv) > 5 else ''
-        src_type = sys.argv[6] if len(sys.argv) > 6 else 'local-db'
-        endpoint = sys.argv[7] if len(sys.argv) > 7 else ''
-        priority = int(sys.argv[8]) if len(sys.argv) > 8 else 5
-        if not src_name or not endpoint:
-            print(json.dumps({'error': 'name and endpoint required'}, ensure_ascii=False))
-            raise SystemExit(1)
-        try:
-            conn.execute(
-                'INSERT INTO federated_sources (source_name, source_type, endpoint, priority, created_at) VALUES (?, ?, ?, ?, ?)',
-                (src_name, src_type, endpoint, priority, int(time.time()))
-            )
-            conn.commit()
-            print(json.dumps({'ok': True, 'added': src_name}, ensure_ascii=False))
-        except sqlite3.IntegrityError:
-            print(json.dumps({'error': f'source already exists: {src_name}'}, ensure_ascii=False))
-
-    elif sub_action == 'remove':
-        src_id = sys.argv[5] if len(sys.argv) > 5 else ''
-        if not src_id:
-            print(json.dumps({'error': 'source id required'}, ensure_ascii=False))
-            raise SystemExit(1)
-        conn.execute('DELETE FROM federated_index WHERE source_id=?', (src_id,))
-        conn.execute('DELETE FROM federated_sources WHERE id=?', (src_id,))
-        conn.commit()
-        print(json.dumps({'ok': True, 'removed': src_id}, ensure_ascii=False))
-
-elif action == 'stats':
-    sources_count = conn.execute('SELECT COUNT(*) FROM federated_sources WHERE enabled=1').fetchone()[0]
-    total_idx = conn.execute('SELECT COUNT(*) FROM federated_index').fetchone()[0]
-    by_source = {}
-    for row in conn.execute('SELECT source_name, COUNT(*) FROM federated_index GROUP BY source_name').fetchall():
-        by_source[row[0]] = row[1]
-    print(json.dumps({
-        'activeSources': sources_count,
-        'totalIndexed': total_idx,
-        'bySource': by_source,
-    }, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'search|sync|providers|stats'}, ensure_ascii=False))
-
-conn.close()
-PY
-}
-
-# ========================================================================
-# 第3层 - 记忆预测缓存
-# ========================================================================
-openclaw_ai_stack_memory_prediction() {
-  local action="${1:-predict}" context="${2:-}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$context" "$SKPL_MEMORY_PREDICTION_DIR" "$SKPL_HYBRID_MEMORY_ROOT" <<'PY'
-import json, sys, os, time, re, hashlib, sqlite3
-from pathlib import Path
-
-action = sys.argv[1]
-context = sys.argv[2] if len(sys.argv) > 2 else ''
-predict_dir = Path(sys.argv[3])
-hybrid_root = Path(sys.argv[4])
-
-predict_dir.mkdir(parents=True, exist_ok=True)
-predict_db = predict_dir / "prediction.sqlite3"
-
-def init_db():
-    conn = sqlite3.connect(str(predict_db), timeout=10)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS prediction_patterns (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            pattern_hash TEXT UNIQUE,
-            trigger_keywords TEXT,
-            predicted_memory TEXT,
-            predicted_cache_key TEXT,
-            confidence REAL DEFAULT 0.5,
-            hit_count INTEGER DEFAULT 0,
-            miss_count INTEGER DEFAULT 0,
-            last_hit_at INTEGER,
-            created_at INTEGER
-        )
-    ''')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS prediction_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            context_hash TEXT,
-            predicted_memory_hash TEXT,
-            was_hit INTEGER DEFAULT 0,
-            response_time_ms REAL,
-            created_at INTEGER
-        )
-    ''')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_pred_hash ON prediction_patterns(pattern_hash)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_pred_confidence ON prediction_patterns(confidence)')
-    conn.commit()
-    return conn
-
-conn = init_db()
-
-def extract_keywords(text):
-    """从上下文提取关键词"""
-    words = re.findall(r'[\u4e00-\u9fff]{2,6}|\b[a-zA-Z]{3,20}\b', text.lower())
-    # 按频率排序
-    freq = {}
-    for w in words:
-        freq[w] = freq.get(w, 0) + 1
-    sorted_words = sorted(freq.items(), key=lambda x: -x[1])
-    return [w for w, _ in sorted_words[:10]]
-
-def predict_memories(keywords):
-    """基于关键词模式预测需要的记忆"""
-    predicted = []
-    for kw in keywords:
-        rows = conn.execute(
-            'SELECT predicted_memory, predicted_cache_key, confidence, hit_count, miss_count FROM prediction_patterns WHERE trigger_keywords LIKE ? ORDER BY confidence DESC LIMIT 5',
-            (f'%{kw}%',)
-        ).fetchall()
-        for r in rows:
-            total = r[3] + r[4]
-            hit_rate = r[3] / max(total, 1)
-            adjusted_confidence = r[2] * (0.5 + 0.5 * hit_rate)
-            predicted.append({
-                'memory': r[0][:300],
-                'cacheKey': r[1],
-                'confidence': round(adjusted_confidence, 3),
-                'hitRate': round(hit_rate, 3),
-            })
-    # 去重并排序
-    seen = set()
-    unique = []
-    for p in sorted(predicted, key=lambda x: -x['confidence']):
-        key = hashlib.md5(p['memory'].encode()).hexdigest()
-        if key not in seen:
-            seen.add(key)
-            unique.append(p)
-    return unique[:8]
-
-if action == 'predict':
-    # 预测接下来可能需要的记忆
-    if not context:
-        keywords = []
-        # 尝试从最近的上下文状态推断
-        for db_path in [hybrid_root / "memory.db", hybrid_root / "hybrid-memory.sqlite3"]:
-            if db_path.exists():
-                try:
-                    temp_conn = sqlite3.connect(str(db_path), timeout=5)
-                    for table in ['memory_entries', 'memories']:
-                        try:
-                            rows = temp_conn.execute(f'SELECT * FROM {table} ORDER BY rowid DESC LIMIT 3').fetchall()
-                            recent_text = ' '.join(str(v) for row in rows for v in row if isinstance(v, str))
-                            keywords = extract_keywords(recent_text)
-                            break
-                        except sqlite3.OperationalError:
-                            continue
-                    temp_conn.close()
-                    if keywords:
-                        break
-                except Exception:
-                    continue
-    else:
-        keywords = extract_keywords(context)
-
-    predicted = predict_memories(keywords)
-    result = {
-        'keywords': keywords,
-        'predictions': predicted,
-        'count': len(predicted),
-        'timestamp': int(time.time()),
-    }
-    print(json.dumps(result, ensure_ascii=False))
-
-elif action == 'store':
-    # 记录一个成功的预测模式
-    trigger_text = context
-    memory_text = sys.argv[4] if len(sys.argv) > 4 else ''
-    cache_key = sys.argv[5] if len(sys.argv) > 5 else ''
-
-    if not trigger_text or not memory_text:
-        print(json.dumps({'error': 'context and memory_text required'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    keywords = extract_keywords(trigger_text)
-    keywords_str = ','.join(keywords[:10])
-    pattern_hash = hashlib.md5(f'{keywords_str}|{memory_text[:100]}'.encode()).hexdigest()
-
-    existing = conn.execute('SELECT id, hit_count FROM prediction_patterns WHERE pattern_hash=?', (pattern_hash,)).fetchone()
-    if existing:
-        conn.execute('UPDATE prediction_patterns SET hit_count=hit_count+1, last_hit_at=?, confidence=MIN(1.0, confidence+0.05) WHERE pattern_hash=?',
-                     (int(time.time()), pattern_hash))
-    else:
-        conn.execute(
-            'INSERT INTO prediction_patterns (pattern_hash, trigger_keywords, predicted_memory, predicted_cache_key, confidence, hit_count, miss_count, created_at) VALUES (?, ?, ?, ?, ?, 1, 0, ?)',
-            (pattern_hash, keywords_str, memory_text[:1000], cache_key, 0.3, int(time.time()))
-        )
-
-    # 记录预测日志
-    conn.execute(
-        'INSERT INTO prediction_log (context_hash, predicted_memory_hash, was_hit, response_time_ms, created_at) VALUES (?, ?, ?, ?, ?)',
-        (hashlib.md5(trigger_text.encode()).hexdigest(),
-         hashlib.md5(memory_text.encode()).hexdigest(),
-         1, 0, int(time.time()))
-    )
-
-    conn.commit()
-    print(json.dumps({'ok': True, 'patternHash': pattern_hash[:12], 'keywords': keywords[:5]}, ensure_ascii=False))
-
-elif action == 'feedback':
-    # 反馈预测命中/未命中
-    pattern_hash = context  # reuse as pattern_hash
-    was_hit = sys.argv[4] if len(sys.argv) > 4 else '1'
-    was_hit_int = 1 if was_hit in ('1', 'true', 'yes') else 0
-
-    if was_hit_int:
-        conn.execute('UPDATE prediction_patterns SET hit_count=hit_count+1, last_hit_at=?, confidence=MIN(1.0, confidence+0.02) WHERE pattern_hash LIKE ?',
-                     (int(time.time()), f'{pattern_hash}%'))
-    else:
-        conn.execute('UPDATE prediction_patterns SET miss_count=miss_count+1, confidence=MAX(0.1, confidence-0.05) WHERE pattern_hash LIKE ?',
-                     (f'{pattern_hash}%',))
-    conn.commit()
-    print(json.dumps({'ok': True, 'wasHit': bool(was_hit_int)}, ensure_ascii=False))
-
-elif action == 'stats':
-    total_patterns = conn.execute('SELECT COUNT(*) FROM prediction_patterns').fetchone()[0]
-    avg_confidence = conn.execute('SELECT AVG(confidence) FROM prediction_patterns').fetchone()[0] or 0
-    total_hits = conn.execute('SELECT SUM(hit_count) FROM prediction_patterns').fetchone()[0] or 0
-    total_misses = conn.execute('SELECT SUM(miss_count) FROM prediction_patterns').fetchone()[0] or 0
-    total_accuracy = round(total_hits / max(total_hits + total_misses, 1) * 100, 1)
-
-    top_patterns = conn.execute(
-        'SELECT trigger_keywords, predicted_memory, confidence, hit_count FROM prediction_patterns ORDER BY confidence DESC LIMIT 5'
-    ).fetchall()
-
-    print(json.dumps({
-        'totalPatterns': total_patterns,
-        'avgConfidence': round(avg_confidence, 3),
-        'totalHits': total_hits,
-        'totalMisses': total_misses,
-        'accuracy': f'{total_accuracy}%',
-        'topPatterns': [{'keywords': r[0], 'preview': r[1][:100], 'confidence': r[2], 'hits': r[3]} for r in top_patterns],
-    }, ensure_ascii=False))
-
-elif action == 'cleanup':
-    # 清理低置信度模式
-    before = conn.execute('SELECT COUNT(*) FROM prediction_patterns').fetchone()[0]
-    conn.execute('DELETE FROM prediction_patterns WHERE confidence < 0.1 AND miss_count > 10')
-    conn.commit()
-    after = conn.execute('SELECT COUNT(*) FROM prediction_patterns').fetchone()[0]
-    print(json.dumps({'before': before, 'after': after, 'removed': before - after}, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'predict|store|feedback|stats|cleanup'}, ensure_ascii=False))
-
-conn.close()
-PY
-}
-
-# ========================================================================
-# 第3层 - 企业记忆
-# ========================================================================
-openclaw_ai_stack_enterprise_memory() {
-  local action="${1:-status}"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$SKPL_MEMORY_ENTERPRISE_STATE_FILE" "$SKPL_HYBRID_MEMORY_ROOT" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, os, time, sqlite3, hashlib
-from pathlib import Path
-
-action = sys.argv[1]
-state_file = Path(sys.argv[2])
-hybrid_root = Path(sys.argv[3])
-config_path = Path(sys.argv[4])
-
-state_file.parent.mkdir(parents=True, exist_ok=True)
-ent_db = state_file.parent / "enterprise-memory.sqlite3"
-
-def init_ent_db():
-    conn = sqlite3.connect(str(ent_db), timeout=10)
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS enterprise_entries (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_hash TEXT UNIQUE,
-            content TEXT,
-            category TEXT DEFAULT 'general',
-            department TEXT DEFAULT '',
-            access_level TEXT DEFAULT 'internal',
-            author TEXT DEFAULT '',
-            tags TEXT DEFAULT '[]',
-            version INTEGER DEFAULT 1,
-            created_at INTEGER,
-            updated_at INTEGER,
-            expires_at INTEGER,
-            is_deleted INTEGER DEFAULT 0
-        )
-    ''')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS access_control (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_id INTEGER,
-            role_name TEXT,
-            can_read INTEGER DEFAULT 1,
-            can_write INTEGER DEFAULT 1,
-            can_delete INTEGER DEFAULT 0,
-            granted_by TEXT,
-            granted_at INTEGER,
-            FOREIGN KEY(entry_id) REFERENCES enterprise_entries(id)
-        )
-    ''')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT,
-            action TEXT,
-            entry_id INTEGER,
-            details TEXT,
-            ip_address TEXT,
-            created_at INTEGER
-        )
-    ''')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_ent_hash ON enterprise_entries(entry_hash)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_ent_category ON enterprise_entries(category)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_ent_department ON enterprise_entries(department)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at)')
-    conn.commit()
-    return conn
-
-conn = init_ent_db()
-
-def audit_log(user, action_name, entry_id=0, details=''):
-    conn.execute(
-        'INSERT INTO audit_log (user_id, action, entry_id, details, created_at) VALUES (?, ?, ?, ?, ?)',
-        (user, action_name, entry_id, details[:500], int(time.time()))
-    )
-    conn.commit()
-
-if action == 'status':
-    total = conn.execute('SELECT COUNT(*) FROM enterprise_entries WHERE is_deleted=0').fetchone()[0]
-    by_category = {}
-    for row in conn.execute('SELECT category, COUNT(*) FROM enterprise_entries WHERE is_deleted=0 GROUP BY category').fetchall():
-        by_category[row[0]] = row[1]
-    by_dept = {}
-    for row in conn.execute('SELECT department, COUNT(*) FROM enterprise_entries WHERE is_deleted=0 AND department!="" GROUP BY department').fetchall():
-        by_dept[row[0]] = row[1]
-    avg_access = conn.execute('SELECT AVG(access_level) FROM enterprise_entries WHERE is_deleted=0').fetchone()
-
-    acl_count = conn.execute('SELECT COUNT(DISTINCT entry_id) FROM access_control').fetchone()[0]
-    audit_count = conn.execute('SELECT COUNT(*) FROM audit_log').fetchone()[0]
-
-    # 保存状态文件
-    state = {
-        'totalEntries': total,
-        'byCategory': by_category,
-        'byDepartment': by_dept,
-        'accessControlEntries': acl_count,
-        'auditLogEntries': audit_count,
-        'lastUpdated': int(time.time()),
-    }
-    state_file.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    print(json.dumps(state, ensure_ascii=False))
-
-elif action == 'search':
-    # 企业级搜索（支持ACL过滤）
-    query = sys.argv[3] if len(sys.argv) > 3 else ''
-    dept_filter = sys.argv[4] if len(sys.argv) > 4 else ''
-    cat_filter = sys.argv[5] if len(sys.argv) > 5 else ''
-
-    if not query:
-        print(json.dumps({'error': 'query required'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    where = 'WHERE is_deleted=0 AND content LIKE ?'
-    params = [f'%{query}%']
-    if dept_filter:
-        where += ' AND department=?'
-        params.append(dept_filter)
-    if cat_filter:
-        where += ' AND category=?'
-        params.append(cat_filter)
-
-    rows = conn.execute(f'SELECT id, content, category, department, access_level, author, updated_at FROM enterprise_entries {where} ORDER BY updated_at DESC LIMIT 20', params).fetchall()
-
-    results = [{
-        'id': r[0],
-        'preview': r[1][:300],
-        'category': r[2],
-        'department': r[3],
-        'accessLevel': r[4],
-        'author': r[5],
-        'updatedAt': r[6],
-    } for r in rows]
-
-    audit_log('system', 'search', 0, f'query: {query}')
-    print(json.dumps({'results': results, 'count': len(results), 'query': query}, ensure_ascii=False))
-
-elif action == 'add':
-    # 添加企业知识条目
-    content = sys.argv[3] if len(sys.argv) > 3 else ''
-    category = sys.argv[4] if len(sys.argv) > 4 else 'general'
-    dept = sys.argv[5] if len(sys.argv) > 5 else ''
-    access_level = sys.argv[6] if len(sys.argv) > 6 else 'internal'
-    author = sys.argv[7] if len(sys.argv) > 7 else 'system'
-    tags = sys.argv[8] if len(sys.argv) > 8 else '[]'
-
-    if not content:
-        print(json.dumps({'error': 'content required'}, ensure_ascii=False))
-        raise SystemExit(1)
-
-    entry_hash = hashlib.sha256(content.encode()).hexdigest()
-    existing = conn.execute('SELECT id FROM enterprise_entries WHERE entry_hash=? AND is_deleted=0', (entry_hash,)).fetchone()
-
-    if existing:
-        conn.execute('UPDATE enterprise_entries SET updated_at=?, version=version+1 WHERE id=?',
-                     (int(time.time()), existing[0]))
-        audit_log(author, 'update', existing[0], 'content updated')
-        print(json.dumps({'ok': True, 'updated': existing[0], 'action': 'updated'}, ensure_ascii=False))
-    else:
-        cursor = conn.execute(
-            'INSERT INTO enterprise_entries (entry_hash, content, category, department, access_level, author, tags, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            (entry_hash, content[:5000], category, dept, access_level, author, tags, int(time.time()), int(time.time()))
-        )
-        entry_id = cursor.lastrowid
-        audit_log(author, 'create', entry_id, f'new entry: {content[:80]}')
-        print(json.dumps({'ok': True, 'id': entry_id, 'action': 'created'}, ensure_ascii=False))
-
-elif action == 'acl':
-    # 访问控制管理
-    sub = sys.argv[3] if len(sys.argv) > 3 else 'list'
-    if sub == 'list':
-        entry_id = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4].isdigit() else 0
-        where = 'WHERE e.id=?' if entry_id else ''
-        params = [entry_id] if entry_id else []
-        rows = conn.execute(f'''
-            SELECT ac.id, ac.entry_id, ac.role_name, ac.can_read, ac.can_write, ac.can_delete
-            FROM access_control ac
-            JOIN enterprise_entries e ON ac.entry_id=e.id
-            {where}
-        ''', params).fetchall()
-        acls = [{'id': r[0], 'entryId': r[1], 'role': r[2], 'canRead': bool(r[3]), 'canWrite': bool(r[4]), 'canDelete': bool(r[5])} for r in rows]
-        print(json.dumps({'acls': acls, 'count': len(acls)}, ensure_ascii=False))
-
-    elif sub == 'grant':
-        entry_id = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4].isdigit() else 0
-        role = sys.argv[5] if len(sys.argv) > 5 else ''
-        can_read = int(sys.argv[6]) if len(sys.argv) > 6 and sys.argv[6].isdigit() else 1
-        can_write = int(sys.argv[7]) if len(sys.argv) > 7 and sys.argv[7].isdigit() else 1
-        can_delete = int(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8].isdigit() else 0
-        if not entry_id or not role:
-            print(json.dumps({'error': 'entry_id and role required'}, ensure_ascii=False))
-            raise SystemExit(1)
-        conn.execute(
-            'INSERT OR REPLACE INTO access_control (entry_id, role_name, can_read, can_write, can_delete, granted_at) VALUES (?, ?, ?, ?, ?, ?)',
-            (entry_id, role, can_read, can_write, can_delete, int(time.time()))
-        )
-        conn.commit()
-        audit_log('admin', 'acl_grant', entry_id, f'role={role} r={can_read} w={can_write} d={can_delete}')
-        print(json.dumps({'ok': True, 'entryId': entry_id, 'role': role}, ensure_ascii=False))
-
-    elif sub == 'revoke':
-        acl_id = int(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4].isdigit() else 0
-        if not acl_id:
-            print(json.dumps({'error': 'acl_id required'}, ensure_ascii=False))
-            raise SystemExit(1)
-        conn.execute('DELETE FROM access_control WHERE id=?', (acl_id,))
-        conn.commit()
-        audit_log('admin', 'acl_revoke', acl_id, '')
-        print(json.dumps({'ok': True, 'revoked': acl_id}, ensure_ascii=False))
-
-elif action == 'audit':
-    # 查看审计日志
-    limit = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 30
-    rows = conn.execute('SELECT user_id, action, entry_id, details, created_at FROM audit_log ORDER BY created_at DESC LIMIT ?', (limit,)).fetchall()
-    logs = [{'user': r[0], 'action': r[1], 'entryId': r[2], 'details': r[3], 'time': r[4]} for r in rows]
-    total = conn.execute('SELECT COUNT(*) FROM audit_log').fetchone()[0]
-    print(json.dumps({'logs': logs, 'shown': len(logs), 'total': total}, ensure_ascii=False))
-
-elif action == 'sync':
-    # 企业记忆之间的同步（从本地混合记忆导入）
-    synced = 0
-    for db_path in [hybrid_root / "memory.db", hybrid_root / "hybrid-memory.sqlite3"]:
-        if not db_path.exists():
-            continue
-        try:
-            mem_conn = sqlite3.connect(str(db_path), timeout=5)
-            for table in ['memory_entries', 'memories']:
-                try:
-                    rows = mem_conn.execute(f'SELECT * FROM {table} LIMIT 200').fetchall()
-                    for row in rows:
-                        content = ''
-                        for val in row:
-                            if isinstance(val, str) and len(val) > len(content) and len(val) < 5000:
-                                content = val
-                        if content and len(content) > 20:
-                            entry_hash = hashlib.sha256(content.encode()).hexdigest()
-                            existing = conn.execute('SELECT id FROM enterprise_entries WHERE entry_hash=?', (entry_hash,)).fetchone()
-                            if not existing:
-                                conn.execute(
-                                    'INSERT INTO enterprise_entries (entry_hash, content, category, access_level, author, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                                    (entry_hash, content[:5000], 'imported', 'internal', 'import-bot', int(time.time()), int(time.time()))
-                                )
-                                synced += 1
-                    break
-                except sqlite3.OperationalError:
-                    continue
-            mem_conn.close()
-        except Exception:
-            continue
-    conn.commit()
-    print(json.dumps({'synced': synced, 'ok': True}, ensure_ascii=False))
-
-elif action == 'delete':
-    entry_id = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 0
-    hard = sys.argv[4] if len(sys.argv) > 4 else '0'
-    if not entry_id:
-        print(json.dumps({'error': 'entry_id required'}, ensure_ascii=False))
-        raise SystemExit(1)
-    if hard == '1':
-        conn.execute('DELETE FROM enterprise_entries WHERE id=?', (entry_id,))
-        conn.execute('DELETE FROM access_control WHERE entry_id=?', (entry_id,))
-        audit_log('admin', 'hard_delete', entry_id, '')
-    else:
-        conn.execute('UPDATE enterprise_entries SET is_deleted=1, updated_at=? WHERE id=?', (int(time.time()), entry_id))
-        audit_log('admin', 'soft_delete', entry_id, '')
-    conn.commit()
-    print(json.dumps({'ok': True, 'entryId': entry_id, 'hard': hard == '1'}, ensure_ascii=False))
-
-else:
-    print(json.dumps({'error': f'unknown action: {action}', 'usage': 'status|search|add|acl|audit|sync|delete'}, ensure_ascii=False))
-
-conn.close()
-PY
-}
-
 openclaw_ai_stack_cloud_status_summary() {
   openclaw_ai_stack_prepare
   python3 - "$SKPL_AI_STACK_CLOUD_STATE_FILE" <<'PY'
@@ -11443,480 +5742,6 @@ top = board[0].get('model', '-') if board else '-'
 quality = data.get('quality', {})
 pressure = data.get('resourcePressure', {})
 print(f"runs={data.get('totalRuns', 0)} | memory={data.get('memoryLearning', {}).get('captures', 0)} | cloud={data.get('memoryLearning', {}).get('cloudSuccess', 0)} | pressure={pressure.get('hits', 0)}/{pressure.get('recoveries', 0)}/{pressure.get('fallbacks', 0)} | top={top} | q={quality.get('high', 0)}/{quality.get('medium', 0)}/{quality.get('low', 0)}")
-PY
-}
-
-
-# ========================================================================
-# 强化学习路由策略调优模块 — Q-learning风格的路由参数自适应
-# ========================================================================
-openclaw_ai_stack_rl_tune() {
-  local route_json="$1"
-  openclaw_ai_stack_prepare
-  python3 - "$route_json" "$SKPL_AI_STACK_EVOLVE_STATE_FILE" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys
-from pathlib import Path
-from math import exp
-
-route = json.loads(sys.argv[1])
-evolve_path = Path(sys.argv[2])
-cfg_path = Path(sys.argv[3])
-
-# 强化学习状态空间
-state = {
-    'tier': route.get('profileTier', 'unknown'),
-    'intent': route.get('intent', 'general'),
-    'complexity': route.get('complexity', 'normal'),
-    'execution': route.get('execution', 'local'),
-}
-
-# Q表: 存储/读取
-q_path = Path(str(cfg_path.parent) + '/rl_q_table.json')
-q_table = {}
-if q_path.exists():
-    try:
-        q_table = json.loads(q_path.read_text(encoding='utf-8'))
-    except Exception:
-        q_table = {}
-
-# 读取历史效果
-evolve = {}
-if evolve_path.exists():
-    try:
-        evolve = json.loads(evolve_path.read_text(encoding='utf-8'))
-    except Exception:
-        evolve = {}
-
-# 动作空间: 模型选择决策
-model = route.get('model', '')
-exec_mode = route.get('execution', 'local')
-state_key = f"{state['tier']}|{state['intent']}|{state['complexity']}"
-action_key = f"{state_key}|{model}|{exec_mode}"
-
-# 当前动作的反馈(从进化记录中读取)
-quality_score = float((evolve.get('quality') or {}).get('latestScore', 0.5) or 0.5)
-success_ratio = float((evolve.get('quality') or {}).get('successRatio', 0.5) or 0.5)
-
-# Q-Learning: Q(s,a) ← Q(s,a) + α * (reward - Q(s,a))
-alpha = 0.15  # 学习率
-discount = 0.9  # 折扣因子
-reward = (quality_score * 0.5 + success_ratio * 0.5)  # 即时奖励
-
-prev_q = q_table.get(action_key, 0.5)
-q_table[action_key] = round(prev_q + alpha * (reward - prev_q), 4)
-
-# 软max探索: 选择当前状态下最优动作
-alternatives = []
-for key, q_value in q_table.items():
-    if key.startswith(state_key + '|'):
-        parts = key.rsplit('|', 1)
-        alt_model = parts[0][len(state_key)+1:]
-        alt_exec = parts[1] if len(parts) > 1 else 'cloud'
-        alternatives.append({'model': alt_model, 'execution': alt_exec, 'qValue': q_value})
-
-alternatives.sort(key=lambda x: -x['qValue'])
-best_action = alternatives[0] if alternatives else {'model': model, 'execution': exec_mode, 'qValue': prev_q}
-
-# 保存Q表
-q_path.parent.mkdir(parents=True, exist_ok=True)
-q_path.write_text(json.dumps(q_table, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-
-result = {
-    'state': state,
-    'currentAction': {'model': model, 'execution': exec_mode, 'qValue': prev_q},
-    'bestAction': best_action,
-    'alternatives': alternatives[:5],
-    'reward': round(reward, 4),
-    'explorationRate': round(1.0 / (1 + len(q_table) * 0.01), 4),
-    'qTableSize': len(q_table),
-}
-print(json.dumps(result, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 实时成本计算 — API token用量和费用跟踪
-# ========================================================================
-openclaw_ai_stack_cost_tracker() {
-  local action="$1" data_json="$2"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$data_json" "${SKPL_AI_STACK_ROOT:-/tmp/openclaw-ai}/cost_tracker.json" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, time
-from pathlib import Path
-
-action = sys.argv[1]
-data = json.loads(sys.argv[2]) if sys.argv[2].strip() else {}
-tracker_path = Path(sys.argv[3])
-cfg = json.loads(open(sys.argv[4], 'r', encoding='utf-8').read())
-
-# 模型定价表 (USD per 1M tokens, 2025-2026参考价)
-pricing = {
-    'google/gemini-2.5-flash': {'input': 0.15, 'output': 0.60},
-    'google/gemini-2.5-pro': {'input': 1.25, 'output': 5.00},
-    'openrouter/qwen-32b': {'input': 0.40, 'output': 0.80},
-    'openrouter/llama-70b': {'input': 0.59, 'output': 0.79},
-    'deepseek/deepseek-chat': {'input': 0.27, 'output': 1.10},
-    'siliconflow/qwen-14b': {'input': 0.20, 'output': 0.40},
-    'openrouter/mixtral-8x22b': {'input': 0.65, 'output': 0.65},
-}
-# 合并用户自定义定价
-user_pricing = (cfg.get('cloud') or {}).get('customPricing', {})
-pricing.update(user_pricing)
-
-tracker = {}
-if tracker_path.exists():
-    try:
-        tracker = json.loads(tracker_path.read_text(encoding='utf-8'))
-    except Exception:
-        tracker = {'records': [], 'totalCost': 0, 'totalTokens': {'input': 0, 'output': 0}}
-
-if not tracker.get('records'):
-    tracker = {'records': [], 'totalCost': 0, 'totalTokens': {'input': 0, 'output': 0}}
-
-if action == 'record':
-    model = data.get('model', '')
-    input_tokens = int(data.get('inputTokens', 0) or 0)
-    output_tokens = int(data.get('outputTokens', 0) or 0)
-    provider = data.get('provider', 'unknown')
-
-    price = pricing.get(model, pricing.get(f'{provider}/{model}', {'input': 1.0, 'output': 4.0}))
-    cost = round((input_tokens / 1e6) * price['input'] + (output_tokens / 1e6) * price['output'], 6)
-
-    entry = {
-        'timestamp': int(time.time()),
-        'model': model,
-        'provider': provider,
-        'inputTokens': input_tokens,
-        'outputTokens': output_tokens,
-        'estimatedCostUsd': cost,
-        'pricing': price,
-    }
-    tracker['records'].append(entry)
-    tracker['totalCost'] = round(tracker.get('totalCost', 0) + cost, 6)
-    tracker['totalTokens']['input'] = tracker['totalTokens'].get('input', 0) + input_tokens
-    tracker['totalTokens']['output'] = tracker['totalTokens'].get('output', 0) + output_tokens
-    # 保留最近1000条记录
-    if len(tracker['records']) > 1000:
-        tracker['records'] = tracker['records'][-1000:]
-
-elif action == 'summary':
-    records = tracker.get('records', [])
-    today_start = int(time.time()) - 86400
-    today_records = [r for r in records if r.get('timestamp', 0) >= today_start]
-    today_cost = round(sum(r.get('estimatedCostUsd', 0) for r in today_records), 4)
-    tracker['todayCost'] = today_cost
-    tracker['todayCalls'] = len(today_records)
-    # 按模型聚合
-    model_costs = {}
-    for r in today_records:
-        m = r.get('model', 'unknown')
-        model_costs[m] = model_costs.get(m, 0) + r.get('estimatedCostUsd', 0)
-    tracker['modelBreakdown'] = {k: round(v, 4) for k, v in sorted(model_costs.items(), key=lambda x: -x[1])[:10]}
-
-tracker['lastUpdated'] = int(time.time())
-tracker_path.parent.mkdir(parents=True, exist_ok=True)
-tracker_path.write_text(json.dumps(tracker, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-print(json.dumps(tracker, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 用户模型偏好 — 手动/混合模式接入路由决策
-# ========================================================================
-openclaw_ai_stack_user_model_preference() {
-  local route_json="$1"
-  openclaw_ai_stack_prepare
-  local pref_file="${SKPL_AI_STACK_ROOT:-/tmp/openclaw-ai}/user_model_prefs.json"
-  if [ ! -f "$pref_file" ]; then
-    python3 - "$pref_file" <<'PY'
-import json
-from pathlib import Path
-prefs = {
-    'mode': 'auto',
-    'preferredModels': {},
-    'customRules': [],
-    'hybridAssignment': {},
-}
-Path(sys.argv[1]).parent.mkdir(parents=True, exist_ok=True)
-Path(sys.argv[1]).write_text(json.dumps(prefs, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-print(json.dumps(prefs, ensure_ascii=False))
-PY
-    [ "$?" != "0" ] && printf '%s' "$route_json" && return 0
-  fi
-  python3 - "$route_json" "$pref_file" <<'PY'
-import json, sys
-route = json.loads(sys.argv[1])
-prefs = json.loads(open(sys.argv[2], 'r', encoding='utf-8').read())
-
-mode = prefs.get('mode', 'auto')
-intent = route.get('intent', 'general')
-route_name = route.get('route', 'text')
-
-if mode == 'auto':
-    # 自动模式: 不做修改，由系统决定
-    route['preferenceApplied'] = False
-    route['preferenceMode'] = 'auto'
-elif mode == 'manual':
-    # 手动模式: 完全使用用户指定的模型
-    preferred = prefs.get('preferredModels', {})
-    user_model = preferred.get(intent) or preferred.get('default')
-    if user_model:
-        route['model'] = user_model
-        route['execution'] = 'cloud' if user_model.startswith(('google/', 'openrouter/', 'anthropic/', 'deepseek/', 'siliconflow/')) else 'local'
-        route['preferenceApplied'] = True
-        route['preferenceMode'] = 'manual'
-    route['reason'] = 'user-preference-manual'
-elif mode == 'hybrid':
-    # 混合模式: 复杂问题用多个模型协同
-    hybrid = prefs.get('hybridAssignment', {})
-    complexity = route.get('complexity', 'normal')
-    if complexity == 'complex' and hybrid.get('complexMultiModel', False):
-        route['execution'] = 'cloud'
-        route['reason'] = 'hybrid-multi-model'
-        route['hybridFanout'] = hybrid.get('fanout', 3)
-    else:
-        preferred = prefs.get('preferredModels', {})
-        user_model = preferred.get(intent)
-        if user_model:
-            route['model'] = user_model
-    route['preferenceApplied'] = True
-    route['preferenceMode'] = 'hybrid'
-    # 自定义规则
-    for rule in prefs.get('customRules', []):
-        condition = rule.get('condition', '')
-        if condition == 'always-local' and route.get('execution') == 'cloud':
-            route['execution'] = 'local'
-            route['reason'] = 'custom-rule-always-local'
-        elif condition == 'prefer-cloud' and route.get('execution') != 'cloud':
-            route['execution'] = 'cloud'
-            route['reason'] = 'custom-rule-prefer-cloud'
-print(json.dumps(route, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 用户行为隐式反馈学习 — 从交互中学习用户偏好
-# ========================================================================
-openclaw_ai_stack_feedback_learning() {
-  local action="${1:-collect}" data_json="$2"
-  openclaw_ai_stack_prepare
-  python3 - "$action" "$data_json" "${SKPL_AI_STACK_ROOT:-/tmp/openclaw-ai}/feedback_state.json" "${SKPL_AI_STACK_ROOT:-/tmp/openclaw-ai}/user_model_prefs.json" <<'PY'
-import json, sys, time
-from pathlib import Path
-
-action = sys.argv[1]
-data = json.loads(sys.argv[2]) if sys.argv[2].strip() else {}
-feedback_path = Path(sys.argv[3])
-prefs_path = Path(sys.argv[4])
-
-feedback = {}
-if feedback_path.exists():
-    try:
-        feedback = json.loads(feedback_path.read_text(encoding='utf-8'))
-    except Exception:
-        feedback = {'interactions': [], 'patterns': {}, 'preferences': {}}
-
-if not feedback.get('interactions'):
-    feedback = {'interactions': [], 'patterns': {}, 'preferences': {}}
-
-now_ts = int(time.time())
-
-if action == 'collect':
-    # 记录用户交互
-    entry = {
-        'timestamp': now_ts,
-        'intent': data.get('intent', 'general'),
-        'route': data.get('route', 'text'),
-        'model': data.get('model', ''),
-        'execution': data.get('execution', 'local'),
-        'durationMs': data.get('durationMs', 0),
-        'userDidAbort': data.get('userDidAbort', False),
-        'userRepeatedQuery': data.get('userRepeatedQuery', False),
-        'qualityScore': data.get('qualityScore', 0.5),
-    }
-    feedback['interactions'].append(entry)
-    # 保留最近500条
-    if len(feedback['interactions']) > 500:
-        feedback['interactions'] = feedback['interactions'][-500:]
-
-    # 统计模式
-    recent = feedback['interactions'][-50:]
-    patterns = feedback.get('patterns', {})
-
-    # 用户偏好的模型 (最多使用)
-    model_counts = {}
-    for r in recent:
-        m = r.get('model', '')
-        if m:
-            model_counts[m] = model_counts.get(m, 0) + 1
-    if model_counts:
-        patterns['mostUsedModels'] = sorted(model_counts.items(), key=lambda x: -x[1])[:3]
-
-    # 用户偏好的执行方式
-    exec_counts = {'local': 0, 'cloud': 0}
-    for r in recent:
-        exec_counts[r.get('execution', 'local')] = exec_counts.get(r.get('execution', 'local'), 0) + 1
-    patterns['preferredExecution'] = max(exec_counts, key=exec_counts.get)
-
-    # 重复查询率
-    repeat_count = sum(1 for r in recent if r.get('userRepeatedQuery'))
-    patterns['repeatRate'] = round(repeat_count / max(len(recent), 1), 2)
-
-    # 中止率
-    abort_count = sum(1 for r in recent if r.get('userDidAbort'))
-    patterns['abortRate'] = round(abort_count / max(len(recent), 1), 2)
-
-    # 平均质量分
-    quality_scores = [r.get('qualityScore', 0) for r in recent if r.get('qualityScore')]
-    patterns['avgQualityScore'] = round(sum(quality_scores) / max(len(quality_scores), 1), 3) if quality_scores else 0
-
-    feedback['patterns'] = patterns
-
-    # 推移到偏好文件
-    prefs = {}
-    if prefs_path.exists():
-        try:
-            prefs = json.loads(prefs_path.read_text(encoding='utf-8'))
-        except Exception:
-            prefs = {'mode': 'auto', 'preferredModels': {}, 'customRules': [], 'hybridAssignment': {}}
-    # 将高频模型写入偏好
-    for model_name, _ in patterns.get('mostUsedModels', []):
-        for intent_key in ['general', 'code-development', 'multimodal', 'mathematical-reasoning', 'creative-writing', 'professional-domain']:
-            if intent_key not in prefs.get('preferredModels', {}) and model_name:
-                # 仅当模型名明确时才设置
-                pass
-    prefs['autoLearned'] = {
-        'fromSessions': len(recent),
-        'lastUpdate': now_ts,
-        'patterns': dict(patterns),
-    }
-    prefs_path.parent.mkdir(parents=True, exist_ok=True)
-    prefs_path.write_text(json.dumps(prefs, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-
-elif action == 'summary':
-    patterns = feedback.get('patterns', {})
-    interactions = feedback.get('interactions', [])
-    print(json.dumps({
-        'totalInteractions': len(interactions),
-        'patterns': patterns,
-        'lastInteraction': interactions[-1] if interactions else None,
-    }, ensure_ascii=False))
-    raise SystemExit(0)
-
-# 保存
-feedback_path.parent.mkdir(parents=True, exist_ok=True)
-feedback_path.write_text(json.dumps(feedback, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-print(json.dumps({'collected': True, 'totalInteractions': len(feedback['interactions']), 'patterns': feedback.get('patterns', {})}, ensure_ascii=False))
-PY
-}
-
-# ========================================================================
-# 主动学习与知识补全 — 检测知识缺口并发起定向学习
-# ========================================================================
-openclaw_ai_stack_active_learning() {
-  local action="${1:-detect}"
-  openclaw_ai_stack_prepare
-  memory_extension_prepare
-  python3 - "$action" "$SKPL_AI_STACK_EVOLVE_STATE_FILE" "$SKPL_MEMORY_EXTENSION_DB" "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
-import json, sys, time, re
-from pathlib import Path
-import sqlite3
-
-action = sys.argv[1]
-evolve_path = Path(sys.argv[2])
-db_path = sys.argv[3]
-cfg_path = Path(sys.argv[4])
-cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
-
-conn = sqlite3.connect(db_path)
-
-# 确保表存在
-conn.execute('''CREATE TABLE IF NOT EXISTS knowledge_gaps (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    domain TEXT, topic TEXT, confidence REAL,
-    last_seen_at INTEGER, search_attempts INTEGER,
-    resolved INTEGER DEFAULT 0
-)''')
-conn.execute('CREATE INDEX IF NOT EXISTS idx_kg_domain ON knowledge_gaps(domain)')
-conn.execute('CREATE INDEX IF NOT EXISTS idx_kg_resolved ON knowledge_gaps(resolved)')
-
-now_ts = int(time.time())
-
-if action == 'detect':
-    # 从进化记录中检测低信心领域
-    evolve = {}
-    if evolve_path.exists():
-        try:
-            evolve = json.loads(evolve_path.read_text(encoding='utf-8'))
-        except Exception:
-            evolve = {}
-    quality = evolve.get('quality') or {}
-    by_intent = quality.get('byIntent', {})
-
-    gaps_detected = []
-    for intent, stats in by_intent.items():
-        score = float(stats.get('avgScore', 0.5) or 0.5)
-        if score < 0.5:
-            count = int(stats.get('count', 0) or 0)
-            # 记录知识缺口
-            existing = conn.execute(
-                'SELECT id, search_attempts FROM knowledge_gaps WHERE domain = ? AND resolved = 0 LIMIT 1',
-                (intent,)
-            ).fetchone()
-            if existing:
-                conn.execute(
-                    'UPDATE knowledge_gaps SET confidence = ?, last_seen_at = ?, search_attempts = ? WHERE id = ?',
-                    (score, now_ts, existing[1] + 1, existing[0])
-                )
-            else:
-                conn.execute(
-                    'INSERT INTO knowledge_gaps (domain, topic, confidence, last_seen_at, search_attempts) VALUES (?,?,?,?,1)',
-                    (intent, f'low-quality-{intent}', score, now_ts)
-                )
-            gaps_detected.append({'domain': intent, 'confidence': score, 'count': count})
-
-    conn.commit()
-    print(json.dumps({'gapsDetected': len(gaps_detected), 'gaps': gaps_detected, 'timestamp': now_ts}, ensure_ascii=False))
-
-elif action == 'resolve':
-    gap_id = int(sys.argv[5]) if len(sys.argv) > 5 else 0
-    if gap_id:
-        conn.execute('UPDATE knowledge_gaps SET resolved = 1 WHERE id = ?', (gap_id,))
-        conn.commit()
-        print(json.dumps({'resolved': True, 'gapId': gap_id}, ensure_ascii=False))
-    else:
-        gaps = conn.execute(
-            'SELECT id, domain, topic, confidence, search_attempts, last_seen_at FROM knowledge_gaps WHERE resolved = 0 ORDER BY confidence ASC LIMIT 20'
-        ).fetchall()
-        results = [{'id': g[0], 'domain': g[1], 'topic': g[2], 'confidence': g[3], 'attempts': g[4], 'lastSeenAt': g[5]} for g in gaps]
-        print(json.dumps({'gaps': results, 'total': len(results)}, ensure_ascii=False))
-
-elif action == 'suggest':
-    # 根据缺口建议学习的模型/数据源
-    gaps = conn.execute(
-        'SELECT id, domain, topic, confidence, search_attempts FROM knowledge_gaps WHERE resolved = 0 ORDER BY confidence ASC LIMIT 10'
-    ).fetchall()
-    suggestions = []
-    for g in gaps:
-        domain = g[1] or 'general'
-        model_suggestions = {
-            'general': {'model': 'ollama/qwen2.5:14b', 'action': 'fine-tune-local-model'},
-            'code-development': {'model': 'ollama/deepseek-coder-v2:16b', 'action': 'add-code-examples'},
-            'mathematical-reasoning': {'model': 'cloud', 'action': 'use-cloud-math-model'},
-            'multimodal': {'model': 'ollama/llama3.2-vision:11b', 'action': 'add-multimodal-samples'},
-            'creative-writing': {'model': 'cloud', 'action': 'use-cloud-creative-model'},
-            'professional-domain': {'model': 'cloud', 'action': 'fetch-domain-documents'},
-        }
-        suggestion = model_suggestions.get(domain, model_suggestions['general'])
-        suggestions.append({
-            'domain': domain,
-            'confidence': g[3],
-            'suggestion': suggestion,
-        })
-    conn.commit()
-    print(json.dumps({'suggestions': suggestions, 'timestamp': now_ts}, ensure_ascii=False))
-
-conn.close()
 PY
 }
 
@@ -12377,11 +6202,6 @@ openclaw_detect_hardware_profile_json() {
     return 0
   fi
   # 使用子shell和timeout确保不会卡住
-  # WSL检测：在WSL环境中跳过nvidia-smi避免挂起
-  if grep -qi "microsoft\|WSL" /proc/sys/kernel/osrelease 2>/dev/null || [ -n "$WSL_DISTRO_NAME" ]; then
-    echo '{"tier":"entry-cpu","memoryMb":8192,"cpuThreads":4,"cpuInstructionSet":[],"gpu":{"present":false,"name":"WSL-skipped","vramMb":0,"freeVramMb":0},"storage":{"totalGb":256,"freeGb":128,"type":"ssd"},"network":{"online":true,"latencyMs":50,"quality":"online"},"battery":{"present":false,"percent":null},"budget":{"reserveGpuMb":0,"reserveMemoryMb":512,"usableMemoryMb":7680,"usableGpuMb":0}}'
-    return 0
-  fi
   (
     timeout 10 python3 - <<'PY'
 import json
@@ -12516,27 +6336,18 @@ network = network_info()
 
 if gpu['present']:
     vram = gpu['vramMb']
-    # 规范要求: 每级需同时满足VRAM和系统内存约束
-    if vram >= 48000 and mem_mb >= 128000:
+    if vram >= 48000:
         tier = 'server'
-    elif vram >= 16000 and mem_mb >= 64000:
+    elif vram >= 16000:
         tier = 'workstation'
-    elif vram >= 12000 and mem_mb >= 32000:
+    elif vram >= 12000:
         tier = 'flagship-gpu'
-    elif vram >= 8000 and mem_mb >= 16000:
+    elif vram >= 8000:
         tier = 'golden-gpu'
-    elif vram >= 4000 and mem_mb >= 8000:
+    elif vram >= 4000:
         tier = 'advanced-gpu'
-    elif vram >= 2000 and mem_mb >= 8000:
-        tier = 'entry-gpu'
     else:
-        # GPU存在但规格不足对应tier，降级到CPU tier
-        if mem_mb < 4096:
-            tier = 'emergency-cpu'
-        elif mem_mb < 8192:
-            tier = 'entry-cpu'
-        else:
-            tier = 'advanced-cpu'
+        tier = 'entry-gpu'
 else:
     if mem_mb < 4096:
         tier = 'emergency-cpu'
@@ -12545,13 +6356,13 @@ else:
     elif mem_mb < 16384:
         tier = 'advanced-cpu'
     else:
-        tier = 'advanced-cpu'
+        tier = 'advanced-cpu-plus'
 
 budget = {
-    'reserveGpuMb': 200,
+    'reserveGpuMb': 100,
     'reserveMemoryMb': 512,
     'usableMemoryMb': max(mem_mb - 512, 0),
-    'usableGpuMb': max(gpu['freeVramMb'] - 200, 0) if gpu['present'] else 0,
+    'usableGpuMb': max(gpu['freeVramMb'] - 100, 0) if gpu['present'] else 0,
 }
 
 print(json.dumps({
@@ -12568,7 +6379,7 @@ print(json.dumps({
 PY
   ) || {
     # 超时或失败时使用默认值
-    echo '{"tier":"unknown","memoryMb":8192,"cpuThreads":4,"cpuInstructionSet":[],"gpu":{"present":false,"name":"","vramMb":0,"freeVramMb":0},"storage":{"totalGb":0,"freeGb":0,"type":"unknown"},"network":{"online":false,"latencyMs":null,"quality":"offline"},"battery":{"present":false,"percent":null},"budget":{"reserveGpuMb":200,"reserveMemoryMb":512,"usableMemoryMb":7680,"usableGpuMb":0}}'
+    echo '{"tier":"unknown","memoryMb":8192,"cpuThreads":4,"cpuInstructionSet":[],"gpu":{"present":false,"name":"","vramMb":0,"freeVramMb":0},"storage":{"totalGb":0,"freeGb":0,"type":"unknown"},"network":{"online":false,"latencyMs":null,"quality":"offline"},"battery":{"present":false,"percent":null},"budget":{"reserveGpuMb":100,"reserveMemoryMb":512,"usableMemoryMb":7680,"usableGpuMb":0}}'
     return 0
   }
   skpl_cache_hardware_profile
@@ -13397,8 +7208,33 @@ PY
 
 # ==========================================
 # 🌌 新一代极致记忆与智能路由系统 (Ultra-Light)
-# ⚠️ 旧路由管道已被多Agent架构替代，以下函数为保留定义，实际不再调用
 # ==========================================
+
+# 1. 硬件分级检测 (极速版 - 0 延迟)
+# 根据内存容量和 CPU 核心数判断: 1=低配, 2=中配, 3=高配
+openclaw_detect_hardware_tier() {
+    local profile_json
+    profile_json=$(openclaw_detect_hardware_profile_json)
+    python3 - "$profile_json" <<'PY'
+import json
+import sys
+data = json.loads(sys.argv[1])
+tier_name = data.get('tier') or 'entry-cpu'
+mapping = {
+    'server': 3,
+    'workstation': 3,
+    'flagship-gpu': 3,
+    'golden-gpu': 3,
+    'advanced-gpu': 2,
+    'advanced-cpu-plus': 2,
+    'advanced-cpu': 2,
+    'entry-gpu': 1,
+    'entry-cpu': 1,
+    'emergency-cpu': 1,
+}
+print(mapping.get(tier_name, 1))
+PY
+}
 
 openclaw_ai_stack_classify_query() {
   local query="$1"
@@ -13409,28 +7245,25 @@ import sys
 
 query = (sys.argv[1] or '').strip()
 lowered = query.lower()
-intent = 'general'
+intent = 'text'
 route = 'text'
 complexity = 'normal'
 tool = 'none'
 requires_search = False
 privacy = 'normal'
 
-vision_markers = ['image', 'screenshot', 'ocr', '图片', '截图', '识图', '看图', '视觉', '多模态', '图像']
-code_markers = ['code', 'bug', 'stack trace', 'refactor', 'test', 'function', '代码', '报错', '修复', '调试', '重构']
-search_markers = ['latest', 'search', 'web', 'docs', 'documentation', '最新', '搜索', '文档', '官网', '查资料']
-tool_markers = ['run', 'execute', 'command', 'terminal', 'bash', '运行', '执行', '命令', '脚本']
-complex_markers = ['complex', 'design', 'architecture', 'multi-step', 'plan', '复杂', '设计', '架构', '方案', '系统设计']
-math_markers = ['math', 'calculate', 'compute', 'equation', 'solve', '数学', '计算', '方程', '推理', '算术', '公式']
-creative_markers = ['write', 'story', 'poem', 'essay', 'creative', 'novel', '写作', '故事', '诗歌', '创作', '散文', '创意']
-domain_markers = ['medical', 'legal', 'finance', 'professional', 'domain', '医学', '法律', '金融', '专业', '领域']
-privacy_markers = ['local only', 'privacy', 'secret', 'sensitive', '本地', '隐私', '敏感', '不联网']
+vision_markers = ['image', 'screenshot', 'ocr', '图片', '截图', '识图', '看图', '视觉']
+code_markers = ['code', 'bug', 'stack trace', 'refactor', 'test', '函数', '代码', '报错', '修复']
+search_markers = ['latest', 'search', 'web', 'docs', 'documentation', '最新', '搜索', '文档', '官网']
+tool_markers = ['run', 'execute', 'command', 'terminal', 'bash', '运行', '执行', '命令']
+complex_markers = ['complex', 'design', 'architecture', 'multi-step', 'plan', '复杂', '设计', '架构', '方案']
+privacy_markers = ['local only', 'privacy', 'secret', 'sensitive', '本地', '隐私', '敏感']
 
 if any(marker in lowered for marker in vision_markers):
-    intent = 'multimodal'
+    intent = 'vision'
     route = 'vision'
 if any(marker in lowered for marker in code_markers):
-    intent = 'code-development'
+    intent = 'code'
     route = 'code'
 if any(marker in lowered for marker in search_markers):
     requires_search = True
@@ -13439,15 +7272,10 @@ if any(marker in lowered for marker in tool_markers):
     tool = 'terminal'
 if any(marker in lowered for marker in complex_markers) or len(query) > 600:
     complexity = 'complex'
-if any(marker in lowered for marker in math_markers):
-    intent = 'mathematical-reasoning'
-if any(marker in lowered for marker in creative_markers):
-    intent = 'creative-writing'
-if any(marker in lowered for marker in domain_markers):
-    intent = 'professional-domain'
 if any(marker in lowered for marker in privacy_markers):
     privacy = 'local-first'
-    route = 'local'
+    if route == 'text':
+        route = 'local'
 
 print(json.dumps({
     'intent': intent,
@@ -13554,12 +7382,12 @@ free_gpu = ((profile.get('budget') or {}).get('usableGpuMb') or 0)
 free_mem = ((profile.get('budget') or {}).get('usableMemoryMb') or 0)
 
 route_name = route.get('route') or 'text'
-model = routing_cfg.get('defaultTextModel', 'ollama/qwen2.5:14b')
+model = routing_cfg.get('defaultTextModel', 'ollama/qwen2.5:7b')
 execution = 'cloud'
 reason = 'default-text'
 
 if route_name == 'vision':
-    model = routing_cfg.get('defaultVisionModel', 'ollama/llama3.2-vision:11b')
+    model = routing_cfg.get('defaultVisionModel', 'google/gemini-2.5-pro')
     execution = 'cloud'
     reason = 'vision-routing'
 elif route_name == 'search':
@@ -13567,11 +7395,11 @@ elif route_name == 'search':
     execution = 'cloud'
     reason = 'search-routing'
 elif route_name == 'code':
-    model = routing_cfg.get('defaultCodeModel', 'ollama/deepseek-coder-v2:16b')
+    model = routing_cfg.get('defaultCodeModel', 'ollama/qwen3-coder')
     execution = 'local'
     reason = 'code-routing'
 elif route_name == 'local':
-    model = routing_cfg.get('defaultCodeModel', 'ollama/deepseek-coder-v2:16b')
+    model = routing_cfg.get('defaultCodeModel', 'ollama/qwen3-coder')
     execution = 'local'
     reason = 'privacy-routing'
 
@@ -13581,13 +7409,13 @@ if not bool(network.get('online')):
         route['route'] = 'local'
     if execution == 'cloud':
         execution = 'local'
-        model = routing_cfg.get('defaultCodeModel', 'ollama/qwen2.5-coder:1.5b')
+        model = routing_cfg.get('defaultCodeModel', 'ollama/qwen3-coder')
         reason = 'offline-forced-local'
 
-if free_gpu < int(budget_cfg.get('minFreeGpuMbForLocalExpert', 7200)) or free_mem < int(budget_cfg.get('minFreeMemoryMbForLocalExpert', 6144)):
+if free_gpu < int(budget_cfg.get('minFreeGpuMbForLocalExpert', 4096)) and free_mem < int(budget_cfg.get('minFreeMemoryMbForLocalExpert', 6144)):
     if execution == 'local':
         execution = 'cloud'
-        model = routing_cfg.get('defaultTextModel', 'ollama/qwen2.5:14b')
+        model = routing_cfg.get('defaultTextModel', 'ollama/qwen2.5:7b')
         reason = 'budget-downgrade-memory'
 
 if isinstance(resource, dict) and not bool(resource.get('enough', True)):
@@ -13600,7 +7428,7 @@ if isinstance(resource, dict) and not bool(resource.get('enough', True)):
         route_name = 'local'
         route['route'] = 'local'
         execution = 'local'
-        model = routing_cfg.get('defaultCodeModel', 'ollama/qwen2.5-coder:1.5b')
+        model = routing_cfg.get('defaultCodeModel', 'ollama/qwen3-coder')
         reason = 'resource-guard-local-fallback'
     else:
         route_name = 'text'
@@ -13611,7 +7439,7 @@ if isinstance(resource, dict) and not bool(resource.get('enough', True)):
 
 if not bool(network.get('online')) and execution == 'cloud':
     execution = 'local'
-    model = routing_cfg.get('defaultCodeModel', 'ollama/qwen2.5-coder:1.5b')
+    model = routing_cfg.get('defaultCodeModel', 'ollama/qwen3-coder')
     reason = 'offline-cloud-disabled'
 
 if isinstance(battery, int) and battery > 0 and battery <= int(budget_cfg.get('lowBatteryPercent', 25)):
@@ -13633,13 +7461,11 @@ PY
 # 0: 文本/闲聊 -> 云端小模型 (Flash/Saver)
 # 1: 图像/复杂推理 -> 云端强模型 (Pro/Vision)
 # 2: 简单逻辑/隐私 -> 本地量化模型 (仅高/中配，低配强制跳过)
-# ▼▼▼ 已废弃: 旧版关键词路由管道，已被多Agent编排器架构替代 ▼▼▼
-# 保留仅作参考，未在任何流程中调用
 openclaw_memory_smart_route() {
     local input_text="$1" route_json cached lock_result selected_model memory_injection memory_for_execution predictive_hint expert_state tool_state tool_result cloud_pool cloud_state resource_cleanup_json special_cache_profile special_cache_scope special_cache_result skip_tool_exec skip_cloud_exec
     openclaw_ai_stack_prepare
     openclaw_ai_stack_detect_acceleration_state >/dev/null 2>&1 || true
-    openclaw_ai_stack_idle_unload_expert_if_needed 300 >/dev/null 2>&1 || true
+    openclaw_ai_stack_idle_unload_expert_if_needed 900 >/dev/null 2>&1 || true
     predictive_hint=$(openclaw_ai_stack_predictive_cache_hint "$input_text" 2>/dev/null || true)
     cached=$(openclaw_ai_stack_route_cache_read "$input_text" 2>/dev/null || true)
     if [ -n "$cached" ] && [ "$cached" != "null" ]; then
@@ -15222,7 +9048,6 @@ PY
           ;;
       esac
 
-      lower=$(echo "$model_id" | tr '[:upper:]' '[:lower:]')
       models_array+=$(cat <<EOF
 {
   "id": "$model_id",
@@ -15457,11 +9282,6 @@ EOF
       echo "🔄 设置默认模型并重启网关..."
       openclaw models set "$provider_name/$default_model"
       openclaw_sync_sessions_model "$provider_name/$default_model"
-      # 自动修复旧版 config 格式迁移 (memorySearch→agents.defaults 等)
-      if openclaw_has_command openclaw; then
-        echo "🔧 自动修复配置格式兼容性..."
-        timeout 15 openclaw doctor --fix 2>/dev/null || true
-      fi
       start_gateway
       echo "$finish_msg"
       echo "✅ 当前 API 协议类型: $DETECTED_API"
@@ -16931,20 +10751,16 @@ PY
       fi
 
       if command -v python3 >/dev/null 2>&1; then
-        # JSON5 safe: pre-process via temp file
-        local tmp_py_json=$(mktemp /tmp/openclaw_plugin_XXXXXX.json)
-        if openclaw_json5_to_json "$config_file" "$tmp_py_json" 2>/dev/null; then
-          if python3 - "$config_file" "$tmp_py_json" "$plugin_id" <<'PYTHON_EOF'
+        if python3 - "$config_file" "$plugin_id" <<'PYTHON_EOF'
 import json
 import sys
 from pathlib import Path
 
-out_path = Path(sys.argv[1])
-tmp_path = Path(sys.argv[2])
-plugin_id = sys.argv[3]
+config_file = Path(sys.argv[1])
+plugin_id = sys.argv[2]
 
 try:
-    data = json.loads(tmp_path.read_text(encoding='utf-8')) if tmp_path.exists() else {}
+    data = json.loads(config_file.read_text(encoding='utf-8')) if config_file.exists() else {}
     if not isinstance(data, dict):
         data = {}
 except Exception:
@@ -16963,14 +10779,11 @@ if plugin_id not in a:
 
 plugins['allow'] = a
 data['plugins'] = plugins
-out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding='utf-8')
+config_file.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding='utf-8')
 PYTHON_EOF
-          then
-            rm -f "$tmp_py_json"
-            echo "✅ 已同步 plugins.allow 白名单: $plugin_id"
-            return 0
-          fi
-          rm -f "$tmp_py_json"
+        then
+          echo "✅ 已同步 plugins.allow 白名单: $plugin_id"
+          return 0
         fi
       fi
 
@@ -17005,20 +10818,16 @@ PYTHON_EOF
       fi
 
       if command -v python3 >/dev/null 2>&1; then
-        # JSON5 safe: pre-process via temp file
-        local tmp_py_json2=$(mktemp /tmp/openclaw_plugin2_XXXXXX.json)
-        if openclaw_json5_to_json "$config_file" "$tmp_py_json2" 2>/dev/null; then
-          if python3 - "$config_file" "$tmp_py_json2" "$plugin_id" <<'PYTHON_EOF'
+        if python3 - "$config_file" "$plugin_id" <<'PYTHON_EOF'
 import json
 import sys
 from pathlib import Path
 
-out_path = Path(sys.argv[1])
-tmp_path = Path(sys.argv[2])
-plugin_id = sys.argv[3]
+config_file = Path(sys.argv[1])
+plugin_id = sys.argv[2]
 
 try:
-    data = json.loads(tmp_path.read_text(encoding='utf-8')) if tmp_path.exists() else {}
+    data = json.loads(config_file.read_text(encoding='utf-8')) if config_file.exists() else {}
     if not isinstance(data, dict):
         data = {}
 except Exception:
@@ -17035,14 +10844,11 @@ if not isinstance(a, list):
 a = [x for x in a if x != plugin_id]
 plugins['allow'] = a
 data['plugins'] = plugins
-out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding='utf-8')
+config_file.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding='utf-8')
 PYTHON_EOF
-          then
-            rm -f "$tmp_py_json2"
-            echo "✅ 已从 plugins.allow 移除: $plugin_id"
-            return 0
-          fi
-          rm -f "$tmp_py_json2"
+        then
+          echo "✅ 已从 plugins.allow 移除: $plugin_id"
+          return 0
         fi
       fi
 
@@ -18318,7 +12124,7 @@ PY
       skpl_ui_section "操作"
       skpl_ui_menu_item 1 "Telegram 对接" "自动写入代理并手动批准连接码"
       skpl_ui_menu_item 2 "飞书对接" "安装 Lark 集成"
-      skpl_ui_menu_item 3 "WhatsApp 对接" "进入 WhatsApp 设置、修复与登录流程"
+      skpl_ui_menu_item 3 "WhatsApp 对接" "自动写入代理并执行官方登录"
       skpl_ui_menu_item 4 "Discord 对接" "自动写入代理并启用渠道"
       skpl_ui_menu_item 5 "Slack 对接" "自动写入代理并启用渠道"
       skpl_ui_menu_item 6 "QQ 官方入口" "显示官方接入地址"
@@ -19212,13 +13018,8 @@ PY
   openclaw_memory_config_get() {
     local key="$1"
     local default_value="${2:-}"
-    # OpenClaw 2026.6+: memorySearch under agents.defaults
-    local mapped_key="$key"
-    case "$mapped_key" in
-      memorySearch.*) mapped_key="agents.defaults.${mapped_key}" ;;
-    esac
     local value
-    value=$(timeout 5 openclaw config get "$mapped_key" 2>/dev/null | head -n 1 | sed -e 's/^"//' -e 's/"$//')
+    value=$(timeout 5 openclaw config get "$key" 2>/dev/null | head -n 1 | sed -e 's/^"//' -e 's/"$//')
     if [ -z "$value" ] || [ "$value" = "null" ] || [ "$value" = "undefined" ]; then
       echo "$default_value"
       return 0
@@ -19230,43 +13031,26 @@ PY
     local key="$1"
     shift
     local value="$1"
-    # OpenClaw 2026.6+: memorySearch under agents.defaults, tools at root level
-    local mapped_key="$key"
-    local config_file tmp_json
-    case "$mapped_key" in
-      memorySearch.*) mapped_key="agents.defaults.${mapped_key}" ;;
-    esac
-    if timeout 5 openclaw config set "$mapped_key" "$@" >/dev/null 2>&1; then
+    if timeout 5 openclaw config set "$key" "$@" >/dev/null 2>&1; then
       return 0
     fi
-    # CLI failed → Python fallback with JSON5 pre-processing
-    config_file=$(openclaw_get_config_file)
-    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-    python3 - "$config_file" "$tmp_json" "$key" "$value" <<'PY'
+    python3 - "$(openclaw_get_config_file)" "$key" "$value" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-out_path = Path(sys.argv[1])   # original (write target)
-cfg_path = Path(sys.argv[2]) # JSON5-safe temp (read source)
-key = sys.argv[3]
-value = sys.argv[4]
+path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
 
 cfg = {}
-if cfg_path.exists():
+if path.exists():
     try:
-        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+        cfg = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
 
-# memorySearch goes under agents.defaults, tools stays at root
-if key.startswith('memorySearch.'):
-    cfg.setdefault('agents', {}).setdefault('defaults', {})
-    cur = cfg['agents']['defaults']
-else:
-    cur = cfg
-
+cur = cfg
 parts = key.split('.')
 for part in parts[:-1]:
     node = cur.get(part)
@@ -19283,13 +13067,9 @@ else:
     parsed = value
 
 cur[parts[-1]] = parsed
-# Clean up old root-level memorySearch if present
-if key.startswith('memorySearch.') and 'memorySearch' in cfg:
-    del cfg['memorySearch']
-out_path.parent.mkdir(parents=True, exist_ok=True)
-out_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 PY
-    rm -f "$tmp_json"
   }
 
 openclaw_memory_config_unset() {
@@ -19390,9 +13170,7 @@ openclaw_memory_refresh_status_cache() {
 
 openclaw_memory_cli_supported() {
   command -v openclaw >/dev/null 2>&1 || return 1
-  # 同时检查 help 提及 memory 且 memory 子命令实际可用
-  timeout 8 openclaw --help 2>/dev/null | grep -qE '(^|[[:space:]])memory([[:space:]]|$)' || return 1
-  timeout 8 openclaw memory --help >/dev/null 2>&1
+  timeout 8 openclaw --help 2>/dev/null | grep -qE '(^|[[:space:]])memory([[:space:]]|$)'
 }
 
 openclaw_memory_refresh_runtime_state() {
@@ -19468,7 +13246,7 @@ openclaw_memory_list_agents() {
         echo "⚠️ [$agent_id] 索引备份失败，继续重建。"
       fi
     fi
-    timeout 120 openclaw memory index --agent "$agent_id" --force 2>/dev/null || true
+    timeout 120 openclaw memory index --agent "$agent_id" --force
   }
 
   openclaw_memory_rebuild_index_safe() {
@@ -19619,8 +13397,6 @@ for entry in data:
     vec = s.get("vector", {})
     if isinstance(vec, dict) and vec.get("enabled"):
         vec_str = "就绪" if vec.get("available") else "已启用(不可用)"
-        if not vec.get("available") and files == 0 and chunks == 0:
-            vec_str += "（首次安装正常，写入记忆文件后自动激活）"
     else:
         vec_str = "未启用"
     print("  向量库: %s" % vec_str)
@@ -19796,19 +13572,11 @@ openclaw_memory_download_file() {
   local dest="$2"
   mkdir -p "$(dirname "$dest")"
   if command -v curl >/dev/null 2>&1; then
-      local curl_proxy_opts=""
-      [ -n "${HTTPS_PROXY:-${https_proxy:-}}" ] && curl_proxy_opts="--proxy ${HTTPS_PROXY:-${https_proxy:-}}"
-      [ -z "$curl_proxy_opts" ] && [ -n "${HTTP_PROXY:-${http_proxy:-}}" ] && curl_proxy_opts="--proxy ${HTTP_PROXY:-${http_proxy:-}}"
-      [ -z "$curl_proxy_opts" ] && [ -n "${ALL_PROXY:-${all_proxy:-}}" ] && curl_proxy_opts="--proxy ${ALL_PROXY:-${all_proxy:-}}"
-      curl -L --fail --retry 2 --connect-timeout 15 --max-time 1800 $curl_proxy_opts -o "$dest" "$url"
+      curl -L --fail --retry 2 --connect-timeout 10 --max-time 1800 -o "$dest" "$url"
       return $?
   fi
   if command -v wget >/dev/null 2>&1; then
-      local wget_proxy_opts=""
-      [ -n "${HTTPS_PROXY:-${https_proxy:-}}" ] && wget_proxy_opts="-e use_proxy=yes -e https_proxy=${HTTPS_PROXY:-${https_proxy:-}}"
-      [ -z "$wget_proxy_opts" ] && [ -n "${HTTP_PROXY:-${http_proxy:-}}" ] && wget_proxy_opts="-e use_proxy=yes -e http_proxy=${HTTP_PROXY:-${http_proxy:-}}"
-      [ -z "$wget_proxy_opts" ] && [ -n "${ALL_PROXY:-${all_proxy:-}}" ] && wget_proxy_opts="-e use_proxy=yes -e https_proxy=${ALL_PROXY:-${all_proxy:-}}"
-      wget --timeout=15 $wget_proxy_opts -O "$dest" "$url"
+      wget --timeout=10 -O "$dest" "$url"
       return $?
   fi
     echo "❌ 未检测到 curl 或 wget，无法下载。"
@@ -19995,7 +13763,7 @@ openclaw_memory_download_file() {
       preh_agent_lines=$(openclaw_memory_list_agents)
       while IFS=$'\t' read -r preh_agent_id preh_workspace; do
         [ -z "$preh_agent_id" ] && continue
-        timeout 120 openclaw memory index --agent "$preh_agent_id" --force 2>/dev/null || true
+        timeout 120 openclaw memory index --agent "$preh_agent_id" --force
       done <<EOF
 $preh_agent_lines
 EOF
@@ -20007,8 +13775,6 @@ EOF
 
 openclaw_memory_auto_setup_local() {
     echo "🔍 检测 Local 环境"
-    # 记忆检索依赖本地 Ollama 做 embedding，即使主模型是云端也必须安装
-    openclaw_install_ollama_runtime || return 1
     openclaw_memory_cleanup_legacy_keys
     openclaw_safe_enable_global_tools
     openclaw_memory_prepare_workspace_all
@@ -20021,17 +13787,19 @@ openclaw_memory_auto_setup_local() {
       echo "✅ 已设置 memory.backend=builtin"
     fi
     echo "   正在检查记忆搜索配置..."
-    openclaw_memory_config_set "memorySearch.provider" "ollama"
-    echo "✅ 已设置 memorySearch.provider=ollama"
+    if openclaw_memorysearch_config_supported; then
+      openclaw_memory_config_set "memorySearch.provider" "ollama"
+      echo "✅ 已设置 memorySearch.provider=ollama"
+    fi
     echo "   正在读取记忆模型配置..."
     local memory_ollama_model
-    memory_ollama_model=$(openclaw_memory_config_get "memorySearch.model")
+    memory_ollama_model=$(openclaw_memory_config_get "memorySearch.ollama.model")
     if [ -z "$memory_ollama_model" ]; then
       memory_ollama_model="qwen2.5:7b"
-      openclaw_memory_config_set "memorySearch.model" "$memory_ollama_model"
-      echo "✅ 已设置 memorySearch.model=$memory_ollama_model"
+      openclaw_memory_config_set "memorySearch.ollama.model" "$memory_ollama_model"
+      echo "✅ 已设置 memorySearch.ollama.model=$memory_ollama_model"
     else
-      echo "✅ memorySearch.model 已存在: $memory_ollama_model"
+      echo "✅ memorySearch.ollama.model 已存在: $memory_ollama_model"
     fi
 
     local model_path model_status
@@ -20071,7 +13839,7 @@ openclaw_memory_auto_setup_local() {
       while IFS=$'\t' read -r preh_agent_id preh_workspace; do
         [ -z "$preh_agent_id" ] && continue
         echo "🧱 正在预热索引: $preh_agent_id (最多10分钟)..."
-        timeout 600 openclaw memory index --agent "$preh_agent_id" --force 2>/dev/null || {
+        timeout 600 openclaw memory index --agent "$preh_agent_id" --force || {
           echo "⚠️ 索引预热超时或失败: $preh_agent_id"
           return 1
         }
@@ -20407,7 +14175,7 @@ PY
 
 openclaw_set_model_slot() {
     local type="$1" config_file="$2"
-    local model_name normalized_model provider_model tmp_json
+    local model_name normalized_model provider_model
     read -e -p "请输入 [$type] 模型 ID (格式: 提供商/模型名): " model_name
     [ -z "$model_name" ] && return 0
 
@@ -20438,21 +14206,17 @@ PY
       }
     fi
 
-    # JSON5 safe: pre-process config to temp JSON
-    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-    python3 - "$config_file" "$tmp_json" "$type" "$normalized_model" <<'PY'
+    python3 - "$config_file" "$type" "$normalized_model" <<'PY'
 import json, sys
 from pathlib import Path
 
-out_path = Path(sys.argv[1])   # original (write target)
-cfg_path = Path(sys.argv[2]) # JSON5-safe temp (read source)
-cfg_type = sys.argv[3]
-model = sys.argv[4]
+path = Path(sys.argv[1])
+cfg_type = sys.argv[2]
+model = sys.argv[3]
 cfg = {}
-if cfg_path.exists() and cfg_path.stat().st_size > 0:
+if path.exists() and path.stat().st_size > 0:
     try:
-        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+        cfg = json.loads(path.read_text(encoding='utf-8'))
         if not isinstance(cfg, dict):
             cfg = {}
     except Exception:
@@ -20483,40 +14247,23 @@ elif cfg_type == 'image':
 elif cfg_type == 'custom':
     cfg['agents']['defaults']['models'][model].setdefault('alias', 'custom')
 
-out_path.parent.mkdir(parents=True, exist_ok=True)
-out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 print(f"✅ 已将 {cfg_type} 模型设为: {model}")
 PY
-    rm -f "$tmp_json"
     read -n 1 -s -r -p "按任意键继续..."
 }
 
 openclaw_apply_and_restart() {
     echo "💾 正在保存配置并重启 OpenClaw..."
     openclaw_optimize_memory_and_skills >/dev/null 2>&1 || true
-    # 写入完成后先做配置验证
-    if command -v openclaw >/dev/null 2>&1; then
-      local validate_out
-      validate_out=$(timeout 10 openclaw config validate 2>&1) || {
-        echo "⚠️ 配置验证发现问题，尝试自动修复..."
-        timeout 20 openclaw doctor --fix >/dev/null 2>&1 || true
-        timeout 10 openclaw config validate >/dev/null 2>&1 || echo "⚠️ 自动修复后仍有配置问题，请手动检查"
-      }
-    fi
-    # 先停掉可能处于崩溃循环的网关
-    systemctl --user stop openclaw-gateway.service >/dev/null 2>&1 || true
-    sleep 1
-    systemctl --user reset-failed openclaw-gateway.service >/dev/null 2>&1 || true
     start_gateway force 0 >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1
     echo "✅ 配置已生效！AI 将使用新分配的模型工作。"
 }
 
 openclaw_get_primary_text_model() {
-    local config_file tmp_json
+    local config_file
     config_file=$(openclaw_get_config_file)
-    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-    python3 - "$tmp_json" <<'PY'
+    python3 - "$config_file" <<'PY'
 import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])
@@ -20532,7 +14279,6 @@ if isinstance(value, dict):
     if isinstance(primary, str):
         print(primary)
 PY
-    rm -f "$tmp_json"
 }
 
 openclaw_memorysearch_loop_self_heal() {
@@ -20544,46 +14290,78 @@ openclaw_memorysearch_loop_self_heal() {
     if [ -z "$primary_model" ]; then
       primary_model="ollama/qwen2.5:7b"
     fi
+    memory_model="${primary_model#ollama/}"
+    [ -z "$memory_model" ] && memory_model="qwen2.5:7b"
     if [[ "$primary_model" == ollama/* ]]; then
-      memory_model="${primary_model#ollama/}"
       openclaw_configure_local_ollama_provider "$memory_model" "text" >/dev/null 2>&1 || true
       echo "✅ 已让记忆检索跟随当前主文本模型: $memory_model"
     else
-      # 主模型是云端模型，嵌入必须用本地 Ollama 模型
-      memory_model=$(openclaw_memory_config_get "memorySearch.model" 2>/dev/null || true)
-      # 验证：如果读到的模型名包含 / 或看起来像云端模型，回退到本地
-      if [ -z "$memory_model" ] || [ "$memory_model" = "null" ] || [[ "$memory_model" == */* ]] || [[ "$memory_model" == gemini* ]] || [[ "$memory_model" == gpt* ]] || [[ "$memory_model" == claude* ]]; then
-        memory_model="qwen2.5:7b"
-      fi
-      echo "ℹ️ 当前主文本模型不是本地 Ollama（$primary_model），记忆检索引擎独立使用本地模型: $memory_model"
+      echo "ℹ️ 当前主文本模型不是本地 Ollama，记忆检索继续使用本地模型: $memory_model"
     fi
-    openclaw_memory_config_set "memorySearch.model" "$memory_model"
-    # 使用 tools.profile 切配置，避免 JSON5 文件被 json.loads 损坏
-    openclaw config set tools.profile minimal >/dev/null 2>&1 || true
-    echo "✅ 已执行 tools.profile=minimal 诊断切换"
+    openclaw_memory_config_set "memorySearch.ollama.model" "$memory_model"
+    python3 - "$(openclaw_get_config_file)" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+tools_cfg = cfg.get('tools')
+if not isinstance(tools_cfg, dict):
+    tools_cfg = {}
+    cfg['tools'] = tools_cfg
+global_tools = tools_cfg.get('global')
+if not isinstance(global_tools, dict):
+    global_tools = {}
+    tools_cfg['global'] = global_tools
+global_tools['enabled'] = False
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+PY
+    echo "✅ 已执行 tools.global.enabled=false 诊断切换"
     start_gateway force 0 >/dev/null 2>&1 || openclaw gateway restart >/dev/null 2>&1 || true
-    openclaw config set tools.profile coding >/dev/null 2>&1 || true
-    echo "✅ 已恢复 tools.profile=coding"
+    python3 - "$(openclaw_get_config_file)" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+tools_cfg = cfg.get('tools')
+if not isinstance(tools_cfg, dict):
+    tools_cfg = {}
+    cfg['tools'] = tools_cfg
+global_tools = tools_cfg.get('global')
+if not isinstance(global_tools, dict):
+    global_tools = {}
+    tools_cfg['global'] = global_tools
+global_tools['enabled'] = True
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+PY
+    echo "✅ 已恢复 tools.global.enabled=true"
     openclaw_validate_global_tools_runtime
 }
 
 openclaw_optimize_memory_and_skills() {
-    local config_file tmp_json
+    local config_file
     config_file=$(openclaw_get_config_file)
     mkdir -p "$HOME/.openclaw/workspace" "$HOME/.openclaw/workspace/skills" "$HOME/.openclaw/workspace/memory"
-    # JSON5 safe: pre-process config to temp JSON
-    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-    python3 - "$config_file" "$tmp_json" <<'PY'
+    python3 - "$config_file" <<'PY'
 import json, sys
 from pathlib import Path
 
-out_path = Path(sys.argv[1])   # original config file (write target)
-cfg_path = Path(sys.argv[2])   # JSON5-safe temp copy (read source)
+path = Path(sys.argv[1])
 cfg = {}
-if cfg_path.exists() and cfg_path.stat().st_size > 0:
+if path.exists() and path.stat().st_size > 0:
     try:
-        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+        cfg = json.loads(path.read_text(encoding='utf-8'))
         if not isinstance(cfg, dict):
             cfg = {}
     except Exception:
@@ -20597,12 +14375,6 @@ for legacy_key in ('host', 'hostname', 'url', 'baseUrl'):
     gateway.pop(legacy_key, None)
 gateway.setdefault('auth', {})['mode'] = 'token'
 gateway.pop('controlUi', None)
-
-# OpenClaw 2026.6+: tools.profile 替代了不存在的 tools.global.enabled
-tools_cfg = cfg.setdefault('tools', {})
-# 清理旧版无效的 tools.global 字段
-tools_cfg.pop('global', None)
-tools_cfg.setdefault('profile', 'coding')
 
 memory = cfg.setdefault('memory', {})
 qmd = memory.setdefault('qmd', {})
@@ -20620,10 +14392,9 @@ if not isinstance(models_obj, dict):
     defaults['models'] = models_obj
 defaults.pop('skills', None)
 
-out_path.parent.mkdir(parents=True, exist_ok=True)
-out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
-    rm -f "$tmp_json"
 }
 
 openclaw_inject_skills() {
@@ -20634,7 +14405,7 @@ openclaw_inject_skills() {
 - Use `agents.defaults.model.primary` for daily text turns.
 - Prefer `ollama/qwen2.5:7b` for daily text turns.
 - Use `agents.defaults.imageModel.primary` for image understanding.
-- Use `ollama/qwen2.5-coder:1.5b` for code-heavy tasks.
+- Use `ollama/qwen3-coder` for code-heavy tasks.
 - Prefer concise responses to reduce token usage.
 - Respect hardware budget before escalating to larger experts.
 - Keep memory injection under the configured context percentage limit.
@@ -20675,28 +14446,24 @@ openclaw_evomap_real_ingest() {
 }
 
 openclaw_configure_local_ollama_provider() {
-    local config_file provider_model full_model model_role tmp_json
+    local config_file provider_model full_model model_role
     config_file=$(openclaw_get_config_file)
     provider_model="${1:-qwen2.5:7b}"
     model_role="${2:-text}"
     full_model="ollama/${provider_model}"
-    # JSON5 safe: pre-process config to temp JSON
-    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-    python3 - "$config_file" "$tmp_json" "$provider_model" "$full_model" "$model_role" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" "$SKPL_AI_STACK_ACCEL_STATE_FILE" <<'PY'
+    python3 - "$config_file" "$provider_model" "$full_model" "$model_role" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" "$SKPL_AI_STACK_ACCEL_STATE_FILE" <<'PY'
 import json, sys
 from pathlib import Path
-out_path = Path(sys.argv[1])   # original config file (write target)
-cfg_path = Path(sys.argv[2])   # JSON5-safe temp copy (read source)
-raw_model = sys.argv[3]
-full_model = sys.argv[4]
-role = sys.argv[5]
-ollama_bin = sys.argv[6]
-accel_state_path = Path(sys.argv[7])
+path = Path(sys.argv[1])
+raw_model = sys.argv[2]
+full_model = sys.argv[3]
+role = sys.argv[4]
+ollama_bin = sys.argv[5]
+accel_state_path = Path(sys.argv[6])
 cfg = {}
-if cfg_path.exists():
+if path.exists():
     try:
-        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+        cfg = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
 
@@ -20764,6 +14531,12 @@ def build_entry(model_id: str, role_name: str):
             params['main_gpu'] = 0
             if is_image:
                 params['num_batch'] = max(int(params.get('num_batch', 0) or 0), 64)
+    if any(token in lower for token in ('qwen2.5', 'qwen2-5', 'qwen2_5')):
+        entry['compat'] = {
+            'requiresStringContent': True,
+            'supportsTools': True,
+            'toolCallFormat': 'openai',
+        }
     entry['params'] = params
     return entry
 
@@ -20803,16 +14576,24 @@ cfg.setdefault('agents', {}).setdefault('defaults', {})
 defs = cfg['agents']['defaults']
 defs.setdefault('models', {})
 defs['models'].setdefault(full_model, {})
-# memorySearch 必须在 agents.defaults 内
-memory_search = defs.get('memorySearch')
+tools_cfg = cfg.get('tools')
+if not isinstance(tools_cfg, dict):
+    tools_cfg = {}
+    cfg['tools'] = tools_cfg
+global_tools = tools_cfg.get('global')
+if not isinstance(global_tools, dict):
+    global_tools = {}
+    tools_cfg['global'] = global_tools
+global_tools.setdefault('enabled', True)
+memory_search = cfg.get('memorySearch')
 if not isinstance(memory_search, dict):
     memory_search = {}
-    defs['memorySearch'] = memory_search
+    cfg['memorySearch'] = memory_search
+ollama_memory = memory_search.get('ollama')
+if not isinstance(ollama_memory, dict):
+    ollama_memory = {}
+    memory_search['ollama'] = ollama_memory
 memory_search['provider'] = 'ollama'
-memory_search['model'] = raw_model if '/' not in raw_model else raw_model.split('/', 1)[1]
-# 迁移旧版 root-level memorySearch
-if 'memorySearch' in cfg and cfg['memorySearch'] is not memory_search:
-    del cfg['memorySearch']
 if role == 'image':
     image_model_cfg = defs.get('imageModel')
     if not isinstance(image_model_cfg, dict):
@@ -20829,59 +14610,81 @@ else:
         model_cfg = {}
         defs['model'] = model_cfg
     model_cfg['primary'] = full_model
-out_path.parent.mkdir(parents=True, exist_ok=True)
-out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+    ollama_memory['model'] = raw_model
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
-    rm -f "$tmp_json"
     echo "✅ 已写入本地 Ollama provider 配置"
 }
 
 openclaw_memorysearch_config_supported() {
-    # 快速检查，不再调用 openclaw doctor 避免卡住
+    if ! openclaw_has_command openclaw; then
+      return 0
+    fi
+    timeout 5 openclaw doctor >/tmp/openclaw-doctor-memorysearch.log 2>&1 || true
+    if grep -q 'memorySearch' /tmp/openclaw-doctor-memorysearch.log 2>/dev/null; then
+      return 0
+    fi
     return 0
 }
 
 openclaw_safe_enable_global_tools() {
-    # OpenClaw 2026.6+ 无 tools.global 字段，不用 python 注入；用 CLI profile 更安全
-    if command -v openclaw >/dev/null 2>&1; then
-      openclaw config set tools.profile coding >/dev/null 2>&1 || true
-    fi
-    echo "✅ 已设置 tools.profile=coding"
+    local config_file
+    config_file=$(openclaw_get_config_file)
+    python3 - "$config_file" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+cfg = {}
+if path.exists():
+    try:
+        cfg = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        cfg = {}
+tools_cfg = cfg.get('tools')
+if not isinstance(tools_cfg, dict):
+    tools_cfg = {}
+    cfg['tools'] = tools_cfg
+global_tools = tools_cfg.get('global')
+if not isinstance(global_tools, dict):
+    global_tools = {}
+    tools_cfg['global'] = global_tools
+global_tools['enabled'] = True
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+PY
+    echo "✅ 已设置 tools.global.enabled=true"
 }
 
 openclaw_validate_global_tools_runtime() {
     if ! openclaw_has_command openclaw; then
-      echo "ℹ️ openclaw 命令未安装，已跳过 tools 验活"
+      echo "ℹ️ openclaw 命令未安装，已跳过 tools.global.enabled 验活"
       return 0
     fi
     if timeout 10 openclaw models status >/dev/null 2>&1; then
-      echo "✅ tools 验活通过"
+      echo "✅ tools.global.enabled 验活通过"
       return 0
     fi
-    echo "⚠️ tools 验活未通过，请检查 openclaw gateway 是否正常运行"
+    echo "⚠️ tools.global.enabled 已写入，运行时验活未通过"
     return 0
 }
 
 openclaw_apply_recommended_model_profile() {
     local text_model="${OPENCLAW_TEXT_MODEL_RESOLVED:-ollama/qwen2.5:7b}"
     local image_model="${OPENCLAW_IMAGE_MODEL_RESOLVED:-ollama/gemma3:4b}"
-    local code_model="${OPENCLAW_CODE_MODEL_RESOLVED:-ollama/qwen2.5-coder:1.5b}"
-    local config_file tmp_json
+    local code_model="${OPENCLAW_CODE_MODEL_RESOLVED:-ollama/qwen3-coder}"
+    local config_file
     config_file=$(openclaw_get_config_file)
-    # JSON5 safe: pre-process config to temp JSON
-    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-    python3 - "$config_file" "$tmp_json" "$text_model" "$image_model" "$code_model" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" "${OPENCLAW_FORCE_LOCAL_PROFILE:-0}" <<'PY'
+    python3 - "$config_file" "$text_model" "$image_model" "$code_model" "$(openclaw_resolve_ollama_bin 2>/dev/null || printf '%s' /usr/bin/ollama)" "${OPENCLAW_FORCE_LOCAL_PROFILE:-0}" <<'PY'
 import json, sys
 from pathlib import Path
-out_path = Path(sys.argv[1])   # original config file (write target)
-cfg_path = Path(sys.argv[2])   # JSON5-safe temp copy (read source)
-text_model, image_model, code_model, ollama_bin, force_flag = sys.argv[3:8]
+path = Path(sys.argv[1])
+text_model, image_model, code_model, ollama_bin, force_flag = sys.argv[2:7]
 force_local_profile = force_flag == '1'
 cfg = {}
-if cfg_path.exists():
+if path.exists():
     try:
-        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+        cfg = json.loads(path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
 cfg.setdefault('models', {}).setdefault('providers', {})
@@ -20898,6 +14701,20 @@ def ensure_model_entry(provider_models, entry):
             provider_models[index] = merged
             return
     provider_models.append(entry)
+
+def with_qwen_compat(entry):
+    model_id = str(entry.get('id', '')).lower()
+    if any(token in model_id for token in ('qwen2.5', 'qwen2-5', 'qwen2_5')):
+        compat = entry.get('compat')
+        if not isinstance(compat, dict):
+            compat = {}
+        compat.update({
+            'requiresStringContent': True,
+            'supportsTools': True,
+            'toolCallFormat': 'openai',
+        })
+        entry['compat'] = compat
+    return entry
 
 provider = cfg['models']['providers'].setdefault('ollama', {})
 provider['baseUrl'] = provider.get('baseUrl') or 'http://127.0.0.1:11434'
@@ -20917,733 +14734,48 @@ provider_models = provider.setdefault('models', [])
 if not isinstance(provider_models, list):
     provider_models = []
     provider['models'] = provider_models
-ensure_model_entry(provider_models, {'id': 'qwen2.5:7b', 'name': 'qwen2.5:7b', 'input': ['text'], 'params': {'keep_alive': '15m', 'num_ctx': 8192}})
-ensure_model_entry(provider_models, {'id': 'gemma3:4b', 'name': 'gemma3:4b', 'input': ['text', 'image'], 'params': {'keep_alive': '15m', 'num_ctx': 4096, 'thinking': False}})
-ensure_model_entry(provider_models, {'id': 'qwen2.5-coder:1.5b', 'name': 'qwen2.5-coder:1.5b', 'input': ['text'], 'reasoning': True, 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}})
+ensure_model_entry(provider_models, with_qwen_compat({'id': 'qwen2.5:7b', 'name': 'qwen2.5:7b', 'input': ['text'], 'params': {'keep_alive': '15m', 'num_ctx': 8192}}))
+ensure_model_entry(provider_models, with_qwen_compat({'id': 'gemma3:4b', 'name': 'gemma3:4b', 'input': ['text', 'image'], 'params': {'keep_alive': '15m', 'num_ctx': 4096, 'thinking': False}}))
+ensure_model_entry(provider_models, with_qwen_compat({'id': 'qwen3-coder', 'name': 'qwen3-coder', 'input': ['text'], 'reasoning': True, 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}}))
 
 cfg.setdefault('agents', {}).setdefault('defaults', {})
 defs = cfg['agents']['defaults']
 defs.setdefault('models', {})
 for model in (text_model, image_model, code_model):
     defs['models'].setdefault(model, {})
-# 无论当前主模型是什么，都应用推荐本地模型组合
-defs.setdefault('model', {})['primary'] = text_model
-defs['imageModel'] = {'primary': image_model}
+tools_cfg = cfg.get('tools')
+if not isinstance(tools_cfg, dict):
+    tools_cfg = {}
+    cfg['tools'] = tools_cfg
+global_tools = tools_cfg.get('global')
+if not isinstance(global_tools, dict):
+    global_tools = {}
+    tools_cfg['global'] = global_tools
+global_tools.setdefault('enabled', True)
+if force_local_profile or not isinstance(defs.get('model'), dict) or not defs['model'].get('primary'):
+    defs.setdefault('model', {})['primary'] = text_model
+if force_local_profile or not isinstance(defs.get('imageModel'), dict) or not defs['imageModel'].get('primary'):
+    defs['imageModel'] = {'primary': image_model}
 defs['models'][code_model].setdefault('agentRuntime', {'id': 'auto'})
 
-# memorySearch 在 agents.defaults 下
-memory_search = defs.get('memorySearch')
+memory_search = cfg.get('memorySearch')
 if not isinstance(memory_search, dict):
     memory_search = {}
-    defs['memorySearch'] = memory_search
+    cfg['memorySearch'] = memory_search
+ollama_memory = memory_search.get('ollama')
+if not isinstance(ollama_memory, dict):
+    ollama_memory = {}
+    memory_search['ollama'] = ollama_memory
 memory_search['provider'] = 'ollama'
-memory_search['model'] = text_model.split('/', 1)[1] if '/' in text_model else text_model
-if 'memorySearch' in cfg and cfg['memorySearch'] is not memory_search:
-    del cfg['memorySearch']
+ollama_memory['model'] = text_model.split('/', 1)[1] if '/' in text_model else text_model
 
-out_path.parent.mkdir(parents=True, exist_ok=True)
-out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
 PY
-    rm -f "$tmp_json"
     echo "✅ 推荐模型组合已写入"
     echo "   文本: $text_model"
     echo "   视觉: $image_model"
     echo "   代码: $code_model"
-}
-
-# ═══════════════════════════════════════════════════════════════════════
-# 多Agent多模型架构 — 基于 OpenClaw 原生多 Agent + 子Agent 编排
-# 取代旧的运行时智能路由管道（后者与 OpenClaw 架构不兼容）
-# ═══════════════════════════════════════════════════════════════════════
-
-# ── 硬件分级 → Agent 能力矩阵映射表 ──
-openclaw_multi_agent_capability_matrix() {
-  local tier="$1" cloud_model="${2:-}"
-  # cloud_model: 如 "google/gemini-2.5-flash"，空字符串表示无云端模型
-  python3 - "$tier" "$cloud_model" <<'PY'
-import json, sys
-tier = sys.argv[1]
-cloud = sys.argv[2].strip() if len(sys.argv) > 2 else ''
-
-# entry-cpu: 仅有CPU，显存0，只能用极小本地模型
-# advanced-cpu: CPU较好但无GPU
-# advanced-gpu: 有4-8GB显存GPU
-# golden-gpu: 有8GB+显存GPU
-# 如果 cloud 非空，在所有tier追加云端Agent作为"极致"难度兜底
-
-matrix = {}
-
-if tier in ('entry-cpu', 'emergency-cpu'):
-    agents = [
-        {"id": "general-basic", "model": "ollama/qwen3:0.6b", "label": "通用-基础",
-         "capabilities": ["通用问答","简单总结","翻译"], "difficulty": "简单",
-         "maxTokens": 1024, "historyRounds": 3},
-        {"id": "code-basic", "model": "ollama/qwen2.5-coder:1.5b", "label": "代码-基础",
-         "capabilities": ["简单代码","脚本","调试"], "difficulty": "简单",
-         "maxTokens": 2048, "historyRounds": 3},
-    ]
-    matrix = {"orchestrator": {"model": "ollama/qwen3:0.6b", "label": "编排器"},
-              "agents": agents,
-              "memorySearch": {"provider": "ollama", "model": "qwen2.5:7b"},
-              "toolsProfile": "coding"}
-elif tier == 'advanced-cpu':
-    agents = [
-        {"id": "general-basic", "model": "ollama/qwen3:0.6b", "label": "通用-基础",
-         "capabilities": ["通用问答","简单总结","翻译"], "difficulty": "简单",
-         "maxTokens": 1024, "historyRounds": 3},
-        {"id": "general-advanced", "model": "ollama/qwen2.5:7b", "label": "通用-进阶",
-         "capabilities": ["通用问答","总结","翻译","文案"], "difficulty": "中等",
-         "maxTokens": 2048, "historyRounds": 4},
-        {"id": "code-basic", "model": "ollama/qwen2.5-coder:1.5b", "label": "代码-基础",
-         "capabilities": ["简单代码","脚本","调试"], "difficulty": "简单",
-         "maxTokens": 2048, "historyRounds": 3},
-        {"id": "code-advanced", "model": "ollama/qwen2.5-coder:7b", "label": "代码-进阶",
-         "capabilities": ["代码编写","调试","脚本","运维"], "difficulty": "中等",
-         "maxTokens": 4096, "historyRounds": 4},
-    ]
-    matrix = {"orchestrator": {"model": "ollama/qwen3:1.8b", "label": "编排器"},
-              "agents": agents,
-              "memorySearch": {"provider": "ollama", "model": "qwen2.5:7b"},
-              "toolsProfile": "coding"}
-elif tier in ('advanced-gpu', 'entry-gpu'):
-    agents = [
-        {"id": "general-basic", "model": "ollama/qwen3:0.6b", "label": "通用-基础",
-         "capabilities": ["通用问答","简单总结","翻译"], "difficulty": "简单",
-         "maxTokens": 1024, "historyRounds": 3},
-        {"id": "general-advanced", "model": "ollama/qwen2.5:7b", "label": "通用-进阶",
-         "capabilities": ["通用问答","总结","翻译","文案","方案撰写"], "difficulty": "复杂",
-         "maxTokens": 4096, "historyRounds": 5},
-        {"id": "code-basic", "model": "ollama/qwen2.5-coder:1.5b", "label": "代码-基础",
-         "capabilities": ["简单代码","脚本","调试"], "difficulty": "简单",
-         "maxTokens": 2048, "historyRounds": 3},
-        {"id": "code-advanced", "model": "ollama/qwen2.5-coder:7b", "label": "代码-进阶",
-         "capabilities": ["代码编写","调试","脚本","运维","系统设计"], "difficulty": "复杂",
-         "maxTokens": 8192, "historyRounds": 5},
-        {"id": "multimodal-basic", "model": "ollama/gemma3:4b", "label": "多模态-基础",
-         "capabilities": ["简单识图","OCR","图表识别"], "difficulty": "简单",
-         "maxTokens": 512, "historyRounds": 1},
-    ]
-    matrix = {"orchestrator": {"model": "ollama/qwen3:1.8b", "label": "编排器"},
-              "agents": agents,
-              "memorySearch": {"provider": "ollama", "model": "qwen2.5:7b"},
-              "toolsProfile": "coding"}
-elif tier == 'golden-gpu':
-    agents = [
-        {"id": "general-basic", "model": "ollama/qwen3:0.6b", "label": "通用-基础",
-         "capabilities": ["通用问答","简单总结","翻译"], "difficulty": "简单",
-         "maxTokens": 1024, "historyRounds": 3},
-        {"id": "general-advanced", "model": "ollama/qwen2.5:14b", "label": "通用-高级",
-         "capabilities": ["通用问答","深度总结","翻译","文案","方案撰写","深度推理"], "difficulty": "复杂",
-         "maxTokens": 8192, "historyRounds": 6},
-        {"id": "code-basic", "model": "ollama/qwen2.5-coder:1.5b", "label": "代码-基础",
-         "capabilities": ["简单代码","脚本","调试"], "difficulty": "简单",
-         "maxTokens": 2048, "historyRounds": 3},
-        {"id": "code-advanced", "model": "ollama/qwen2.5-coder:7b", "label": "代码-高级",
-         "capabilities": ["代码编写","调试","脚本","运维","系统设计","架构设计"], "difficulty": "复杂",
-         "maxTokens": 8192, "historyRounds": 6},
-        {"id": "multimodal-advanced", "model": "ollama/gemma3:12b", "label": "多模态-进阶",
-         "capabilities": ["图片识别","内容解读","图表分析","图纸分析"], "difficulty": "复杂",
-         "maxTokens": 2048, "historyRounds": 2},
-    ]
-    matrix = {"orchestrator": {"model": "ollama/qwen3:1.8b", "label": "编排器"},
-              "agents": agents,
-              "memorySearch": {"provider": "ollama", "model": "qwen2.5:7b"},
-              "toolsProfile": "coding"}
-else:
-    agents = [
-        {"id": "general-basic", "model": "ollama/qwen3:0.6b", "label": "通用-基础",
-         "capabilities": ["通用问答","简单总结","翻译"], "difficulty": "简单",
-         "maxTokens": 1024, "historyRounds": 3},
-    ]
-    matrix = {"orchestrator": {"model": "ollama/qwen3:0.6b", "label": "编排器"},
-              "agents": agents,
-              "memorySearch": {"provider": "ollama", "model": "qwen2.5:7b"},
-              "toolsProfile": "coding"}
-
-# ── 云端增强：有云端模型时追加云端Agent，兜底极致难度任务 ──
-if cloud and not cloud.startswith('ollama/'):
-    cloud_label = cloud.split('/', 1)[1] if '/' in cloud else cloud
-    # 通用-云端Agent（极致难度兜底）
-    matrix["agents"].append({
-        "id": "general-cloud", "model": cloud, "label": f"通用-云端({cloud_label})",
-        "capabilities": ["通用问答","深度推理","复杂方案","跨领域分析"], "difficulty": "极难",
-        "maxTokens": 8192, "historyRounds": 6
-    })
-    # 代码-云端Agent（极致难度兜底）
-    matrix["agents"].append({
-        "id": "code-cloud", "model": cloud, "label": f"代码-云端({cloud_label})",
-        "capabilities": ["复杂代码","架构设计","系统优化"], "difficulty": "极难",
-        "maxTokens": 16384, "historyRounds": 6
-    })
-    # 多模态-云端Agent（如果tier够高）
-    if tier in ('golden-gpu', 'advanced-gpu', 'advanced-cpu'):
-        matrix["agents"].append({
-            "id": "multimodal-cloud", "model": cloud, "label": f"多模态-云端({cloud_label})",
-            "capabilities": ["复杂图像分析","图纸解读","场景理解"], "difficulty": "极难",
-            "maxTokens": 4096, "historyRounds": 3
-        })
-
-# ── 角色标注与权限派生 ──
-# 根据 agent id 和 label 自动推导 role / allowSpawn / tools
-for a in matrix["agents"]:
-    aid = a.get("id", "")
-    # 编排器总是 scheduler（可派发子Agent）
-    if aid == "main" or "orchestrator" in aid.lower():
-        a["role"] = "scheduler"
-        a["allowSpawn"] = True
-        a["tools"] = ["read", "write", "shell", "spawn", "web"]
-        a["subagents"] = {"maxSpawnDepth": 2, "maxChildrenPerAgent": 5}
-    elif "cloud" in aid:
-        # 云端Agent：执行角色，但因为是远程API，允许完整工具集
-        a["role"] = "executor"
-        a["allowSpawn"] = False
-        a["tools"] = ["read", "write", "shell"]
-    elif "basic" in aid:
-        # 基础Agent：最小权限，仅文本处理
-        a["role"] = "executor"
-        a["allowSpawn"] = False
-        a["tools"] = ["read"]
-    elif "advanced" in aid or "code" in aid:
-        # 进阶/代码Agent：中等权限，可读写文件
-        a["role"] = "executor"
-        a["allowSpawn"] = False
-        a["tools"] = ["read", "write", "shell"]
-    elif "multimodal" in aid:
-        # 多模态Agent：仅读取，不需要shell
-        a["role"] = "executor"
-        a["allowSpawn"] = False
-        a["tools"] = ["read"]
-    else:
-        a["role"] = "executor"
-        a["allowSpawn"] = False
-        a["tools"] = ["read"]
-
-print(json.dumps(matrix, ensure_ascii=False))
-PY
-}
-
-# ── 编排器 Agent System Prompt 模板 ──
-openclaw_orchestrator_system_prompt() {
-  local agent_list_json="$1"  # JSON数组，{id, label, capabilities, difficulty, model}
-  python3 - "$agent_list_json" <<'PY'
-import json, sys
-agents = json.loads(sys.argv[1])
-
-prompt = """你是全栈分层式AI推理系统的**任务编排调度器**。
-
-## 你的职责
-1. 分析用户消息，判断任务类型和难度
-2. 选择合适的专业Agent处理任务
-3. 通过 sessions_spawn 派发子Agent执行
-4. 收集子Agent结果，统一格式返回用户
-
-## 可用的专业Agent
-"""
-
-for a in agents:
-    caps = "、".join(a.get("capabilities", []))
-    role = a.get("role", "executor")
-    allow_spawn = "可派发" if a.get("allowSpawn") else "不可派发"
-    tools = "、".join(a.get("tools", ["read"]))
-    prompt += f"- **{a['label']}** (`{a['id']}`)：角色={role}，模型={a['model']}，权限=[{tools}]，能力=[{caps}]，适用难度={a.get('difficulty','中等')}，{allow_spawn}子Agent\n"
-
-prompt += """
-## 分类与派发规则
-1. **代码/编程/调试/运维任务** → 选择对应难度的代码Agent
-   - 简单脚本/调试 → 代码-基础
-   - 复杂开发/系统设计 → 代码-进阶/高级
-2. **图片/截图/OCR/识图/图纸** → 选择多模态Agent（如果可用），否则说明不支持
-3. **通用问答/总结/翻译/文案/方案** → 选择对应难度的通用Agent
-   - 简单/日常 → 通用-基础
-   - 中等/文案 → 通用-进阶
-   - 复杂/深度/方案 → 通用-高级
-4. **任务难度判断标准**：
-   - 简单：单步问题、简单翻译、简短总结（≤10字回答）
-   - 中等：多步推理、中等长度文案、技术解释
-   - 复杂：深度分析、方案设计、长文撰写、架构决策
-   - 极难：跨领域综合分析、安全敏感操作（优先使用云端Agent）
-
-## 角色与权限体系
-本系统采用分层权限控制：
-- **调度者(scheduler)**：你是唯一的调度者，负责分类任务并派发子Agent，拥有完整工具集
-- **执行者(executor)**：所有子Agent均为执行角色，**不可继续派发子Agent**，仅持有完成当前任务所需的最小工具集
-- 子Agent 的权限按其角色自动裁剪：基础Agent仅可读取，代码Agent可读写+Shell，多模态Agent仅可读取
-
-## sessions_spawn 调用格式
-```
-sessions_spawn(agentId="<AgentID>", prompt="<精简任务描述>", context="isolated")
-```
-- agentId: 从上述Agent列表中选择
-- prompt: 精简核心任务描述（≤200字），不要包含冗余上下文
-- context: 默认"isolated"（独立会话，节省Token）
-
-## 输出格式
-1. 先输出简短分类：[能力类型: xxx | 难度: xxx | 目标Agent: xxx]
-2. 派发子Agent
-3. 收到结果后统一格式返回用户
-
-## 注意
-- 不认识的领域关键词 → 使用通用-进阶/高级Agent
-- 如果某个Agent不可用，自动降级到下一级
-- 保持回答简洁，不要重复用户输入
-- 不要尝试让执行角色(executor)的子Agent继续派发更多Agent，它们没有这个权限
-"""
-print(prompt)
-PY
-}
-
-# ── 生成多Agent OpenClaw配置并写入 ──
-openclaw_write_multi_agent_config() {
-  local tier="$1" cloud_model="${2:-}" force="${3:-false}"
-  local config_file tmp_json matrix_json agent_json orchestrator_model orchestrator_label
-  config_file=$(openclaw_get_config_file)
-
-  echo "🧠 正在按硬件分级 [$tier] 生成多Agent多模型架构..."
-  [ -n "$cloud_model" ] && echo "   ☁️ 云端增强: $cloud_model"
-
-  matrix_json=$(openclaw_multi_agent_capability_matrix "$tier" "$cloud_model" 2>/dev/null)
-  if [ -z "$matrix_json" ] || [ "$matrix_json" = "null" ]; then
-    echo "⚠️ 能力矩阵生成失败，使用默认 entry-cpu"
-    matrix_json=$(openclaw_multi_agent_capability_matrix "entry-cpu" 2>/dev/null)
-  fi
-
-  orchestrator_model=$(echo "$matrix_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['orchestrator']['model'])")
-  orchestrator_label=$(echo "$matrix_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['orchestrator']['label'])")
-
-  # 提取agent列表为JSON
-  agent_json=$(echo "$matrix_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(d['agents'], ensure_ascii=False))")
-
-  # JSON5 safe
-  tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-  openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-
-  # 写入多Agent配置到 openclaw.json
-  python3 - "$config_file" "$tmp_json" "$matrix_json" "$agent_json" "$orchestrator_model" "$tier" "$force" "$cloud_model" <<'PY'
-import json, sys
-from pathlib import Path
-
-out_path = Path(sys.argv[1])
-cfg_path = Path(sys.argv[2])
-matrix = json.loads(sys.argv[3])
-agent_list = json.loads(sys.argv[4])
-orch_model = sys.argv[5]
-tier = sys.argv[6]
-force = sys.argv[7] == 'true'
-cloud_model = sys.argv[8].strip() if len(sys.argv) > 8 else ''
-
-cfg = {}
-if cfg_path.exists() and cfg_path.stat().st_size > 0:
-    try: cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
-    except: pass
-
-# ── 1. gateway 基础配置 ──
-gw = cfg.setdefault('gateway', {})
-gw.setdefault('mode', 'local')
-gw['bind'] = 'loopback'
-gw.setdefault('port', 18789)
-gw.setdefault('auth', {})['mode'] = 'token'
-gw.pop('controlUi', None)
-
-# ── 2. tools 全局配置 ──
-tools = cfg.setdefault('tools', {})
-tools.pop('global', None)  # 清理旧无效字段
-tools_cfg = matrix.get('toolsProfile', 'coding')
-tools.setdefault('profile', tools_cfg)
-
-# ── 3. models providers (Ollama) ──
-providers = cfg.setdefault('models', {}).setdefault('providers', {})
-ollama_prov = providers.setdefault('ollama', {})
-ollama_prov['baseUrl'] = ollama_prov.get('baseUrl') or 'http://127.0.0.1:11434'
-ollama_prov['apiKey'] = ollama_prov.get('apiKey') or 'ollama-local'
-ollama_prov['api'] = 'ollama'
-ollama_prov.setdefault('timeoutSeconds', 300)
-
-# 收集所有需要的模型
-all_models = set()
-for a in agent_list:
-    all_models.add(a['model'])
-all_models.add(orch_model)
-
-# 写入model entries
-existing_models = ollama_prov.setdefault('models', [])
-existing_ids = {m['id'] if isinstance(m, dict) else m for m in existing_models}
-for m in all_models:
-    if '/' not in m:
-        # ollama local model
-        if m not in existing_ids:
-            existing_models.append({'id': m, 'name': m, 'input': ['text']})
-    else:
-        # cloud model: create entry in its provider
-        provider_name, model_name = m.split('/', 1)
-        if provider_name != 'ollama':
-            # ensure provider exists, don't overwrite existing config
-            cloud_prov = providers.setdefault(provider_name, {})
-            if cloud_prov.get('models') is None:
-                cloud_prov['models'] = []
-            cloud_existing = cloud_prov['models']
-            cloud_existing_ids = {entry['id'] if isinstance(entry, dict) else entry for entry in cloud_existing}
-            if model_name not in cloud_existing_ids:
-                cloud_existing.append({'id': model_name, 'name': model_name, 'input': ['text']})
-            # Keep existing provider config (apiKey, baseUrl etc.)
-        else:
-            # ollama model with provider prefix
-            model_name = m.split('/', 1)[1]
-            if model_name not in existing_ids:
-                existing_models.append({'id': model_name, 'name': model_name, 'input': ['text']})
-
-# ── 4. agents.defaults ──
-agents_cfg = cfg.setdefault('agents', {})
-defaults = agents_cfg.setdefault('defaults', {})
-
-# 编排器 = 主Agent
-defaults.setdefault('model', {})['primary'] = orch_model
-defaults.setdefault('workspace', '~/.openclaw/workspace')
-subagents = defaults.setdefault('subagents', {})
-subagents.setdefault('model', {})['primary'] = orch_model
-# sessions_spawn 运行时约束
-subagents.setdefault('maxSpawnDepth', 2)
-subagents.setdefault('maxChildrenPerAgent', 5)
-subagents.setdefault('maxConcurrent', 8)
-subagents.setdefault('runTimeoutSeconds', 900)
-subagents.setdefault('delegationMode', 'agent-driven')
-
-# memorySearch
-ms = matrix.get('memorySearch', {})
-memory_search = defaults.setdefault('memorySearch', {})
-memory_search['provider'] = ms.get('provider', 'ollama')
-memory_search['model'] = ms.get('model', 'qwen2.5:7b')
-
-# models allowlist
-allowlist = defaults.setdefault('models', {})
-allowlist[orch_model] = {}
-for a in agent_list:
-    allowlist[a['model']] = {}
-
-# imageModel: 使用第一个多模态Agent的模型
-multimodal_agents = [a for a in agent_list if 'multimodal' in a.get('id', '')]
-if multimodal_agents:
-    defaults.setdefault('imageModel', {})['primary'] = multimodal_agents[0]['model']
-
-# ── 5. agents.list (多Agent定义) ──
-agent_configs = agents_cfg.setdefault('list', [])
-
-# 5a. 编排器Agent (main, default)
-orch_entry = None
-for entry in agent_configs:
-    if entry.get('id') == 'main':
-        orch_entry = entry
-        break
-if orch_entry is None:
-    orch_entry = {'id': 'main'}
-    agent_configs.insert(0, orch_entry)
-
-orch_entry['default'] = True
-orch_entry.setdefault('model', {})['primary'] = orch_model
-orch_entry.setdefault('workspace', '~/.openclaw/workspace')
-orch_entry['role'] = 'scheduler'
-orch_entry['allowSpawn'] = True
-orch_entry['tools'] = ['read', 'write', 'shell', 'spawn', 'web']
-
-# 5b. 各专业Agent
-existing_agent_ids = {a['id'] for a in agent_configs if 'id' in a}
-for a in agent_list:
-    aid = a['id']
-    if aid in existing_agent_ids and not force:
-        continue  # 已存在且非强制模式，跳过
-    if aid == 'main':
-        continue
-
-    entry = None
-    for e in agent_configs:
-        if e.get('id') == aid:
-            entry = e
-            break
-    if entry is None:
-        entry = {'id': aid}
-        agent_configs.append(entry)
-
-    entry['model'] = {'primary': a['model']}
-    entry['label'] = a.get('label', aid)
-    entry['workspace'] = f'~/.openclaw/agents/{aid}'
-    # 角色: scheduler(可派发子Agent) / executor(仅执行)
-    entry['role'] = a.get('role', 'executor')
-    entry['allowSpawn'] = a.get('allowSpawn', False)
-    # 工具集裁剪
-    entry['tools'] = a.get('tools', ['read'])
-    # 子Agent自身派发策略
-    sub = entry.setdefault('subagents', {})
-    sub.setdefault('model', {})['primary'] = a['model']
-    if a.get('role') == 'scheduler':
-        sub.setdefault('maxSpawnDepth', a.get('subagents', {}).get('maxSpawnDepth', 1))
-        sub.setdefault('maxChildrenPerAgent', a.get('subagents', {}).get('maxChildrenPerAgent', 3))
-    else:
-        # executor 角色禁止派发子Agent
-        sub.setdefault('maxSpawnDepth', 0)
-        sub.setdefault('maxChildrenPerAgent', 0)
-    sub.setdefault('maxConcurrent', 4)
-    sub.setdefault('runTimeoutSeconds', 600)
-
-# ── 6. 写入 ──
-out_path.parent.mkdir(parents=True, exist_ok=True)
-out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
-
-# 打印摘要
-print(f"✅ 编排器Agent [main] → {orch_model} (角色:scheduler, 可派发子Agent)")
-for a in agent_list:
-    role = a.get('role', 'executor')
-    tools = '、'.join(a.get('tools', ['read']))
-    spawn_tag = '可派发' if a.get('allowSpawn') else '仅执行'
-    print(f"   专业Agent [{a['id']}] → {a['model']} ({a.get('label','')}, 角色:{role}, 权限:[{tools}], {spawn_tag})")
-PY
-  rm -f "$tmp_json"
-
-  # ── 7. 写编排器 System Prompt ──
-  local orch_prompt_dir="$HOME/.openclaw/agents/main"
-  mkdir -p "$orch_prompt_dir"
-  local orch_prompt
-  orch_prompt=$(openclaw_orchestrator_system_prompt "$agent_json" 2>/dev/null)
-  printf '%s\n' "$orch_prompt" > "$orch_prompt_dir/AGENTS.md"
-  echo "✅ 编排器 System Prompt 已写入 ~/.openclaw/agents/main/AGENTS.md"
-
-  # ── 8. 写各专业Agent的简短System Prompt ──
-  # 注意: 不能 pipe + heredoc 混用，heredoc 会覆盖 stdin；改用命令行参数传递 JSON
-  python3 - "$HOME/.openclaw/agents" "$agent_json" <<'PY'
-import json, sys, os
-from pathlib import Path
-base = Path(sys.argv[1])
-agents = json.loads(sys.argv[2])
-for a in agents:
-    aid = a['id']
-    adir = base / aid
-    adir.mkdir(parents=True, exist_ok=True)
-    caps = '、'.join(a.get('capabilities', []))
-    role = a.get('role', 'executor')
-    tools = '、'.join(a.get('tools', ['read']))
-    spawn_note = '你可以派发子Agent完成复杂任务' if a.get('allowSpawn') else '你不可派发子Agent，仅处理分配给你的任务'
-    prompt = f"""你是 {a.get('label', aid)}，角色={role}，绑定模型 {a['model']}。
-
-## 角色权限
-- 你的角色为 **{role}**，可用工具: [{tools}]
-- {spawn_note}
-
-## 能力范围
-{caps}
-
-## 工作规则
-- 仅处理能力范围内的问题
-- 超出能力范围时简洁说明，由编排器重新调度
-- 回答保持简洁精准
-- 你是子Agent，不是主Agent，不要主动轮询
-- max_tokens: {a.get('maxTokens', 2048)}
-"""
-    (adir / 'AGENTS.md').write_text(prompt, encoding='utf-8')
-    print(f"✅ {a['label']} System Prompt 已写入 ~/.openclaw/agents/{aid}/AGENTS.md")
-PY
-
-  echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  多Agent多模型架构部署完成"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  硬件分级: $tier"
-  echo "  编排器:   main → $orchestrator_model"
-  echo "  专业Agent: $(echo "$agent_json" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))") 个"
-  echo "  架构:     编排器(分类+派发) → 子Agent(专业执行)"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo ""
-  echo "  💡 使用方式: 直接与 main Agent 对话即可，"
-  echo "     编排器会自动分类并派发专业子Agent处理"
-  echo ""
-}
-
-# ── 一键多Agent部署入口 ──
-openclaw_apply_multi_agent_architecture() {
-  local tier force_flag="${1:-false}" cloud_model="" config_file tmp_json
-  tier=$(openclaw_detect_hardware_tier 2>/dev/null || echo "entry-cpu")
-  [ -z "$tier" ] && tier="entry-cpu"
-
-  echo "🏗️ 正在部署多Agent多模型架构..."
-  echo "   硬件分级: $tier"
-
-  # 确保Ollama已安装
-  openclaw_install_ollama_runtime || {
-    echo "⚠️ Ollama 安装失败，多Agent架构需要本地模型"
-    return 1
-  }
-
-  # 确保OpenClaw已安装
-  if ! command -v openclaw >/dev/null 2>&1; then
-    echo "⚠️ OpenClaw 未安装，无法部署多Agent架构"
-    return 1
-  fi
-
-  # ── 检测是否有云端模型可用 ──
-  config_file=$(openclaw_get_config_file)
-  if [ -f "$config_file" ] && [ -s "$config_file" ]; then
-    tmp_json=$(mktemp /tmp/openclaw_cloud_detect_XXXXXX.json)
-    openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-    cloud_model=$(python3 - "$tmp_json" 2>/dev/null <<'PY'
-import json, sys
-from pathlib import Path
-cfg = {}
-try: cfg = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-except: pass
-# 检查 agents.defaults.model.primary
-primary = (cfg.get('agents', {})).get('defaults', {}).get('model', {}).get('primary', '')
-# 检查是否有非ollama的provider（云服务商）
-providers = (cfg.get('models', {})).get('providers', {})
-cloud_providers = [k for k in providers if k not in ('ollama',)]
-if primary and not primary.startswith('ollama/'):
-    print(primary)
-elif cloud_providers:
-    # 有云服务商但primary不是cloud的：尝试从provider提取首个模型
-    for cp in cloud_providers:
-        prov = providers.get(cp, {})
-        models = prov.get('models', [])
-        if models and isinstance(models, list):
-            m = models[0]
-            mid = m.get('id', '') if isinstance(m, dict) else str(m)
-            if mid:
-                print(f"{cp}/{mid}")
-                break
-PY
-)
-    rm -f "$tmp_json"
-    if [ -n "$cloud_model" ]; then
-      echo "   ☁️ 检测到云端模型: $cloud_model"
-    fi
-  fi
-
-  # ── 自动拉取多Agent所需的本地模型 ──
-  openclaw_multi_agent_pull_models "$tier" || echo "⚠️ 部分模型拉取失败，将使用已有模型继续"
-
-  # 生成并写入多Agent配置
-  openclaw_write_multi_agent_config "$tier" "$cloud_model" "$force_flag" || return 1
-
-  # 重启网关使配置生效
-  openclaw_apply_and_restart
-}
-
-# ── 多Agent所需模型自动拉取 ──
-openclaw_multi_agent_pull_models() {
-  local tier="$1"
-  echo "⬇️ 正在拉取多Agent架构所需的本地模型..."
-  echo "   硬件分级: $tier"
-
-  openclaw_ensure_ollama_running >/dev/null 2>&1 || {
-    echo "⚠️ Ollama 服务未就绪，跳过模型拉取"
-    return 1
-  }
-
-  local pulled=0 failed=0
-
-  _pull_if_needed() {
-    local label="$1" model="$2"
-    if ollama list 2>/dev/null | grep -qF "$model"; then
-      echo "   ✅ $label ($model) 已存在"
-      return 0
-    fi
-    echo "   ⬇️ 拉取 $label ($model)..."
-    if ollama pull "$model" >/dev/null 2>&1; then
-      echo "   ✅ $label 拉取成功"
-      pulled=$((pulled + 1))
-      return 0
-    else
-      echo "   ⚠️ $label 拉取失败"
-      failed=$((failed + 1))
-      return 1
-    fi
-  }
-
-  # 所有tier通用的基础模型
-  _pull_if_needed "基础文本" "qwen3:0.6b"
-  _pull_if_needed "基础代码" "qwen2.5-coder:1.5b"
-  _pull_if_needed "记忆检索" "qwen2.5:7b"
-
-  case "$tier" in
-    golden-gpu)
-      _pull_if_needed "编排器" "qwen3:1.8b"
-      _pull_if_needed "高级文本" "qwen2.5:14b"
-      _pull_if_needed "高级代码" "qwen2.5-coder:7b"
-      _pull_if_needed "高级多模态" "gemma3:12b"
-      ;;
-    advanced-gpu|entry-gpu)
-      _pull_if_needed "编排器" "qwen3:1.8b"
-      _pull_if_needed "进阶文本" "qwen2.5:7b"
-      _pull_if_needed "进阶代码" "qwen2.5-coder:7b"
-      _pull_if_needed "基础多模态" "gemma3:4b"
-      ;;
-    advanced-cpu)
-      _pull_if_needed "编排器" "qwen3:1.8b"
-      _pull_if_needed "进阶文本" "qwen2.5:7b"
-      _pull_if_needed "进阶代码" "qwen2.5-coder:7b"
-      ;;
-    entry-cpu|*)
-      # entry-cpu 仅需基础模型（已在上面拉取）
-      ;;
-  esac
-
-  echo "   模型拉取完成: $pulled 个成功, $failed 个失败"
-  [ "$failed" -eq 0 ] && return 0 || return 1
-}
-
-# ── 获取硬件分级（安装时一次性运行）──
-openclaw_detect_hardware_tier() {
-  python3 <<'PY'
-import subprocess, os, sys
-
-# 检测GPU
-has_gpu = False
-gpu_mem_mb = 0
-try:
-    out = subprocess.check_output(
-        ['nvidia-smi', '--query-gpu=memory.total', '--format=csv,noheader'],
-        text=True, timeout=5, stderr=subprocess.DEVNULL
-    ).strip()
-    if out:
-        gpu_mem_mb = int(out.replace('MiB','').replace('MB','').strip())
-        has_gpu = True
-except: pass
-
-# 检测系统内存
-mem_mb = 0
-try:
-    with open('/proc/meminfo') as f:
-        for l in f:
-            if l.startswith('MemTotal:'):
-                mem_mb = int(l.split()[1]) // 1024
-                break
-except: pass
-
-# 检测CPU核心数
-cpu_cores = os.cpu_count() or 1
-
-# WSL检测
-is_wsl = False
-try:
-    with open('/proc/version') as f:
-        if 'microsoft' in f.read().lower():
-            is_wsl = True
-except: pass
-
-# 分级逻辑
-if has_gpu and gpu_mem_mb >= 8000:
-    tier = 'golden-gpu'
-elif has_gpu and gpu_mem_mb >= 4000:
-    tier = 'advanced-gpu'
-elif has_gpu and gpu_mem_mb >= 2000:
-    tier = 'entry-gpu'
-elif mem_mb >= 16000 and cpu_cores >= 8:
-    tier = 'advanced-cpu'
-else:
-    tier = 'entry-cpu'
-
-if is_wsl:
-    # WSL下GPU可能被误检测，保守处理
-    if gpu_mem_mb < 4000 and tier.startswith('golden'):
-        tier = 'advanced-gpu'
-
-print(tier)
-PY
 }
 
 openclaw_postinstall_acceptance_check() {
@@ -21676,10 +14808,11 @@ openclaw_full_local_stack_setup() {
     echo "🚀 开始执行一键完整本地落地..."
     openclaw_runtime_self_heal || return 1
     openclaw_install_ollama_runtime || return 1
-    openclaw_ollama_pull_recommended_model "text" || echo "⚠️ 文本模型安装跳过"
-    openclaw_ollama_pull_recommended_model "image" || echo "⚠️ 视觉模型安装跳过"
-    openclaw_ollama_pull_recommended_model "code" || echo "⚠️ 代码模型安装跳过"
-    openclaw_apply_multi_agent_architecture "true" || return 1
+    openclaw_ollama_pull_recommended_model "text" || return 1
+    openclaw_ollama_pull_recommended_model "image" || return 1
+    openclaw_ollama_pull_recommended_model "code" || return 1
+    OPENCLAW_FORCE_LOCAL_PROFILE=1
+    openclaw_apply_recommended_model_profile || return 1
     openclaw_memorysearch_loop_self_heal || return 1
     openclaw_inject_skills || return 1
     openclaw_optimize_memory_and_skills || return 1
@@ -21690,41 +14823,9 @@ openclaw_full_local_stack_setup() {
 }
 
 openclaw_memory_prepare_layered_local_models() {
-    local profile_json tier text_model code_model vision_model want_vision is_wsl=false
-    # 清除过期的拉取失败缓存，确保本次运行会重新尝试下载
-    if [ -f "$SKPL_OLLAMA_PULL_CACHE_FILE" ]; then
-      local cache_age
-      cache_age=$(python3 - "$SKPL_OLLAMA_PULL_CACHE_FILE" <<'PY' 2>/dev/null || echo "99999"
-import json, sys, time
-from pathlib import Path
-try:
-    data = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
-    newest = 0
-    for role_data in (data.values() if isinstance(data, dict) else []):
-        if isinstance(role_data, dict):
-            for item in role_data.values():
-                if isinstance(item, dict):
-                    newest = max(newest, int(item.get('updatedAt',0) or 0))
-    age = int(time.time()) - newest if newest > 0 else 99999
-    print(age)
-except Exception:
-    print(99999)
-PY
-)
-      if [ "${cache_age:-0}" -gt 300 ]; then
-        echo "   🧹 模型拉取缓存已过期，清除后重新尝试..."
-        rm -f "$SKPL_OLLAMA_PULL_CACHE_FILE"
-      fi
-    fi
+    local profile_json tier text_model code_model vision_model want_vision
     echo "   正在检测硬件配置..."
-    # WSL环境快速通路：避免GPU检测卡顿
-    if grep -qi "microsoft\|WSL" /proc/sys/kernel/osrelease 2>/dev/null || [ -n "$WSL_DISTRO_NAME" ]; then
-      is_wsl=true
-      echo "   ⚡ WSL环境检测: 使用快速CPU配置"
-      profile_json='{"tier":"entry-cpu"}'
-    else
-      profile_json=$(openclaw_detect_hardware_profile_json 2>/dev/null) || profile_json='{"tier":"entry-cpu"}'
-    fi
+    profile_json=$(openclaw_detect_hardware_profile_json 2>/dev/null) || profile_json='{"tier":"entry-cpu"}'
     tier=$(python3 - "$profile_json" <<'PY' 2>/dev/null || echo 'entry-cpu'
 import json, sys
 print((json.loads(sys.argv[1]) or {}).get('tier', 'entry-cpu'))
@@ -21734,33 +14835,26 @@ PY
 
     case "$tier" in
       server|workstation|flagship-gpu|golden-gpu)
-        text_model="qwen2.5:14b"
-        code_model="qwen2.5-coder:7b"
-        vision_model="gemma3:12b"
+        text_model="qwen2.5:7b"
+        code_model="qwen3-coder"
+        vision_model="gemma3:4b"
         ;;
       advanced-gpu|advanced-cpu-plus|advanced-cpu)
-        text_model="qwen2.5:7b"
-        code_model="qwen2.5-coder:7b"
+        text_model="qwen2.5:3b"
+        code_model="qwen2.5-coder:1.5b"
         vision_model="gemma3:4b"
         ;;
       entry-gpu|entry-cpu)
-        text_model="qwen3:0.6b"
+        text_model="qwen3:0.5b"
         code_model="qwen2.5-coder:1.5b"
         vision_model="gemma3:4b"
         ;;
       *)
-        text_model="qwen3:0.6b"
+        text_model="qwen3:0.3b"
         code_model="qwen2.5-coder:1.5b"
         vision_model="gemma3:4b"
         ;;
     esac
-
-    # WSL低配环境：跳过大型视觉模型以加快启动，避免网络超时
-    if $is_wsl; then
-      echo "ℹ️ WSL环境: 跳过视觉模型下载以加快启动速度"
-      echo "   (视觉模型可通过菜单手动下载: 模型管理 → 拉取推荐模型 → image)"
-      want_vision=false
-    fi
 
     echo "🧠 正在按硬件分级准备本地专家模型..."
     echo "   分级: $tier"
@@ -21769,46 +14863,17 @@ PY
     [ "$want_vision" = "true" ] && echo "   视觉模型: $vision_model"
 
     openclaw_install_ollama_runtime || return 1
-    # 根据硬件分级构建回退链：WSL/低配用更小模型，高配用更大模型
-    local text_fallbacks code_fallbacks
-    case "$tier" in
-      server|workstation|flagship-gpu|golden-gpu)
-        text_fallbacks=("qwen2.5:7b" "qwen3:4b" "qwen2.5:3b")
-        code_fallbacks=("qwen2.5-coder:1.5b" "qwen2.5-coder:3b" "deepseek-coder:6.7b")
-        ;;
-      advanced-gpu|advanced-cpu-plus|advanced-cpu)
-        text_fallbacks=("qwen3:4b" "qwen2.5:3b" "qwen2.5:1.5b")
-        code_fallbacks=("qwen2.5-coder:3b" "qwen2.5-coder:1.5b" "deepseek-coder:1.3b")
-        ;;
-      entry-gpu|entry-cpu|*)
-        text_fallbacks=("qwen2.5:1.5b" "llama3.2:1b" "qwen2.5:0.5b")
-        code_fallbacks=("qwen2.5-coder:0.5b" "qwen2.5-coder:1.5b" "deepseek-coder:1.3b")
-        ;;
-    esac
-    if openclaw_ollama_pull_first_available "text" "$text_model" "${text_fallbacks[@]}"; then
-      text_model="${OPENCLAW_LAST_PULLED_MODEL:-$text_model}"
-    else
-      echo "⚠️ 文本模型拉取失败，将以无本地模型模式继续"
-      $is_wsl && echo "   WSL环境请确保: ollama serve 已运行，网络可访问 registry.ollama.ai"
-      text_model=""
-    fi
-    if [ "$code_model" != "$text_model" ] && [ -n "$code_model" ]; then
-      if openclaw_ollama_pull_first_available "code" "$code_model" "${code_fallbacks[@]}"; then
-        code_model="${OPENCLAW_LAST_PULLED_MODEL:-$code_model}"
-      else
-        echo "⚠️ 代码模型拉取失败，将以文本模型替代"
-        code_model="$text_model"
-      fi
+    openclaw_ollama_pull_first_available "text" "$text_model" "qwen2.5:7b" "qwen3:4b" "llama3.2:3b" || return 1
+    text_model="${OPENCLAW_LAST_PULLED_MODEL:-$text_model}"
+    if [ "$code_model" != "$text_model" ]; then
+      openclaw_ollama_pull_first_available "code" "$code_model" "qwen2.5-coder:7b" "deepseek-coder:6.7b" || return 1
+      code_model="${OPENCLAW_LAST_PULLED_MODEL:-$code_model}"
     else
       code_model="$text_model"
     fi
     if [ "$want_vision" = "true" ]; then
-      if openclaw_ollama_pull_first_available "image" "$vision_model" "llava:7b" "minicpm-v"; then
-        vision_model="${OPENCLAW_LAST_PULLED_MODEL:-$vision_model}"
-      else
-        echo "⚠️ 视觉模型不可用，视觉功能将被禁用"
-        vision_model=""
-      fi
+      openclaw_ollama_pull_first_available "image" "$vision_model" "llava:7b" "minicpm-v" || return 1
+      vision_model="${OPENCLAW_LAST_PULLED_MODEL:-$vision_model}"
     fi
 
     python3 - "$(openclaw_get_config_file)" "$text_model" "$code_model" "$vision_model" "$want_vision" <<'PY'
@@ -21867,20 +14932,6 @@ openclaw_ollama_endpoint_ready() {
     curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:11434/api/tags >/dev/null 2>&1
 }
 
-openclaw_detect_proxy_env() {
-    # 检测系统代理配置，返回适合传递给子进程的代理环境变量
-    # 优先级：HTTPS_PROXY > https_proxy > HTTP_PROXY > http_proxy > socks5_proxy > all_proxy
-    local proxy_vars=""
-    for var in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy SOCKS5_PROXY socks5_proxy ALL_PROXY all_proxy; do
-      if [ -n "${!var:-}" ]; then
-        # 如果有代理但OLLAMA_PROXY未设置的话，确保不传给ollama本地调用
-        # 但传给外网下载命令
-        proxy_vars="${proxy_vars}export ${var}=${!var}; "
-      fi
-    done
-    printf '%s' "$proxy_vars"
-}
-
 openclaw_resolve_ollama_bin() {
     if command -v ollama >/dev/null 2>&1; then
       command -v ollama
@@ -21897,46 +14948,10 @@ openclaw_resolve_ollama_bin() {
     return 1
 }
 
-_openclaw_ollama_proxy_warn() {
-    local user_proxy="${HTTP_PROXY:-${http_proxy:-}}${HTTPS_PROXY:-${https_proxy:-}}${ALL_PROXY:-${all_proxy:-}}"
-    [ -z "$user_proxy" ] && return 0
-    local ollama_pid
-    ollama_pid=$(pgrep -f "ollama serve" 2>/dev/null | head -n 1)
-    [ -z "$ollama_pid" ] && return 0
-    local env_file="/proc/$ollama_pid/environ"
-    [ -r "$env_file" ] || return 0
-    if tr '\0' '\n' < "$env_file" 2>/dev/null | grep -qE '^(HTTP_PROXY|HTTPS_PROXY|ALL_PROXY)='; then
-        return 0
-    fi
-    echo "⚠️ 已设置代理但运行中的 ollama serve (PID $ollama_pid) 未继承代理"
-    echo "   模型下载速度可能受限。建议执行:"
-    echo "   kill $ollama_pid && env HTTP_PROXY=$HTTP_PROXY HTTPS_PROXY=$HTTPS_PROXY ollama serve &"
-}
-
-# 检测代理是否存活：尝试 TCP 连接代理地址，3 秒超时
-_openclaw_proxy_is_alive() {
-    local proxy_url="${1:-}"
-    [ -z "$proxy_url" ] && return 1
-    # 提取 host:port，支持 http://127.0.0.1:7890 格式
-    local host_port
-    host_port=$(printf '%s' "$proxy_url" | sed -n 's|^https\?://||; s|/$||; s|^\[\(.*\)\]|\1|; p')
-    [ -z "$host_port" ] && return 1
-    local host="${host_port%:*}"
-    local port="${host_port##*:}"
-    [ -z "$port" ] || [ "$port" = "$host_port" ] && return 1
-    timeout 3 bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null
-}
-
-# 获取当前有效的代理环境变量（优先 HTTP_PROXY）
-_openclaw_effective_proxy() {
-    printf '%s' "${HTTP_PROXY:-${http_proxy:-${HTTPS_PROXY:-${https_proxy:-${ALL_PROXY:-${all_proxy:-}}}}}}"
-}
-
 openclaw_ensure_ollama_running() {
     local ollama_bin
     if openclaw_ollama_endpoint_ready; then
       echo "✅ ollama 服务已就绪"
-      _openclaw_ollama_proxy_warn
       return 0
     fi
 
@@ -21960,12 +14975,11 @@ openclaw_ensure_ollama_running() {
       sleep 2
       if openclaw_ollama_endpoint_ready; then
         echo "✅ ollama serve 已在运行"
-        _openclaw_ollama_proxy_warn
         return 0
       fi
     fi
 
-    nohup env HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" ALL_PROXY="${ALL_PROXY:-${all_proxy:-}}" "$ollama_bin" serve >/tmp/ollama-serve.log 2>&1 &
+    nohup "$ollama_bin" serve >/tmp/ollama-serve.log 2>&1 &
     disown 2>/dev/null || true
     sleep 3
     if openclaw_ollama_endpoint_ready; then
@@ -21986,7 +15000,7 @@ openclaw_install_ollama_runtime() {
     openclaw_ensure_ollama_install_tools || return 1
     echo "⬇️ 正在安装 ollama 本地模型运行时..."
     echo "   下载安装脚本（最多60秒）..."
-    if env HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" curl -fsSL --max-time 60 https://ollama.com/install.sh | sh; then
+    if curl -fsSL --max-time 60 https://ollama.com/install.sh | sh; then
       echo "✅ ollama 安装完成"
       openclaw_ensure_ollama_running || true
     else
@@ -22005,31 +15019,7 @@ openclaw_ollama_pull_model() {
     openclaw_install_ollama_runtime || return 1
     openclaw_ensure_ollama_running || return 1
     echo "⬇️ 正在拉取本地模型: $model_name"
-    local _om_pull_retry=0 _om_pull_rc=0 _om_pull_err
-    local _om_proxy=$(_openclaw_effective_proxy)
-    local _om_proxy_bypass=false
-    if [ -n "$_om_proxy" ] && ! _openclaw_proxy_is_alive "$_om_proxy"; then
-      echo "⚠️ 代理 $_om_proxy 不可用，自动绕过直连下载"
-      _om_proxy_bypass=true
-    fi
-    while [ "$_om_pull_retry" -le 2 ]; do
-      if [ "$_om_proxy_bypass" = "true" ]; then
-        _om_pull_err=$(env HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" ollama pull "$model_name" 2>&1)
-      elif [ -n "$_om_proxy" ]; then
-        _om_pull_err=$(env HTTP_PROXY="$_om_proxy" HTTPS_PROXY="$_om_proxy" ollama pull "$model_name" 2>&1)
-      else
-        _om_pull_err=$(ollama pull "$model_name" 2>&1)
-      fi
-      _om_pull_rc=$?
-      [ "$_om_pull_rc" -eq 0 ] && break
-      if printf '%s' "$_om_pull_err" | grep -qiE 'unexpected EOF|connection reset|timeout|broken pipe'; then
-        _om_pull_retry=$((_om_pull_retry + 1))
-        [ "$_om_pull_retry" -le 2 ] && { echo "🔄 网络瞬断，自动重试 ($_om_pull_retry/2)..."; sleep 3; }
-      else
-        break
-      fi
-    done
-    [ "$_om_pull_rc" -ne 0 ] && return 1
+    ollama pull "$model_name" || return 1
     local model_role="text"
     case "$model_name" in
       *coder*) model_role="code" ;;
@@ -22107,39 +15097,35 @@ skpl_estimate_model_vram_mb() {
   local name_lower
   name_lower=$(echo "$model_name" | tr '[:upper:]' '[:lower:]')
   [ -z "$name_lower" ] && echo 4000 && return 1
-  # 4-bit 量化模型显存估算 (参数B × ~500MB + KV缓存等开销)
   case "$name_lower" in
-    *"70b"*|*"72b"*) echo 36000 ;;
-    *"30b"*|*"32b"*) echo 17000 ;;
-    *"16b"*|*"15b"*|*"14b"*|*"13b"*)  echo 7200 ;;
-    *"11b"*|*"12b"*)  echo 6600 ;;
-    *"8b"*)  echo 5530 ;;
-    *"7b"*)  echo 5325 ;;
-    *"6.7b"*)  echo 4100 ;;
-    *"4.7b"*)  echo 3000 ;;
-    *"4b"*)  echo 2600 ;;
-    *"3.8b"*)  echo 2400 ;;
-    *"3.2b"*)  echo 2100 ;;
-    *"3b"*)  echo 1950 ;;
-    *"2b"*)  echo 1300 ;;
-    *"1.8b"*)  echo 1200 ;;
-    *"1.5b"*)  echo 1000 ;;
-    *"1.3b"*)  echo 900 ;;
-    *"1b"*)  echo 750 ;;
-    *"0.8b"*)  echo 600 ;;
-    *"0.6b"*)  echo 500 ;;
-    *"0.5b"*)  echo 420 ;;
-    *"0.3b"*)  echo 310 ;;
+    *qwen2.5:14b*|*qwen2.5:13b*|*qwen2.5:15b*)  echo 11000 ;;
+    *qwen3:14b*|*qwen3:13b*)  echo 11000 ;;
+    *"30b"*|*"32b"*|*"70b"*|*"72b"*) echo 24000 ;;
+    *"14b"*|*"15b"*)  echo 11000 ;;
+    *"1.8b"*)  echo 1800 ;;
+    *"1.3b"*)  echo 1500 ;;
+    *"1.5b"*)  echo 1500 ;;
+    *"2b"*)  echo 2000 ;;
+    *"0.3b"*|*"0.5b"*)  echo 800 ;;
+    *"0.6b"*)  echo 1000 ;;
+    *"0.8b"*)  echo 1200 ;;
+    *"1b"*)  echo 1500 ;;
+    *"3b"*)  echo 3000 ;;
+    *"3.2b"*)  echo 3200 ;;
+    *"4b"*)  echo 4000 ;;
+    *"4.7b"*)  echo 4800 ;;
+    *"6.7b"*)  echo 5500 ;;
+    *"7b"*|*"8b"*)  echo 6000 ;;
     *)  echo 4000 ;;
   esac
 }
 
-# 检查模型是否适合当前显存 (使用配置中的reserveGpuMb)
+# 检查模型是否适合当前显存
 skpl_check_model_vram_fit() {
   local model_name="$1"
   local need_mb reserve_mb available_mb
   need_mb=$(skpl_estimate_model_vram_mb "$model_name")
-  reserve_mb=200  # 与budget.reserveGpuMb对齐，预留200MB给系统和KV缓存
+  reserve_mb=1000  # 预留1GB给系统和KV缓存
 
   # 获取可用显存
   available_mb=$(python3 - <<'PY'
@@ -22227,44 +15213,18 @@ openclaw_ollama_runtime_hint() {
     local version_text
     version_text=$(timeout 8 ollama --version 2>/dev/null | head -n 1)
     [ -n "$version_text" ] && echo "ℹ️ 当前 Ollama 版本: $version_text"
-    # 代理与下载速度提示
-    local user_proxy="${HTTP_PROXY:-${http_proxy:-}}${HTTPS_PROXY:-${https_proxy:-}}${ALL_PROXY:-${all_proxy:-}}"
-    if [ -z "$user_proxy" ]; then
-        echo "💡 下载慢？设置代理可加速: export HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890"
-        echo "   （端口号请根据实际代理工具调整：Clash=7890, v2ray=10809）"
-    else
-        echo "🌐 已检测到代理设置: ${HTTP_PROXY:-$https_proxy}"
-        local ollama_pid
-        ollama_pid=$(pgrep -f "ollama serve" 2>/dev/null | head -n 1)
-        if [ -n "$ollama_pid" ] && [ -r "/proc/$ollama_pid/environ" ]; then
-            if ! tr '\0' '\n' < "/proc/$ollama_pid/environ" 2>/dev/null | grep -qE '^(HTTP_PROXY|HTTPS_PROXY)='; then
-                echo "⚠️ 代理已设置但 ollama serve 未继承，下载将不走代理！"
-                echo "   请重启 ollama: kill $ollama_pid && env HTTP_PROXY=$HTTP_PROXY ollama serve &"
-            fi
-        fi
-    fi
 }
 
 openclaw_ollama_pull_first_available() {
     local model_role="$1"
     shift
-    local model_name="" cached_status cached_note cache_line pull_timeout=600 max_attempts=3 attempts=0
+    local model_name="" cached_status cached_note cache_line
     OPENCLAW_LAST_PULLED_MODEL=""
-    # WSL环境：延长超时适应国内网络，增加可尝试的备选模型数
-    if grep -qi "microsoft\|WSL" /proc/sys/kernel/osrelease 2>/dev/null || [ -n "$WSL_DISTRO_NAME" ]; then
-      pull_timeout=900
-      max_attempts=5
-    fi
     openclaw_install_ollama_runtime || return 1
     openclaw_ensure_ollama_running || return 1
     openclaw_ollama_runtime_hint || true
     for model_name in "$@"; do
       [ -z "$model_name" ] && continue
-      attempts=$((attempts + 1))
-      if [ "$attempts" -gt "$max_attempts" ]; then
-        echo "⚠️ 已达到最大尝试次数($max_attempts)，跳过剩余备选模型"
-        break
-      fi
       if openclaw_ollama_model_exists_local "$model_name"; then
         OPENCLAW_LAST_PULLED_MODEL="$model_name"
         openclaw_ollama_cache_status_set "$model_role" "$model_name" "local" "模型已存在于本地"
@@ -22272,7 +15232,7 @@ openclaw_ollama_pull_first_available() {
         echo "✅ 已复用本地$model_role模型: $model_name"
         return 0
       fi
-      cache_line=$(openclaw_ollama_cache_status_get "$model_role" "$model_name" 300 2>/dev/null || true)
+      cache_line=$(openclaw_ollama_cache_status_get "$model_role" "$model_name" 21600 2>/dev/null || true)
       cached_status=$(printf '%s' "$cache_line" | awk -F '\t' '{print $1}')
       cached_note=$(printf '%s' "$cache_line" | awk -F '\t' '{print $2}')
       if [ "$cached_status" = "failed" ]; then
@@ -22286,53 +15246,12 @@ openclaw_ollama_pull_first_available() {
         openclaw_ollama_cache_status_set "$model_role" "$model_name" "skipped" "用户取消"
         continue
       fi
-      # --- 代理检测与自适应绕过 ---
-      local pull_proxy_effective proxy_bypass=false
-      pull_proxy_effective=$(_openclaw_effective_proxy)
-      if [ -n "$pull_proxy_effective" ]; then
-        if _openclaw_proxy_is_alive "$pull_proxy_effective"; then
-          echo "🌐 代理 $pull_proxy_effective 已连接，将通过代理下载"
-        else
-          echo "⚠️ 检测到代理 $pull_proxy_effective 但无法连接（connection refused）"
-          echo "   自动绕过代理直连下载（速度可能较慢但可用）"
-          proxy_bypass=true
-        fi
-      fi
-      # --- 拉取 + 断点续传重试（针对 unexpected EOF） ---
-      local pull_retry=0 pull_max_retry=2 pull_err pull_rc=0
-      while [ "$pull_retry" -le "$pull_max_retry" ]; do
-        if [ "$proxy_bypass" = "true" ]; then
-          pull_err=$(timeout "$pull_timeout" env HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" ollama pull "$model_name" 2>&1)
-        elif [ -n "$pull_proxy_effective" ]; then
-          pull_err=$(timeout "$pull_timeout" env HTTP_PROXY="$pull_proxy_effective" HTTPS_PROXY="$pull_proxy_effective" ollama pull "$model_name" 2>&1)
-        else
-          pull_err=$(timeout "$pull_timeout" ollama pull "$model_name" 2>&1)
-        fi
-        pull_rc=$?
-        # 判断是否为可恢复的网络瞬断（断点续传场景）
-        if printf '%s' "$pull_err" | grep -qiE 'unexpected EOF|connection reset|timeout|broken pipe'; then
-          pull_retry=$((pull_retry + 1))
-          if [ "$pull_retry" -le "$pull_max_retry" ]; then
-            echo "🔄 检测到网络瞬断（已下载部分将保留），自动重试 ($pull_retry/$pull_max_retry)..."
-            sleep 3
-          fi
-        else
-          break
-        fi
-      done
-      if [ "$pull_rc" -eq 0 ]; then
+      if timeout 600 ollama pull "$model_name"; then
         OPENCLAW_LAST_PULLED_MODEL="$model_name"
         openclaw_ollama_cache_status_set "$model_role" "$model_name" "ok" "拉取成功"
         openclaw_configure_local_ollama_provider "$model_name" "$model_role" || true
         echo "✅ 已选定本地$model_role模型: $model_name"
         return 0
-      fi
-      # 如果是代理错误且尚未尝试绕过，标记为可能是代理问题
-      if printf '%s' "$pull_err" | grep -qiE 'proxyconnect|connection refused.*127\\.0\\.0\\.1|no such host'; then
-        openclaw_ollama_cache_status_set "$model_role" "$model_name" "failed" "代理不通，建议 unset HTTP_PROXY 后重试"
-        echo "❌ 代理不通导致下载失败，请检查代理或执行: unset HTTP_PROXY HTTPS_PROXY"
-        # 不继续尝试下一个模型——代理不通的话全都会失败
-        return 1
       fi
       openclaw_ollama_cache_status_set "$model_role" "$model_name" "failed" "当前运行时未成功拉取"
       echo "⚠️ 当前模型不可用，继续尝试下一个: $model_name"
@@ -22360,10 +15279,10 @@ PY
             openclaw_ollama_pull_first_available "text" "qwen2.5:3b" "qwen3:4b" "llama3.2:3b"
             ;;
           entry-gpu|entry-cpu)
-            openclaw_ollama_pull_first_available "text" "qwen3:0.6b" "qwen2.5:1.5b" "llama3.2:1b"
+            openclaw_ollama_pull_first_available "text" "qwen3:0.5b" "qwen2.5:1.5b" "llama3.2:1b"
             ;;
           *)
-            openclaw_ollama_pull_first_available "text" "qwen3:0.6b" "llama3.2:1b"
+            openclaw_ollama_pull_first_available "text" "qwen3:0.5b" "llama3.2:1b"
             ;;
         esac
         selected_model="$OPENCLAW_LAST_PULLED_MODEL"
@@ -22372,10 +15291,10 @@ PY
       code)
         case "$tier" in
           server|workstation)
-            openclaw_ollama_pull_first_available "code" "qwen2.5-coder:1.5b" "deepseek-coder-v2:16b" "qwen2.5-coder:7b"
+            openclaw_ollama_pull_first_available "code" "qwen3-coder" "deepseek-coder-v2:16b" "qwen2.5-coder:7b"
             ;;
           flagship-gpu)
-            openclaw_ollama_pull_first_available "code" "qwen2.5-coder:1.5b" "qwen2.5-coder:7b" "deepseek-coder:6.7b"
+            openclaw_ollama_pull_first_available "code" "qwen3-coder" "qwen2.5-coder:7b" "deepseek-coder:6.7b"
             ;;
           golden-gpu)
             openclaw_ollama_pull_first_available "code" "qwen2.5-coder:7b" "deepseek-coder:6.7b" "qwen2.5-coder:1.5b"
@@ -22410,7 +15329,7 @@ openclaw_ollama_quick_setup_menu() {
       echo
       skpl_ui_section "推荐模型"
       skpl_ui_menu_item 1 "qwen2.5:7b" "稳妥的本地通用文本模型，适合大多数设备"
-      skpl_ui_menu_item 2 "qwen2.5-coder:1.5b" "本地代码模型，优先用于开发辅助"
+      skpl_ui_menu_item 2 "qwen3-coder" "本地代码模型，优先用于开发辅助"
       skpl_ui_menu_item 3 "qwen2.5-coder:7b" "备用代码模型，适合兼容旧配置"
       skpl_ui_menu_item 4 "mistral:7b" "通用备选模型"
       skpl_ui_menu_item 5 "自定义模型" "手动输入任意 ollama 模型名"
@@ -22498,7 +15417,7 @@ openclaw_memory_enable_local_retrieval() {
       skpl_ui_menu_item 2 "重建全部索引" "提升召回率与命中率"
       skpl_ui_menu_item 3 "查看预热日志" "查看 embedding 模型准备与索引预热日志"
       skpl_ui_menu_item 4 "查看运行时说明" "说明 embedding 检索与 Ollama 大模型的职责边界"
-      skpl_ui_menu_item 5 "进入完整本地 AI 栈" "跳转完整本地 AI 栈：安装 Ollama、拉模型、启用检索、验收"
+      skpl_ui_menu_item 5 "一键完整本地落地" "跳转完整本地 AI 栈：安装 Ollama、拉模型、启用检索、验收"
       skpl_ui_menu_item 6 "自动部署菜单" "进入现有高级记忆部署入口"
       skpl_ui_menu_item 7 "结构化数据检索" "搜索 JSON、键值对等结构化记忆"
       skpl_ui_menu_item 8 "代码语义检索" "搜索代码片段与代码记忆"
@@ -22692,7 +15611,7 @@ openclaw_memory_search_test() {
     return 1
     fi
   echo "正在搜索记忆..."
-  timeout 30 openclaw memory search "$query" --max-results 5 2>/dev/null || true
+  timeout 30 openclaw memory search "$query" --max-results 5
 }
 
 # Unified memory search - combines official OpenClaw memory and SKPL extension memory
@@ -22900,53 +15819,43 @@ PY
 }
 
 openclaw_memory_apply_current_scheme() {
-  local tier force="${1:-false}"
-  local config_file tmp_json
+  local config_file
   local want_local_models="true"
   local want_vision_models="false"
   config_file=$(openclaw_get_config_file)
   echo "正在应用当前记忆方案..."
   openclaw_runtime_self_heal || return 1
   openclaw_memory_prepare_workspace_all >/dev/null 2>&1 || true
-
-  # ── 多Agent多模型架构 (OpenClaw 原生方式) ──
-  # 检测硬件分级，一次性生成所有Agent配置
-  tier=$(openclaw_detect_hardware_tier 2>/dev/null || echo "entry-cpu")
-  echo "🔍 硬件分级检测: $tier"
-  echo "🚀 正在构建多Agent多模型智能调度..."
-  openclaw_apply_multi_agent_architecture "$force" || return 1
-
+  openclaw_apply_recommended_model_profile >/dev/null 2>&1 || true
   openclaw_optimize_memory_and_skills >/dev/null 2>&1 || true
   openclaw_inject_skills >/dev/null 2>&1 || true
   openclaw_safe_enable_global_tools >/dev/null 2>&1 || true
-  # JSON5 safe: pre-process config to temp JSON
-  tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-  openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-  python3 - "$config_file" "$tmp_json" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+  python3 - "$config_file" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-out_path = Path(sys.argv[1])      # original config file (write target)
-cfg_path = Path(sys.argv[2])      # JSON5-safe temp copy (read source)
-memory_cfg_path = Path(sys.argv[3])
+config_path = Path(sys.argv[1])
+memory_cfg_path = Path(sys.argv[2])
 cfg = {}
-if cfg_path.exists():
+if config_path.exists():
     try:
-        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
+        cfg = json.loads(config_path.read_text(encoding='utf-8'))
     except Exception:
         cfg = {}
 memory = cfg.setdefault('memory', {})
 memory.setdefault('backend', 'builtin')
 qmd = memory.setdefault('qmd', {})
 qmd['includeDefaultMemory'] = True
-# OpenClaw 2026.6+: memorySearch under agents.defaults, tools at root level
-agents = cfg.setdefault('agents', {}).setdefault('defaults', {})
-memory_search = agents.setdefault('memorySearch', {})
+memory_search = cfg.setdefault('memorySearch', {})
 memory_search['provider'] = 'ollama'
-memory_search['model'] = memory_search.get('model') or 'qwen2.5:7b'
+ollama_cfg = memory_search.setdefault('ollama', {})
+ollama_cfg['model'] = ollama_cfg.get('model') or 'qwen2.5:7b'
+tools = cfg.setdefault('tools', {})
+tools.setdefault('global', {})['enabled'] = True
+agents = cfg.setdefault('agents', {}).setdefault('defaults', {})
 agents.setdefault('workspace', '~/.openclaw/workspace')
-out_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
 memory_cfg = {}
 if memory_cfg_path.exists():
@@ -22974,7 +15883,6 @@ maintenance['cleanupDays'] = int(maintenance.get('cleanupDays', 30) or 30)
 maintenance['autoUpdateMinutes'] = int(maintenance.get('autoUpdateMinutes', 30) or 30)
 memory_cfg_path.write_text(json.dumps(memory_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 PY
-  rm -f "$tmp_json"
   want_local_models=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
 import json
 import sys
@@ -23024,7 +15932,10 @@ PY
     return 1
   }
   if openclaw_has_command ollama; then
-    timeout 3 ollama list >/dev/null 2>&1 || true
+    openclaw_ensure_ollama_running >/dev/null 2>&1 || true
+  else
+    echo "ℹ️ 未检测到 ollama，本次已完成记忆 embedding 模型和本地检索落地。"
+    echo "ℹ️ 如需继续安装本地文本/代码/视觉模型，可进入【完整本地 AI 栈】或相关模型设置菜单。"
   fi
   openclaw_validate_global_tools_runtime >/dev/null 2>&1 || true
   openclaw_maybe_start_gateway nosleep 5 >/dev/null 2>&1 || true
@@ -23383,8 +16294,8 @@ openclaw_ai_stack_expert_layer_menu() {
     skpl_ui_kv "专家层状态" "$(openclaw_ai_stack_expert_status_summary 2>/dev/null || printf '%s' '未记录')"
     skpl_ui_kv "生命周期" "$(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || printf '%s' '未记录')"
     echo
-    skpl_ui_menu_item 1 "基础角色与通用模型" "查看基础角色列表与当前档位下的通用模型默认和可选配置"
-    skpl_ui_menu_item 2 "通用模型状态摘要" "查看当前专家层状态和生命周期摘要"
+    skpl_ui_menu_item 1 "基础角色组" "查看通用、文档、工具、压缩、路由辅助、记忆整合角色"
+    skpl_ui_menu_item 2 "通用专家角色组" "查看当前硬件档位下的默认和可选通用模型"
     skpl_ui_menu_item 3 "代码专家角色组" "查看当前硬件档位下的默认和可选代码模型"
     skpl_ui_menu_item 4 "多模态专家角色组" "查看当前硬件档位下的默认和可选视觉模型"
     skpl_ui_menu_item 5 "模型管理子系统" "下载、更新、导入和兼容性测试入口"
@@ -23393,7 +16304,7 @@ openclaw_ai_stack_expert_layer_menu() {
     read -e choice
     case "$choice" in
       1) openclaw_ai_stack_expert_roles_menu general; break_end ;;
-      2) clear; skpl_ui_header "通用模型状态" "$(openclaw_ai_stack_expert_status_summary 2>/dev/null || echo '未记录') | $(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || echo '未记录')"; echo; echo "当前活跃专家: $(openclaw_ai_stack_expert_status_summary 2>/dev/null || echo '未记录')"; echo "生命周期状态: $(openclaw_ai_stack_lifecycle_status_summary 2>/dev/null || echo '未记录')"; break_end ;;
+      2) openclaw_ai_stack_expert_roles_menu general; break_end ;;
       3) openclaw_ai_stack_expert_roles_menu code; break_end ;;
       4) openclaw_ai_stack_expert_roles_menu vision; break_end ;;
       5) openclaw_ai_stack_model_management_menu ;;
@@ -23552,41 +16463,37 @@ openclaw_memory_privacy_security_menu() {
 openclaw_memory_apply_quick_profile() {
   local profile_key="$1"
   local preheat_mode="true"
-  local config_file tmp_json
+  local config_file
   config_file=$(openclaw_get_config_file)
   openclaw_runtime_self_heal || return 1
-  # JSON5 safe: pre-process config to temp JSON
-  tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-  openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-  python3 - "$config_file" "$tmp_json" "$SKPL_MEMORY_EXTENSION_CONFIG" "$SKPL_AI_STACK_ROOT/config.json" "$profile_key" <<'PY'
+  python3 - "$config_file" "$SKPL_MEMORY_EXTENSION_CONFIG" "$SKPL_AI_STACK_ROOT/config.json" "$profile_key" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-out_path = Path(sys.argv[1])      # original config file (write target)
-cfg_path = Path(sys.argv[2])      # JSON5-safe temp copy (read source)
-memory_cfg_path = Path(sys.argv[3])
-ai_stack_path = Path(sys.argv[4])
-profile_key = sys.argv[5]
+config_path = Path(sys.argv[1])
+memory_cfg_path = Path(sys.argv[2])
+ai_stack_path = Path(sys.argv[3])
+profile_key = sys.argv[4]
 
-cfg = json.loads(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
+cfg = json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
 memory_cfg = json.loads(memory_cfg_path.read_text(encoding='utf-8')) if memory_cfg_path.exists() else {}
 ai_cfg = json.loads(ai_stack_path.read_text(encoding='utf-8')) if ai_stack_path.exists() else {}
 
 profiles = {
     'beginner-safe': {
         'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 12, 'similarityThreshold': 0.6, 'autoUpdateMinutes': 60, 'cleanupDays': 15, 'cloudUploadMemory': False, 'localOnly': True, 'localExperts': True, 'localVision': False},
-        'routing': {'defaultTextModel': 'ollama/qwen3:0.6b', 'defaultCodeModel': 'ollama/qwen3:0.6b'},
+        'routing': {'defaultTextModel': 'ollama/qwen3:0.5b', 'defaultCodeModel': 'ollama/qwen3:0.5b'},
         'cache': {'routeTtlSeconds': 1200, 'resultTtlSeconds': 2400, 'toolTtlSeconds': 1200},
     },
     'balanced-local': {
         'memory': {'backend': 'builtin', 'preheat': True, 'maxContextPercent': 15, 'similarityThreshold': 0.58, 'autoUpdateMinutes': 30, 'cleanupDays': 30, 'cloudUploadMemory': False, 'localOnly': True, 'localExperts': True, 'localVision': False},
-        'routing': {'defaultTextModel': 'ollama/qwen2.5:7b', 'defaultCodeModel': 'ollama/qwen2.5-coder:1.5b'},
+        'routing': {'defaultTextModel': 'ollama/qwen2.5:7b', 'defaultCodeModel': 'ollama/qwen3-coder'},
         'cache': {'routeTtlSeconds': 900, 'resultTtlSeconds': 1800, 'toolTtlSeconds': 900},
     },
     'privacy-first': {
         'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 10, 'similarityThreshold': 0.62, 'autoUpdateMinutes': 45, 'cleanupDays': 14, 'cloudUploadMemory': False, 'localOnly': True, 'localExperts': True, 'localVision': False},
-        'routing': {'defaultTextModel': 'ollama/qwen2.5:3b', 'defaultCodeModel': 'ollama/qwen2.5-coder:1.5b'},
+        'routing': {'defaultTextModel': 'ollama/qwen2.5:3b', 'defaultCodeModel': 'ollama/qwen3-coder'},
         'cache': {'routeTtlSeconds': 1500, 'resultTtlSeconds': 2400, 'toolTtlSeconds': 1200},
     },
     'cloud-power': {
@@ -23596,7 +16503,7 @@ profiles = {
     },
     'low-resource': {
         'memory': {'backend': 'builtin', 'preheat': False, 'maxContextPercent': 8, 'similarityThreshold': 0.65, 'autoUpdateMinutes': 90, 'cleanupDays': 10, 'cloudUploadMemory': False, 'localOnly': True, 'localExperts': True, 'localVision': False},
-        'routing': {'defaultTextModel': 'ollama/qwen3:0.6b', 'defaultCodeModel': 'ollama/qwen2.5-coder:1.5b'},
+        'routing': {'defaultTextModel': 'ollama/qwen3:0.5b', 'defaultCodeModel': 'ollama/qwen2.5-coder:1.5b'},
         'cache': {'routeTtlSeconds': 1800, 'resultTtlSeconds': 1800, 'toolTtlSeconds': 1200},
     },
 }
@@ -23608,18 +16515,11 @@ if not profile:
 memory = cfg.setdefault('memory', {})
 memory.setdefault('backend', profile['memory'].get('backend', 'builtin'))
 memory.setdefault('qmd', {})['includeDefaultMemory'] = True
+cfg.setdefault('memorySearch', {})['provider'] = 'ollama'
+cfg['memorySearch'].setdefault('ollama', {})['model'] = profile['routing']['defaultTextModel'].split('/', 1)[1] if '/' in profile['routing']['defaultTextModel'] else profile['routing']['defaultTextModel']
+cfg.setdefault('tools', {}).setdefault('global', {})['enabled'] = True
 
 agents_defaults = cfg.setdefault('agents', {}).setdefault('defaults', {})
-memory_search = agents_defaults.setdefault('memorySearch', {})
-memory_search['provider'] = 'ollama'
-# memorySearch 始终使用本地 Ollama 模型做嵌入检索，不受云端主模型影响
-_local_ms_model = profile['routing']['defaultTextModel'].split('/', 1)[1] if '/' in profile['routing']['defaultTextModel'] else profile['routing']['defaultTextModel']
-if _local_ms_model.startswith('ollama/'):
-    _local_ms_model = _local_ms_model.split('/', 1)[1]
-# 如果推导出的模型是云端的（包含 /），回退到本地模型
-if '/' in _local_ms_model or 'gemini' in _local_ms_model.lower() or 'gpt' in _local_ms_model.lower() or 'claude' in _local_ms_model.lower():
-    _local_ms_model = 'qwen2.5:7b'
-memory_search['model'] = _local_ms_model
 agents_defaults.setdefault('workspace', '~/.openclaw/workspace')
 agents_defaults.setdefault('model', {})['primary'] = profile['routing']['defaultTextModel']
 agents_defaults.setdefault('imageModel', {})['primary'] = profile['routing'].get('defaultVisionModel', agents_defaults.get('imageModel', {}).get('primary', 'google/gemini-2.5-pro'))
@@ -23645,11 +16545,10 @@ memory_cfg['maintenance']['cleanupDays'] = profile['memory']['cleanupDays']
 ai_cfg.setdefault('routing', {}).update(profile['routing'])
 ai_cfg.setdefault('cache', {}).update(profile['cache'])
 
-out_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 memory_cfg_path.write_text(json.dumps(memory_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 ai_stack_path.write_text(json.dumps(ai_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 PY
-  rm -f "$tmp_json"
   preheat_mode=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" "$profile_key" <<'PY'
 import json
 import sys
@@ -23669,41 +16568,6 @@ PY
 )
   OPENCLAW_MEMORY_PREHEAT="$preheat_mode" openclaw_memory_apply_current_scheme || return 1
   echo "✅ 已应用快速方案: $profile_key"
-}
-
-# ── 初始化配置向导 ──
-openclaw_run_onboard_wizard() {
-  local tier profile_choice
-  clear
-  echo "╔══════════════════════════════════════════════════╗"
-  echo "║          OpenClaw 初始化配置向导                  ║"
-  echo "╚══════════════════════════════════════════════════╝"
-  echo ""
-  echo "  OpenClaw 2026.6 采用多Agent多模型架构："
-  echo "  编排器Agent(本地轻量模型) 智能分类任务 →"
-  echo "  派发到专业子Agent(各绑定专用模型)执行"
-  echo ""
-  tier=$(openclaw_detect_hardware_tier 2>/dev/null || echo "entry-cpu")
-  echo "  🔍 检测到硬件分级: $tier"
-  echo ""
-  echo "  推荐方案:"
-  echo "  1) 均衡本地版 - 全本地模型，隐私安全"
-  echo "  2) 云端增强版 - 本地+云端混合，强推理能力"
-  echo "  3) 新手安全版 - 最小配置，快速启动"
-  echo "  4) 跳过向导，直接部署多Agent架构"
-  echo ""
-  read -e -p "  请选择方案 [1-4]: " profile_choice
-  case "$profile_choice" in
-    1) openclaw_memory_apply_quick_profile "balanced-local"
-       echo "✅ 均衡本地版已部署"; break_end ;;
-    2) openclaw_memory_apply_quick_profile "cloud-power"
-       echo "✅ 云端增强版已部署"; break_end ;;
-    3) openclaw_memory_apply_quick_profile "beginner-safe"
-       echo "✅ 新手安全版已部署"; break_end ;;
-    4) openclaw_apply_multi_agent_architecture "true"
-       echo "✅ 多Agent架构已部署"; break_end ;;
-    *) echo "⚠️ 无效选择，跳过向导"; break_end ;;
-  esac
 }
 
 openclaw_memory_quick_profile_label() {
@@ -23943,7 +16807,7 @@ openclaw_full_local_ai_stack_menu() {
     skpl_ui_section "操作"
     skpl_ui_menu_item 1 "安装 Ollama 运行时" "仅安装运行时，systemd 或 ollama serve 会自动尝试拉起"
     skpl_ui_menu_item 2 "拉取文本模型" "qwen2.5:7b，适合通用对话与工具调用"
-    skpl_ui_menu_item 3 "拉取代码模型" "qwen2.5-coder:1.5b，适合开发辅助"
+    skpl_ui_menu_item 3 "拉取代码模型" "qwen3-coder，适合开发辅助"
     skpl_ui_menu_item 4 "拉取视觉模型" "gemma3:4b，适合多模态任务"
     skpl_ui_menu_item 5 "应用推荐本地模型配置" "把文本、代码、视觉默认模型写入 OpenClaw 配置"
     skpl_ui_menu_item 6 "一键完整本地落地" "安装运行时、拉取推荐模型、启用本地检索并执行验收"
@@ -23972,9 +16836,9 @@ openclaw_memory_strategy_panel() {
     openclaw_memory_extension_render_status
     echo
     skpl_ui_section "主入口"
-    skpl_ui_menu_item 1 "记忆总开关" "进入开关设置页面选择开启或关闭"
+    skpl_ui_menu_item 1 "记忆总开关" "一键开启或关闭整个记忆系统"
     skpl_ui_menu_item 2 "记忆类型设置" "短期、中期、长期和知识库记忆参数"
-    skpl_ui_menu_item 3 "长期记忆管理" "查看、筛选、编辑、删除、批量删除和清空长期记忆条目"
+    skpl_ui_menu_item 3 "记忆查看与管理" "查看、筛选、编辑、删除、批量删除和清空记忆"
     skpl_ui_menu_item 4 "记忆导入导出" "JSON 导入导出，以及完整备份恢复"
     skpl_ui_menu_item 5 "隐私与安全设置" "本地 only、自动脱敏、加密和禁止关键词"
     skpl_ui_menu_item 6 "高级设置" "推荐方案、本地检索、同步资源、完整本地 AI 栈和验收报告"
@@ -23991,7 +16855,7 @@ openclaw_memory_strategy_panel() {
         while true; do
           clear
           skpl_ui_header "高级设置" "这里放完整能力，平时可以不用进入"
-          skpl_ui_menu_item 1 "选择推荐方案" "系统自动推荐并落地记忆方案，适合大多数用户"
+          skpl_ui_menu_item 1 "一键启用推荐记忆" "系统自动推荐并落地记忆方案，适合大多数用户"
           skpl_ui_menu_item 2 "重新应用当前记忆方案" "按当前配置重新落地记忆、检索和相关策略"
           skpl_ui_menu_item 3 "本地检索与索引" "仅处理 embedding、SQLite/LanceDB 和索引"
           skpl_ui_menu_item 4 "同步与资源" "查看混合记忆同步、硬件分级、资源预算和运行提示"
@@ -24003,7 +16867,7 @@ openclaw_memory_strategy_panel() {
           skpl_ui_menu_item 10 "完整本地 AI 栈" "安装 Ollama 运行时和本地文本、代码、视觉模型"
           skpl_ui_menu_item 11 "兼容增强工具" "调用旧记忆方案里的自动推荐、QMD 轻量兼容、源诊断和索引修复"
           skpl_ui_menu_item 12 "EvoMap 管理" "安装、更新、同步与经验目录管理"
-          skpl_ui_menu_item 13 "完整 AI 栈验收报告" "查看包括记忆方案在内的整体 AI 栈验收状态"
+          skpl_ui_menu_item 13 "记忆验收报告" "查看当前记忆方案是否已经落地生效"
           skpl_ui_menu_item 14 "用户行为反馈" "查看隐式反馈统计与行为分析"
           skpl_ui_menu_item 15 "主动学习与知识补全" "检测知识缺口、生成学习建议"
           skpl_ui_menu_item 0 "返回上一级"
@@ -24359,20 +17223,6 @@ print(count)
 PY
 }
 
-# 全缓存配额强制执行 — 清理所有缓存目录至配置限额
-openclaw_ai_stack_cache_cleanup_all() {
-  openclaw_ai_stack_prepare
-  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_ROUTE_CACHE_DIR}" 128
-  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_SEMANTIC_CACHE_DIR}" 256
-  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_RESULT_CACHE_DIR}" 512
-  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_TOOL_CACHE_DIR}" 128
-  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_CODE_CACHE_DIR}" 128
-  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_MULTIMODAL_CACHE_DIR}" 128
-  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_PREDICTIVE_CACHE_DIR}" 256
-  openclaw_ai_stack_cache_enforce_quota "${SKPL_AI_STACK_ENCRYPTED_CACHE_DIR}" 64
-  return 0
-}
-
 openclaw_memory_extension_extract_fact() {
   local raw_text="$1"
   [ -z "$raw_text" ] && return 0
@@ -24669,7 +17519,7 @@ openclaw_memory_extension_menu() {
   openclaw_memory_deep_status() {
     echo "正在探测嵌入模型就绪状态..."
     if openclaw_memory_cli_supported; then
-      timeout 15 openclaw memory status --deep 2>/dev/null || true
+      timeout 15 openclaw memory status --deep
     else
       echo "ℹ️ 当前 OpenClaw 版本未提供 memory CLI，无法执行深度状态探测。"
       openclaw_memory_render_basic_status
@@ -24957,10 +17807,10 @@ print(json.dumps(data, indent=2))
     skpl_ui_kv "宿主机审批" "~/.openclaw/exec-approvals.json"
     skpl_ui_rule "$gl_hui" "─" 60
     local current_profile current_sec current_ask current_elevated
-    current_profile=$(timeout 5 openclaw config get tools.profile 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//' || true)
-    current_sec=$(timeout 5 openclaw config get tools.exec.security 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//' || true)
-    current_ask=$(timeout 5 openclaw config get tools.exec.ask 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//' || true)
-    current_elevated=$(timeout 5 openclaw config get tools.elevated.enabled 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//' || true)
+    current_profile=$(timeout 5 openclaw config get tools.profile 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+    current_sec=$(timeout 5 openclaw config get tools.exec.security 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+    current_ask=$(timeout 5 openclaw config get tools.exec.ask 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
+    current_elevated=$(timeout 5 openclaw config get tools.elevated.enabled 2>/dev/null | head -n 1 | sed 's/^"//;s/"$//')
     # 清理空值
     [ -z "$current_profile" ] || echo "$current_profile" | grep -qi "config path not found" && current_profile=""
     [ -z "$current_sec" ] || echo "$current_sec" | grep -qi "config path not found" && current_sec=""
@@ -24988,7 +17838,7 @@ print(json.dumps(data, indent=2))
     echo -e "\n${gl_huang}[底层 Exec Approvals 状态]${gl_bai}"
     if openclaw_has_command openclaw; then
       local approvals_json
-      approvals_json=$(timeout 5 openclaw approvals get --json 2>/dev/null || true)
+      approvals_json=$(timeout 5 openclaw approvals get --json 2>/dev/null)
       if [ -n "$approvals_json" ]; then
         python3 -c '
 import json, sys
@@ -25189,7 +18039,7 @@ except Exception as e:
     while true; do
       clear
       skpl_ui_header "权限管理" "策略、审批与白名单"
-      openclaw_permission_render_status || true
+      openclaw_permission_render_status
       echo
       skpl_ui_section "模式切换"
       skpl_ui_menu_item_tone 1 "标准安全模式" "日常推荐，弹卡片审批" "ok"
@@ -26285,7 +19135,7 @@ PY
         break_end
         ;;
       12) send_stats "健康检测与修复"
-        timeout 15 openclaw doctor --fix 2>/dev/null || true
+        openclaw doctor --fix
         send_stats "OpenClaw API同步触发"
         if sync_openclaw_api_models; then
           openclaw_ensure_gateway_ready || start_gateway
@@ -27169,7 +20019,7 @@ PY
     echo
     skpl_ui_section "操作"
     skpl_ui_menu_item 1 "设置默认文本模型" "如 ollama/qwen2.5:7b"
-    skpl_ui_menu_item 2 "设置默认代码模型" "如 ollama/qwen2.5-coder:1.5b"
+    skpl_ui_menu_item 2 "设置默认代码模型" "如 ollama/qwen3-coder"
     skpl_ui_menu_item 3 "设置默认视觉模型" "如 google/gemini-2.5-pro"
     skpl_ui_menu_item 4 "设置首选云提供商" "如 google, openai, anthropic"
     skpl_ui_menu_item 5 "设置成本优先级" "cost-first / balanced / quality-first"
