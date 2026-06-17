@@ -22054,21 +22054,27 @@ openclaw_multi_agent_pull_models() {
     return 1
   }
 
-  local pulled=0 failed=0
+  local pulled=0 failed=0 total_models=0
 
   _pull_if_needed() {
-    local label="$1" model="$2"
+    local label="$1" model="$2" pull_timeout="${3:-600}"
+    total_models=$((total_models + 1))
     if ollama list 2>/dev/null | grep -qF "$model"; then
       echo "   ✅ $label ($model) 已存在"
       return 0
     fi
-    echo "   ⬇️ 拉取 $label ($model)..."
-    if ollama pull "$model" >/dev/null 2>&1; then
+    echo "   ⬇️ [$((pulled + failed + 1))] 拉取 $label ($model)... (超时=${pull_timeout}秒)"
+    if timeout "$pull_timeout" ollama pull "$model" >/dev/null 2>&1; then
       echo "   ✅ $label 拉取成功"
       pulled=$((pulled + 1))
       return 0
     else
-      echo "   ⚠️ $label 拉取失败"
+      local rc=$?
+      if [ "$rc" -eq 124 ]; then
+        echo "   ⚠️ $label 拉取超时(>$pull_timeout 秒)，跳过"
+      else
+        echo "   ⚠️ $label 拉取失败(exit=$rc)，跳过"
+      fi
       failed=$((failed + 1))
       return 1
     fi
@@ -22102,7 +22108,11 @@ openclaw_multi_agent_pull_models() {
       ;;
   esac
 
-  echo "   模型拉取完成: $pulled 个成功, $failed 个失败"
+  echo "   模型拉取完成: $pulled 个成功, $failed 个失败 (共 $total_models 个)"
+  if [ "$failed" -gt 0 ]; then
+    echo "   ⚠️ 部分模型拉取失败不影响 Agent 创建，Agent 会使用已下载的模型"
+    echo "   📌 后续可在「OpenClaw 面板 → 模型管理 → 拉取推荐模型」中手动重试"
+  fi
   [ "$failed" -eq 0 ] && return 0 || return 1
 }
 
@@ -22534,11 +22544,11 @@ openclaw_ollama_pull_model() {
     fi
     while [ "$_om_pull_retry" -le 2 ]; do
       if [ "$_om_proxy_bypass" = "true" ]; then
-        _om_pull_err=$(env HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" ollama pull "$model_name" 2>&1)
+        _om_pull_err=$(timeout 600 env HTTP_PROXY="" HTTPS_PROXY="" ALL_PROXY="" ollama pull "$model_name" 2>&1)
       elif [ -n "$_om_proxy" ]; then
-        _om_pull_err=$(env HTTP_PROXY="$_om_proxy" HTTPS_PROXY="$_om_proxy" ollama pull "$model_name" 2>&1)
+        _om_pull_err=$(timeout 600 env HTTP_PROXY="$_om_proxy" HTTPS_PROXY="$_om_proxy" ollama pull "$model_name" 2>&1)
       else
-        _om_pull_err=$(ollama pull "$model_name" 2>&1)
+        _om_pull_err=$(timeout 600 ollama pull "$model_name" 2>&1)
       fi
       _om_pull_rc=$?
       [ "$_om_pull_rc" -eq 0 ] && break
