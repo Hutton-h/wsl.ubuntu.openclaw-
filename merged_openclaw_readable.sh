@@ -21469,48 +21469,53 @@ PY
 # ── 生成多Agent OpenClaw配置并写入 ──
 openclaw_write_multi_agent_config() {
   local tier="$1" cloud_model="${2:-}" force="${3:-false}"
-  local config_file tmp_json matrix_json agent_json orchestrator_model orchestrator_label
+  local config_file matrix_json agent_json orchestrator_model
   config_file=$(openclaw_get_config_file)
 
   echo "🧠 正在按硬件分级 [$tier] 生成多Agent多模型架构..."
   [ -n "$cloud_model" ] && echo "   ☁️ 云端增强: $cloud_model"
 
   matrix_json=$(openclaw_multi_agent_capability_matrix "$tier" "$cloud_model" 2>/dev/null)
-  if [ -z "$matrix_json" ] || [ "$matrix_json" = "null" ]; then
-    echo "⚠️ 能力矩阵生成失败，使用默认 entry-cpu"
-    matrix_json=$(openclaw_multi_agent_capability_matrix "entry-cpu" 2>/dev/null)
-  fi
+  [ -z "$matrix_json" ] && matrix_json=$(openclaw_multi_agent_capability_matrix "entry-cpu" 2>/dev/null)
 
   orchestrator_model=$(echo "$matrix_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['orchestrator']['model'])")
-  orchestrator_label=$(echo "$matrix_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['orchestrator']['label'])")
-
-  # 提取agent列表为JSON
   agent_json=$(echo "$matrix_json" | python3 -c "import json,sys; d=json.load(sys.stdin); print(json.dumps(d['agents'], ensure_ascii=False))")
 
-  # JSON5 safe
-  tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-  openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-
-  # 写入多Agent配置到 openclaw.json
-  python3 - "$config_file" "$tmp_json" "$matrix_json" "$agent_json" "$orchestrator_model" "$tier" "$force" "$cloud_model" <<'PY'
-import json, sys
+  # ===== 增量安全写入（Python 重写，正则JSON5解析 + 增量合并 + 原子写入） =====
+  python3 - "$config_file" "$matrix_json" "$agent_json" "$orchestrator_model" "$tier" "$force" "$cloud_model" <<'PY'
+import json, re, sys, os, tempfile, shutil
 from pathlib import Path
 
 out_path = Path(sys.argv[1])
-cfg_path = Path(sys.argv[2])
-matrix = json.loads(sys.argv[3])
-agent_list = json.loads(sys.argv[4])
-orch_model = sys.argv[5]
-tier = sys.argv[6]
-force = sys.argv[7] == 'true'
-cloud_model = sys.argv[8].strip() if len(sys.argv) > 8 else ''
+matrix = json.loads(sys.argv[2])
+agent_list = json.loads(sys.argv[3])
+orch_model = sys.argv[4]
+tier = sys.argv[5]
+force = sys.argv[6] == 'true'
+cloud_model = sys.argv[7].strip()
 
+# 1. 安全读取原配置（正则修复JSON5，绝不丢数据）
 cfg = {}
-if cfg_path.exists() and cfg_path.stat().st_size > 0:
-    try: cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
-    except: pass
+if out_path.exists():
+    raw = out_path.read_text(encoding='utf-8')
+    raw = re.sub(r',\s*([}\]])', r'\1', raw)
+    raw = re.sub(r'/\*.*?\*/', '', raw, flags=re.DOTALL)
+    lines = []
+    for line in raw.split('\n'):
+        if '//' in line and not ('http://' in line or 'https://' in line):
+            line = re.sub(r'//.*$', '', line)
+        lines.append(line)
+    raw = '\n'.join(lines)
+    try:
+        cfg = json.loads(raw) if raw.strip() else {}
+    except Exception as e:
+        print(f"⚠️ 原配置解析失败，将新建（危险！请检查备份）: {e}", file=sys.stderr)
+        cfg = {}
 
-# ── 1. gateway 基础配置 ──
+if not isinstance(cfg, dict):
+    cfg = {}
+
+# 2. 初始化各层
 gw = cfg.setdefault('gateway', {})
 gw.setdefault('mode', 'local')
 gw['bind'] = 'loopback'
@@ -21518,13 +21523,10 @@ gw.setdefault('port', 18789)
 gw.setdefault('auth', {})['mode'] = 'token'
 gw.pop('controlUi', None)
 
-# ── 2. tools 全局配置 ──
 tools = cfg.setdefault('tools', {})
-tools.pop('global', None)  # 清理旧无效字段
-tools_cfg = matrix.get('toolsProfile', 'coding')
-tools.setdefault('profile', tools_cfg)
+tools.pop('global', None)
+tools.setdefault('profile', matrix.get('toolsProfile', 'coding'))
 
-# ── 3. models providers (Ollama) ──
 providers = cfg.setdefault('models', {}).setdefault('providers', {})
 ollama_prov = providers.setdefault('ollama', {})
 ollama_prov['baseUrl'] = ollama_prov.get('baseUrl') or 'http://127.0.0.1:11434'
@@ -21532,62 +21534,37 @@ ollama_prov['apiKey'] = ollama_prov.get('apiKey') or 'ollama-local'
 ollama_prov['api'] = 'ollama'
 ollama_prov.setdefault('timeoutSeconds', 300)
 
-# 收集所有需要的模型
-all_models = set()
+# 3. 补全缺失的云 Provider（防止验证报错，不覆盖已有真实配置）
+if cloud_model and '/' in cloud_model and not cloud_model.startswith('ollama/'):
+    p = cloud_model.split('/')[0]
+    if p not in providers:
+        providers[p] = {"baseUrl": "https://" + p + ".com/v1", "apiKey": "CHANGE_ME", "api": "openai-completions", "models": []}
+
+# 4. 注册所有本地模型到 ollama provider
+all_models = {orch_model}
 for a in agent_list:
     all_models.add(a['model'])
-all_models.add(orch_model)
-
-# 写入model entries
-existing_models = ollama_prov.setdefault('models', [])
-existing_ids = {m['id'] if isinstance(m, dict) else m for m in existing_models}
+existing_ids = {m['id'] if isinstance(m, dict) else m for m in ollama_prov.get('models', [])}
 for m in all_models:
-    if '/' not in m:
-        # ollama local model
+    if '/' not in m:  # ollama local
         if m not in existing_ids:
-            existing_models.append({'id': m, 'name': m, 'input': ['text']})
+            ollama_prov.setdefault('models', []).append({'id': m, 'name': m, 'input': ['text']})
     else:
-        # cloud model: create entry in its provider
-        provider_name, model_name = m.split('/', 1)
-        if provider_name != 'ollama':
-            # ensure provider exists, don't overwrite existing config
-            cloud_prov = providers.setdefault(provider_name, {})
-            if cloud_prov.get('models') is None:
-                cloud_prov['models'] = []
-            cloud_existing = cloud_prov['models']
-            cloud_existing_ids = {entry['id'] if isinstance(entry, dict) else entry for entry in cloud_existing}
-            if model_name not in cloud_existing_ids:
-                cloud_existing.append({'id': model_name, 'name': model_name, 'input': ['text']})
-            # Keep existing provider config (apiKey, baseUrl etc.)
-        else:
-            # ollama model with provider prefix
-            model_name = m.split('/', 1)[1]
-            if model_name not in existing_ids:
-                existing_models.append({'id': model_name, 'name': model_name, 'input': ['text']})
+        p, mn = m.split('/', 1)
+        if p != 'ollama' and p in providers:
+            p_models = providers[p].setdefault('models', [])
+            p_existing = {item['id'] if isinstance(item, dict) else item for item in p_models}
+            if mn not in p_existing:
+                p_models.append({'id': mn, 'name': mn, 'input': ['text']})
 
-# ── 4. agents.defaults ──
-agents_cfg = cfg.setdefault('agents', {})
-defaults = agents_cfg.setdefault('defaults', {})
-
-# 编排器 = 主Agent
+# 5. 构建 agents.defaults
+defaults = cfg.setdefault('agents', {}).setdefault('defaults', {})
 defaults.setdefault('model', {})['primary'] = orch_model
 defaults.setdefault('workspace', '~/.openclaw/workspace')
-subagents = defaults.setdefault('subagents', {})
-subagents.setdefault('model', {})['primary'] = orch_model
-# sessions_spawn 运行时约束
-subagents.setdefault('maxSpawnDepth', 2)
-subagents.setdefault('maxChildrenPerAgent', 5)
-subagents.setdefault('maxConcurrent', 8)
-subagents.setdefault('runTimeoutSeconds', 900)
-subagents.setdefault('delegationMode', 'prefer')
-
-# memorySearch
+sub = defaults.setdefault('subagents', {})
+sub.update({'maxSpawnDepth': 2, 'maxChildrenPerAgent': 5, 'maxConcurrent': 8, 'runTimeoutSeconds': 900, 'delegationMode': 'prefer'})
 ms = matrix.get('memorySearch', {})
-memory_search = defaults.setdefault('memorySearch', {})
-memory_search['provider'] = ms.get('provider', 'ollama')
-memory_search['model'] = ms.get('model', 'qwen2.5:7b')
-
-# models allowlist
+defaults.setdefault('memorySearch', {}).update({'provider': ms.get('provider', 'ollama'), 'model': ms.get('model', 'qwen2.5:7b')})
 allowlist = defaults.setdefault('models', {})
 allowlist[orch_model] = {}
 for a in agent_list:
@@ -21598,387 +21575,143 @@ multimodal_agents = [a for a in agent_list if 'multimodal' in a.get('id', '')]
 if multimodal_agents:
     defaults.setdefault('imageModel', {})['primary'] = multimodal_agents[0]['model']
 
-# ── 5. agents.list (多Agent定义) ──
-agent_configs = agents_cfg.setdefault('list', [])
+# 6. 构建 agents.list（增量合并，保留原列表）
+agent_configs = cfg.setdefault('agents', {}).setdefault('list', [])
+existing_agent_ids = {a.get('id') for a in agent_configs if 'id' in a}
 
-# 5a. 编排器Agent (main, default)
-orch_entry = None
-for entry in agent_configs:
-    if entry.get('id') == 'main':
-        orch_entry = entry
-        break
-if orch_entry is None:
-    orch_entry = {'id': 'main'}
-    agent_configs.insert(0, orch_entry)
+# 确保 main 存在
+main_entry = next((a for a in agent_configs if a.get('id') == 'main'), None)
+if not main_entry:
+    main_entry = {'id': 'main', 'default': True}
+    agent_configs.insert(0, main_entry)
+main_entry['model'] = {'primary': orch_model}
+main_entry['workspace'] = '~/.openclaw/workspace'
+main_entry['default'] = True
+main_entry['sandbox'] = {'mode': 'off'}
+main_entry['tools'] = {'allow': ['sessions_spawn', 'read']}
+main_entry['subagents'] = {'delegationMode': 'prefer', 'maxSpawnDepth': 2}
 
-orch_entry['model'] = {'primary': orch_model}
-orch_entry.setdefault('workspace', '~/.openclaw/workspace')
-orch_entry['default'] = True
-orch_entry['sandbox'] = {'mode': 'off'}
-# Supervisor 架构：main Agent 只做控制流，通过 sessions_spawn 派发子Agent
-orch_entry['tools'] = {"allow": ["sessions_spawn", "read"]}
-orch_entry['subagents'] = {"delegationMode": "prefer", "maxSpawnDepth": 2}
-
-# 5b. 各专业Agent
-existing_agent_ids = {a['id'] for a in agent_configs if 'id' in a}
+# 7. 添加/更新子Agent（仅当 force 或不存在时）
 for a in agent_list:
     aid = a['id']
-    if aid in existing_agent_ids and not force:
-        continue  # 已存在且非强制模式，跳过
     if aid == 'main':
         continue
-
-    entry = None
-    for e in agent_configs:
-        if e.get('id') == aid:
-            entry = e
-            break
-    if entry is None:
+    if aid in existing_agent_ids and not force:
+        continue
+    entry = next((e for e in agent_configs if e.get('id') == aid), None)
+    if not entry:
         entry = {'id': aid}
         agent_configs.append(entry)
-
     entry['model'] = {'primary': a['model']}
     entry['label'] = a.get('label', aid)
-    entry['workspace'] = f'~/.openclaw/agents/{aid}'
-    # 工具裁剪（OpenClaw 标准格式）
-    tools_cfg = a.get('tools', {})
-    if isinstance(tools_cfg, dict):
-        entry['tools'] = tools_cfg
-    # 子Agent派发策略（仅 model + delegatioMode，其余约束在 defaults.subagents）
-    sub = entry.setdefault('subagents', {})
-    sub.setdefault('model', {})['primary'] = a['model']
-    sub_cfg = a.get('subagents', {})
-    sub['delegationMode'] = sub_cfg.get('delegationMode', 'suggest')
+    entry['workspace'] = f'~/.openclaw/agents/{aid}/workspace'
+    entry['tools'] = a.get('tools', {'allow': ['read']})
+    entry.setdefault('subagents', {})['delegationMode'] = a.get('subagents', {}).get('delegationMode', 'suggest')
 
-# ── 6. 原子写入 ──
-import tempfile, os, shutil
+# 8. 原子写入（先写临时文件再替换，断电也不损坏原文件）
 out_path.parent.mkdir(parents=True, exist_ok=True)
-# 先写入临时文件，再原子重命名，防止写入中断导致空文件
-tmp_fd, tmp_path = tempfile.mkstemp(dir=str(out_path.parent), prefix='.openclaw_tmp_', suffix='.json')
+fd, tmp = tempfile.mkstemp(dir=str(out_path.parent), prefix='.openclaw_tmp_', suffix='.json')
 try:
-    with os.fdopen(tmp_fd, 'w', encoding='utf-8') as f:
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
         f.write('\n')
-    # 备份旧配置（如果存在且不是空文件）
+    # 备份旧配置
     if out_path.exists() and out_path.stat().st_size > 10:
         bak_path = Path(str(out_path) + '.pre-multi-agent.bak')
         shutil.copy2(out_path, bak_path)
-    # 原子替换
-    shutil.move(tmp_path, str(out_path))
-    print(f"✅ 配置已原子写入: {out_path} ({out_path.stat().st_size} bytes)")
+    shutil.move(tmp, str(out_path))
+    print(f"✅ 配置已安全写入: {out_path} ({out_path.stat().st_size} bytes)")
 except Exception as e:
-    try: os.unlink(tmp_path)
+    try: os.unlink(tmp)
     except: pass
-    print(f"❌ 配置写入失败: {e}", file=sys.stderr)
+    print(f"❌ 写入失败: {e}", file=sys.stderr)
     sys.exit(1)
 
 # 打印摘要
 print(f"✅ 编排器Agent [main] → {orch_model} (可派发子Agent)")
 for a in agent_list:
-    tools = a.get('tools', {}).get('allow', ['read']) if isinstance(a.get('tools'), dict) else ['read']
-    tools_str = '、'.join(tools)
-    depth = a.get('subagents', {}).get('maxSpawnDepth', 0)
-    spawn_tag = '可派发' if depth > 0 else '仅执行'
+    tools_list = a.get('tools', {}).get('allow', ['read']) if isinstance(a.get('tools'), dict) else ['read']
+    tools_str = '、'.join(tools_list)
+    spawn_tag = '可派发' if a.get('subagents', {}).get('delegationMode') in ('prefer', 'always') else '仅执行'
     print(f"   专业Agent [{a['id']}] → {a['model']} ({a.get('label','')}, 权限:[{tools_str}], {spawn_tag})")
 PY
-  rm -f "$tmp_json"
 
-  # ── 7. 写编排器 System Prompt ──
+  # 9. 写入各 Agent System Prompt（包含 Supervisor DAG 和通信协议）
   local orch_prompt_dir="$HOME/.openclaw/agents/main"
   mkdir -p "$orch_prompt_dir"
-  local orch_prompt
-  orch_prompt=$(openclaw_orchestrator_system_prompt "$agent_json" 2>/dev/null)
-  printf '%s\n' "$orch_prompt" > "$orch_prompt_dir/AGENTS.md"
+  cat > "$orch_prompt_dir/AGENTS.md" <<'EOF'
+你是 **OpenClaw V3 Supervisor Agent**，唯一控制中心。
+
+## 架构原则
+- 本地模型 = 控制流（分类、路由、调度）
+- 云端模型 = 计算流（复杂推理、代码生成）
+- 你只做控制，不直接执行计算。
+
+## 任务 DAG 生成规范（复杂任务必须执行）
+对于复杂任务，第一步始终派发给 `planner-agent` 生成 Task DAG，格式如下：
+```json
+{
+  "tasks": [
+    {"id": "t1", "description": "...", "dependencies": [], "assignedAgent": "..."},
+    {"id": "t2", "description": "...", "dependencies": ["t1"], "assignedAgent": "..."}
+  ]
+}
+```
+然后按依赖顺序派发任务。
+
+## 通信协议（必须遵守）
+派发子 Agent 时，通过 sessions_spawn 传递 JSON 结构：
+```json
+{
+  "from": "supervisor",
+  "to": "agent-id",
+  "taskId": "t1",
+  "action": "execute",
+  "payload": {"description": "...", "context": "..."}
+}
+```
+子 Agent 必须返回：
+```json
+{
+  "from": "agent-id",
+  "to": "supervisor",
+  "taskId": "t1",
+  "status": "done",
+  "result": "..."
+}
+```
+
+## Agent 生命周期
+子 Agent 按 init → plan → act → reflect → report 流程响应。
+
+## 可用 Agent
+- **planner-agent**：生成 Task DAG
+- **memory-agent**：检索/写入记忆
+- **tool-agent**：执行工具
+- **expert-code**：代码生成
+- **expert-verify**：质量验证（Critic）
+- 其他云端专家按需调用
+EOF
   echo "✅ 编排器 System Prompt 已写入 ~/.openclaw/agents/main/AGENTS.md"
 
-  # ── 8. 写各专业Agent/Expert 的 System Prompt（V3角色专用）──
-  # V3 架构: 本地Agent（控制流）+ 云端Expert（计算流）
+  # 10. 为其他子 Agent 写入默认 AGENTS.md（若不存在）
   python3 - "$HOME/.openclaw/agents" "$agent_json" <<'PY'
 import json, sys, os
 from pathlib import Path
 base = Path(sys.argv[1])
 agents = json.loads(sys.argv[2])
-
-# ── 各绑定类型的专用 System Prompt ──
-PROMPTS = {
-    "memory": """你是 Memory Agent（记忆管理Agent），专门负责记忆系统的所有操作。
-
-## 你的职责
-1. **记忆检索**：根据查询从混合记忆系统（STM/MTM/LTM）检索相关信息
-2. **记忆写入**：将重要信息写入长期记忆
-3. **记忆压缩**：对冗长记忆做概括压缩，节省存储空间
-4. **记忆评分**：评估每条记忆的重要性和相关性
-5. **记忆淘汰**：移除低重要性/过时的记忆
-
-## 工作规则
-- 只检索和操作记忆，不做推理、不写代码、不回答领域问题
-- 返回时带上记忆ID和来源标注，方便 Supervisor 溯源
-- 如果未找到相关记忆，明确说"未找到"，不要编造
-- 你是子Agent，收到任务→执行→返回，不主动发起对话""",
-
-    "planner": """你是 Planner Agent（任务规划Agent），专门负责多步骤任务的分解和规划。
-
-## 你的职责
-1. **任务分解**：将大任务拆解为可执行的小步骤
-2. **步骤规划**：为每个步骤指定执行顺序和依赖关系
-3. **依赖分析**：识别步骤间的前置条件和数据依赖
-4. **风险预测**：预测可能的阻塞点和失败风险
-
-## 输出格式
-```
-## 任务分解
-1. [步骤1描述] → 依赖: 无 → 建议Agent: xxx
-2. [步骤2描述] → 依赖: 步骤1 → 建议Agent: xxx
-3. [步骤3描述] → 依赖: 步骤2 → 建议Agent: xxx
-
-## 风险提示
-- 潜在风险1: 说明
-- 潜在风险2: 说明
-```
-
-## 工作规则
-- 只做规划，不执行任何步骤
-- 不写代码，不操作文件，不做具体实现
-- 规划后返回给 Supervisor，由 Supervisor 决定执行
-- 你是子Agent，收到任务→规划→返回，不主动发起对话""",
-
-    "tool": """你是 Tool Agent（工具编排Agent），专门负责任务中涉及的所有工具调用。
-
-## 你的职责
-1. **工具选择**：根据任务选择最合适的工具（MCP/Shell/Filesystem/Browser）
-2. **工具编排**：如果任务需要多个工具，编排调用顺序
-3. **工具执行**：实际执行工具调用
-4. **错误处理与重试**：执行失败时分析原因并重试
-5. **结果格式化**：将工具输出整理为可读格式
-
-## 可用工具
-- 文件读写（read, write, edit）
-- Shell执行（exec）
-- 浏览器访问（browser）
-- MCP工具（通过MCP协议调用外部服务）
-- 进程管理（process）
-
-## 工作规则
-- 你只执行工具调用，不做推理/规划/代码生成
-- 只要工具链能完成的事，都交给你
-- 执行失败时先分析原因再重试（最多3次）
-- 返回结构化结果，带上成功/失败状态
-- 你是子Agent，收到任务→执行→返回，不主动发起对话""",
-
-    "code": """你是 Code Expert（代码专家），运行在云端大模型上，专门处理复杂代码任务。
-
-## 你的职责
-1. 复杂代码生成（完整项目、系统模块、算法实现）
-2. 代码审查和优化建议
-3. 系统开发和重构
-4. 调试和错误分析
-
-## 工作规则
-- 你运行在云端大模型上（Claude/GPT/DeepSeek等），能力远超本地模型
-- 生成的代码要完整可运行，有清晰注释
-- 复杂项目要分文件组织，给出目录结构
-- 代码要健壮，处理好边界条件和错误
-- 你是子Expert，收到任务→完成→返回，不主动发起对话
-- 不要继续派发子Agent，你是计算层，不是控制层""",
-
-    "architecture": """你是 Architecture Expert（架构专家），专门负责系统架构设计。
-
-## 你的职责
-1. 系统架构设计（整体架构、微服务拆分、数据流设计）
-2. 技术选型和方案对比
-3. API设计和数据库设计
-4. 性能/可扩展性/安全性架构考量
-
-## 工作规则
-- 设计方案要全面：架构图（文字描述）、组件说明、数据流、接口定义
-- 给出选型理由，列出各方案的优缺点
-- 考虑生产环境的实际约束（成本、运维、团队能力等）
-- 你是子Expert，收到任务→完成→返回，不主动发起对话
-- 不要继续派发子Agent""",
-
-    "research": """你是 Research Expert（调研专家），专门负责信息调研和资料分析。
-
-## 你的职责
-1. 技术调研和资料收集
-2. 竞品分析和市场研究
-3. 技术评估和方案推荐
-4. 行业报告生成
-
-## 工作规则
-- 调研结果要客观，标注信息来源
-- 对比分析要量化，给出具体数据和指标
-- 建议要基于调研事实，不要凭空给出
-- 你是子Expert，收到任务→完成→返回，不主动发起对话""",
-
-    "security": """你是 Security Expert（安全专家），专门负责安全审计和风险评估。
-
-## 你的职责
-1. 安全审计（代码审查、配置检查、权限审计）
-2. 风险评估和威胁建模
-3. 漏洞分析和防护建议
-4. 合规检查（GDPR/SOC2/等保）
-
-## 工作规则
-- 审计要全面，覆盖OWASP Top 10常见漏洞
-- 风险评估按严重性分级（Critical/High/Medium/Low）
-- 每个风险都要给出具体修复方案
-- 注重实用，推荐的方案要可落地
-- 你是子Expert，收到任务→完成→返回，不主动发起对话""",
-
-    "verification": """你是 Verification Expert（校验专家），专门负责事实核查和结果验证。
-
-## 你的职责
-1. 事实核查（验证内容的准确性和真实性）
-2. 结果验证（检查输出是否符合预期）
-3. 质量检查（代码质量、文档质量、数据质量）
-4. 信息校准（修正错误和不一致）
-
-## 工作规则
-- 校验要严格，逐条验证，不放过任何疑点
-- 发现错误时标注具体位置和修正建议
-- 如果内容有争议，同时列出正反面观点
-- 你是系统的最后一道质量关卡
-- 你是子Expert，收到任务→完成→返回，不主动发起对话
-- 不要继续派发子Agent""",
-
-    "writing": """你是 Writing Expert（写作专家），专门处理各种文档和内容创作。
-
-## 你的职责
-1. 长篇文档撰写（技术文档、用户手册、设计文档）
-2. 文案创作和优化（报告、邮件、宣传文）
-3. 翻译和校对
-4. 内容润色和排版
-
-## 工作规则
-- 写作风格根据场景调整：技术文档要严谨，宣传文案要有感染力
-- 结构清晰，使用标题和列表提高可读性
-- 中英文混合场景下注意语言一致性
-- 如果是翻译，保持原文语义的同时让译文自然
-- 你是子Expert，收到任务→完成→返回，不主动发起对话""",
-
-    "reasoning": """你是 Reasoning Expert（推理专家），专门处理深度推理和逻辑分析。
-
-## 你的职责
-1. 深度推理和逻辑分析
-2. 数学证明和公式推导
-3. 策略分析和决策推演
-4. 复杂问题的系统性分析
-
-## 工作规则
-- 推理过程要完整展示，不要跳过关键步骤
-- 逻辑链要清晰，每一步都要有依据
-- 多角度分析，不要局限于单一视角
-- 如果存在多种可能，列出所有分支
-- 你是子Expert，收到任务→完成→返回，不主动发起对话""",
-
-    "data": """你是 Data Expert（数据专家），专门处理数据分析和统计。
-
-## 你的职责
-1. 数据分析（统计分析、趋势分析、异常检测）
-2. SQL编写和优化
-3. ETL流程设计
-4. 数据可视化和统计建模
-
-## 工作规则
-- 分析结果要有数据支撑，给出具体数值
-- SQL要写完整的可执行语句
-- 数据可视化要给出具体的图表类型建议
-- 发现了异常或interesting模式要明确指出
-- 你是子Expert，收到任务→完成→返回，不主动发起对话""",
-
-    "vision": """你是 Vision Expert（视觉专家），专门处理图像和多模态分析。
-
-## 你的职责
-1. 图像分析和理解
-2. 图纸/设计稿解读
-3. OCR（文字识别）
-4. 视觉场景理解和描述
-5. 多模态综合分析
-
-## 工作规则
-- 分析结果要具体描述，不只是标签化
-- 图纸解读要标注关键元素和尺寸关系
-- OCR结果保持原文格式和顺序
-- 不确定时需要说明，给出置信度
-- 你是子Expert，收到任务→完成→返回，不主动发起对话""",
-}
-
 for a in agents:
     aid = a['id']
     if aid == 'main':
-        # main Agent 的 AGENTS.md 由 orchestrator 专门生成，跳过此处
         continue
-    atype = a.get('type', '')
-    binding = a.get('binding', '')
     adir = base / aid
     adir.mkdir(parents=True, exist_ok=True)
-    caps = '、'.join(a.get('capabilities', []))
-    tools_cfg = a.get('tools', {})
-    if isinstance(tools_cfg, dict):
-        tools_str = '、'.join(tools_cfg.get('allow', ['read']))
-    else:
-        tools_str = 'read'
-    max_tokens = a.get('maxTokens', 2048)
-
-    # ── 选择专用Prompt（按binding匹配） ──
-    prompt = None
-    if binding and binding in PROMPTS:
-        prompt = PROMPTS[binding]
-    elif atype == 'local' and any(k in aid for k in ('memory','planner','tool')):
-        for k in ('memory','planner','tool'):
-            if k in aid and k in PROMPTS:
-                prompt = PROMPTS[k]
-                break
-
-    if prompt:
-        # 追加权限和token信息
-        prompt += f"\n\n## 权限信息\n- 可用工具: [{tools_str}]\n- 最大Token: {max_tokens}"
-    else:
-        # 兜底：泛用prompt
-        prompt = f"""你是 {a.get('label', aid)}，绑定模型 {a['model']}。
-
-## 能力范围
-{caps}
-
-## 工作规则
-- 仅处理能力范围内的问题
-- 超出能力范围时简洁说明，由Supervisor重新调度
-- 回答精准简洁
-- 你是子Agent/Expert，不主动发起对话
-- 可用工具: [{tools_str}]
-- 最大Token: {max_tokens}"""
-
-    (adir / 'AGENTS.md').write_text(prompt, encoding='utf-8')
-    pair = f'(绑定:{binding})' if binding else ''
-    print(f"✅ {a['label']} {pair} System Prompt → ~/.openclaw/agents/{aid}/AGENTS.md")
+    prompt_file = adir / 'AGENTS.md'
+    if not prompt_file.exists():
+        prompt_file.write_text(f"# {a.get('label', aid)}\n\n你是 {a.get('label', aid)}，绑定模型 {a['model']}。\n\n只处理能力范围内的问题，返回结构化 JSON。\n", encoding='utf-8')
 PY
 
-  echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  🧠 V3 Supervisor 多Agent架构部署完成"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  硬件分级: $tier"
-  echo "  Supervisor: main → $orchestrator_model（本地控制流）"
-  echo "  ─────────────────────────────────────────"
-  echo "  本地Agent (控制层):"
-  for entry_id in memory-agent planner-agent tool-agent; do
-    m=$(echo "$agent_json" | python3 -c "
-import json,sys
-agents=json.load(sys.stdin)
-for a in agents:
-    if a.get('id')=='$entry_id': print(a.get('model','')); break
-" 2>/dev/null)
-    [ -n "$m" ] && echo "    ├─ $entry_id → $m"
-  done
-  expert_count=$(echo "$agent_json" | python3 -c "import json,sys; print(sum(1 for a in json.load(sys.stdin) if a.get('type')=='cloud'))" 2>/dev/null || echo 0)
-  echo "  ─────────────────────────────────────────"
-  echo "  云端Expert (计算层):"
-  echo "    └─ Cloud Expert Pool: $expert_count 个专家"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo ""
-  echo "  💡 使用方式: 直接与 main Agent 对话即可"
-  echo "     Supervisor 本地控流 → 本地Agent/云端Expert 执行计算"
-  echo ""
+  echo "✅ 多Agent配置已增量更新（原 API Key 已保留）"
 }
 
 # ── 一键多Agent部署入口 ──
@@ -22041,6 +21774,23 @@ PY
 
   # ── 自动拉取多Agent所需的本地模型 ──
   openclaw_multi_agent_pull_models "$tier" || echo "⚠️ 部分模型拉取失败，将使用已有模型继续"
+
+  # ── 自动备份当前配置 ──
+  if [ -f "$config_file" ] && [ -s "$config_file" ]; then
+    local bak_file="$HOME/.openclaw/openclaw.json.bak.$(date +%s)"
+    cp "$config_file" "$bak_file" 2>/dev/null && echo "✅ 已备份配置到 $bak_file"
+  fi
+
+  # ===== 预创建所有 Agent 工作区 =====
+  echo "📁 创建 Agent 工作区目录..."
+  local agent_ids=("main" "planner-agent" "memory-agent" "tool-agent" "expert-code" "expert-arch" "expert-reasoning" "expert-research" "expert-security" "expert-verify" "expert-writing" "expert-data" "expert-vision")
+  for aid in "${agent_ids[@]}"; do
+    local ws_dir="$HOME/.openclaw/agents/${aid}/workspace"
+    mkdir -p "$ws_dir/memory"
+    touch "$ws_dir/MEMORY.md"
+    echo "   ✅ ${aid} 工作区已创建"
+  done
+  ln -sf "$HOME/.openclaw/workspace/skills" "$HOME/.openclaw/agents/main/workspace/skills" 2>/dev/null || true
 
   # 生成并写入多Agent配置
   openclaw_write_multi_agent_config "$tier" "$cloud_model" "$force_flag" || return 1
