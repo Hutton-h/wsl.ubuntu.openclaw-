@@ -22270,13 +22270,59 @@ openclaw_install_ollama_runtime() {
       return 0
     fi
     openclaw_ensure_ollama_install_tools || return 1
-    echo "⬇️ 正在安装 ollama 本地模型运行时..."
-    echo "   下载安装脚本（最多60秒）..."
-    if env HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-}}" HTTPS_PROXY="${HTTPS_PROXY:-${https_proxy:-}}" curl -fsSL --max-time 60 https://ollama.com/install.sh | sh; then
+
+    # ── 代理检测 ──
+    local _install_proxy _install_retry=0 _install_rc=0 _install_max_retry=2
+    _install_proxy=$(_openclaw_effective_proxy)
+    if [ -n "$_install_proxy" ] && _openclaw_proxy_is_alive "$_install_proxy"; then
+      echo "🌐 检测到代理 $_install_proxy，将使用代理加速下载"
+    elif [ -n "$_install_proxy" ]; then
+      echo "⚠️ 代理 $_install_proxy 不可达，将直连下载（可能较慢）"
+      _install_proxy=""
+    else
+      echo "💡 未检测到代理，直连 ollama.com 下载可能很慢"
+      echo "   如需加速，请先设置代理: export HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890"
+      echo "   然后重新运行本脚本"
+    fi
+    echo ""
+
+    # ── 带重试的下载安装 ──
+    while [ "$_install_retry" -le "$_install_max_retry" ]; do
+      if [ "$_install_retry" -gt 0 ]; then
+        echo "🔄 第 $_install_retry 次重试安装 ollama..."
+        sleep 3
+      else
+        echo "⬇️ 正在安装 ollama 本地模型运行时（二进制包约 1GB+，请耐心等待）..."
+      fi
+
+      if [ -n "$_install_proxy" ]; then
+        if env HTTP_PROXY="$_install_proxy" HTTPS_PROXY="$_install_proxy" \
+           curl -fsSL --max-time 120 https://ollama.com/install.sh | \
+           env HTTP_PROXY="$_install_proxy" HTTPS_PROXY="$_install_proxy" sh; then
+          _install_rc=0; break
+        else
+          _install_rc=$?
+        fi
+      else
+        if curl -fsSL --max-time 120 https://ollama.com/install.sh | sh; then
+          _install_rc=0; break
+        else
+          _install_rc=$?
+        fi
+      fi
+      _install_retry=$((_install_retry + 1))
+    done
+
+    if [ "$_install_rc" -eq 0 ]; then
       echo "✅ ollama 安装完成"
       openclaw_ensure_ollama_running || true
     else
-      echo "❌ ollama 安装失败，请检查网络后重试"
+      echo "❌ ollama 安装失败 (exit=$_install_rc)"
+      echo ""
+      echo "💡 手动安装方案:"
+      echo "   1. 设置代理后重试: export HTTP_PROXY=http://127.0.0.1:7890 && bash 本脚本"
+      echo "   2. 手动下载安装: curl -fsSL https://ollama.com/install.sh | sh"
+      echo "   3. 从 GitHub Releases 下载: https://github.com/ollama/ollama/releases"
       return 1
     fi
 }
