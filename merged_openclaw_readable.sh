@@ -21087,6 +21087,12 @@ if not isinstance(provider_models, list):
 ensure_model_entry(provider_models, {'id': 'qwen2.5:7b', 'name': 'qwen2.5:7b', 'input': ['text'], 'params': {'keep_alive': '15m', 'num_ctx': 8192}})
 ensure_model_entry(provider_models, {'id': 'gemma3:4b', 'name': 'gemma3:4b', 'input': ['text', 'image'], 'params': {'keep_alive': '15m', 'num_ctx': 4096, 'thinking': False}})
 ensure_model_entry(provider_models, {'id': 'qwen2.5-coder:1.5b', 'name': 'qwen2.5-coder:1.5b', 'input': ['text'], 'reasoning': True, 'params': {'keep_alive': '15m', 'num_ctx': 8192, 'thinking': False}})
+# 动态注册当前实际使用的模型（避免 hardcode 遗漏）
+for actual_model in (text_model, image_model, code_model):
+    if actual_model.startswith('ollama/'):
+        mid = actual_model.split('/', 1)[1]
+        if mid:
+            ensure_model_entry(provider_models, {'id': mid, 'name': mid, 'input': ['text']})
 
 cfg.setdefault('agents', {}).setdefault('defaults', {})
 defs = cfg['agents']['defaults']
@@ -21310,7 +21316,7 @@ for a in matrix["agents"]:
         a["subagents"] = {"delegationMode": "suggest", "maxSpawnDepth": 0}
 
 matrix["_meta"] = {
-    "expert_model_count": expert_model_count if 'expert_model_count' in dir() else len(experts),
+    "expert_model_count": expert_model_count if 'expert_model_count' in dir() else 0,
     "used_providers": used_providers_list if 'used_providers_list' in dir() else [],
 }
 print(json.dumps(matrix, ensure_ascii=False))
@@ -24156,6 +24162,26 @@ agents_defaults.setdefault('imageModel', {})['primary'] = profile['routing'].get
 agents_defaults.setdefault('models', {})
 agents_defaults['models'].setdefault(profile['routing']['defaultTextModel'], {})
 agents_defaults['models'].setdefault(profile['routing']['defaultCodeModel'], {})
+
+# 同步注册模型到 models.providers.ollama.models[]（否则 OpenClaw 会报 Unknown model）
+providers = cfg.setdefault('models', {}).setdefault('providers', {})
+ollama_provider = providers.setdefault('ollama', {})
+ollama_provider.setdefault('baseUrl', 'http://127.0.0.1:11434')
+ollama_models = ollama_provider.setdefault('models', [])
+if not isinstance(ollama_models, list):
+    ollama_models = []
+    ollama_provider['models'] = ollama_models
+# 收集所有在 agents.defaults.models 中引用的 ollama 模型并注册
+known_ollama_ids = {m.get('id', '') for m in ollama_models if isinstance(m, dict)}
+for model_ref in [profile['routing']['defaultTextModel'], profile['routing']['defaultCodeModel']]:
+    if model_ref.startswith('ollama/'):
+        mid = model_ref.split('/', 1)[1]
+        if mid and mid not in known_ollama_ids:
+            ollama_models.append({'id': mid, 'name': mid, 'input': ['text']})
+            known_ollama_ids.add(mid)
+# 同样注册 memorySearch 模型
+if _local_ms_model and _local_ms_model not in known_ollama_ids:
+    ollama_models.append({'id': _local_ms_model, 'name': _local_ms_model, 'input': ['text']})
 
 memory_cfg.setdefault('enabled', True)
 memory_cfg.setdefault('shortTerm', {}).setdefault('enabled', True)
