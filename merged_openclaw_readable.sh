@@ -1809,11 +1809,11 @@ text = '\n'.join(lines)
 # 移除块注释 (/* ... */)
 text = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
 
-# 移除尾逗号 (在 ] 或 } 之前)
+# 移除尾逗号 (在 ] 或 } 之前) — 仅在注释之外安全替换
+# 注意：此正则不会匹配 JSON 字符串字面量内部的模式，因为尾逗号后紧跟 ] 或 }
 text = re.sub(r',(\s*[}\]])', r'\1', text)
 
-# 移除空行和额外空白
-text = re.sub(r'\n\s*\n', '\n', text)
+# 注意：不再移除空行，避免破坏 JSON 字符串值中的 \n\n
 
 open(sys.argv[2], 'w', encoding='utf-8').write(text)
 PY
@@ -15379,39 +15379,88 @@ EOF
 
     [[ -f "$config_file" ]] && cp "$config_file" "${config_file}.bak.$(date +%s)"
 
-    jq --arg prov "$provider_name" \
-       --arg url "$base_url" \
-       --arg key "$api_key" \
-       --arg api "$DETECTED_API" \
-       --argjson models "$models_array" \
-    '
-    .models |= (
-      (. // { mode: "merge", providers: {} })
-      | .mode = "merge"
-      | .providers[$prov] = {
-        baseUrl: $url,
-        apiKey: $key,
-        api: $api,
-        models: $models
-      }
-    )
-    | .agents |= (. // {})
-    | .agents.defaults |= (. // {})
-    | .agents.defaults.models |= (
-      (if type == "object" then .
-       elif type == "array" then reduce .[] as $m ({}; if ($m|type) == "string" then .[$m] = {} else . end)
-       else {}
-       end) as $existing
-      | reduce ($models[]? | .id? // empty | tostring) as $mid (
-        $existing;
-        if ($mid | length) > 0 then
-          .["\($prov)/\($mid)"] //= {}
-        else
-          .
-        end
-      )
-    )
-    ' "$config_file" > "${config_file}.tmp" && mv "${config_file}.tmp" "$config_file"
+    # 使用 Python 做增量修改，兼容 JSON5 格式（jq 无法处理注释和尾随逗号）
+    python3 - "$config_file" "$provider_name" "$base_url" "$api_key" "$DETECTED_API" "$models_array" <<'PY'
+import json, re, sys, os, tempfile, shutil
+from pathlib import Path
+
+out_path = Path(sys.argv[1])
+provider_name = sys.argv[2]
+base_url = sys.argv[3]
+api_key = sys.argv[4]
+api_type = sys.argv[5]
+models_array = json.loads(sys.argv[6])
+
+# 1. 安全读取原配置（正则修复JSON5）
+cfg = {}
+if out_path.exists():
+    raw = out_path.read_text(encoding='utf-8')
+    raw = re.sub(r',\s*([}\]])', r'\1', raw)
+    raw = re.sub(r'/\*.*?\*/', '', raw, flags=re.DOTALL)
+    lines = []
+    for line in raw.split('\n'):
+        if '//' in line and not ('http://' in line or 'https://' in line):
+            line = re.sub(r'//.*$', '', line)
+        lines.append(line)
+    raw = '\n'.join(lines)
+    try:
+        cfg = json.loads(raw) if raw.strip() else {}
+    except Exception as e:
+        print(f"❌ 配置解析失败: {e}", file=sys.stderr)
+        sys.exit(1)
+
+if not isinstance(cfg, dict):
+    cfg = {}
+
+# 2. 增量修改 models.providers（保留其他 provider 不变）
+models = cfg.setdefault('models', {})
+models.setdefault('mode', 'merge')
+providers = models.setdefault('providers', {})
+
+# 保留已有 provider 配置，仅更新/添加指定 provider
+existing_prov = providers.get(provider_name, {})
+providers[provider_name] = {
+    "baseUrl": base_url,
+    "apiKey": api_key,
+    "api": api_type,
+    "models": models_array
+}
+# 保留原有其他字段（如 timeoutSeconds 等）
+for k, v in existing_prov.items():
+    if k not in ('baseUrl', 'apiKey', 'api', 'models'):
+        providers[provider_name][k] = v
+
+# 3. 增量修改 agents.defaults.models（添加新模型引用）
+agents = cfg.setdefault('agents', {}).setdefault('defaults', {})
+existing_models = agents.get('models')
+if not isinstance(existing_models, dict):
+    if isinstance(existing_models, list):
+        existing_models = {str(item): {} for item in existing_models if isinstance(item, str)}
+    else:
+        existing_models = {}
+agents['models'] = existing_models
+
+for m in models_array:
+    if isinstance(m, dict) and 'id' in m:
+        model_ref = f"{provider_name}/{m['id']}"
+        existing_models.setdefault(model_ref, {})
+
+# 4. 原子写入
+out_path.parent.mkdir(parents=True, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=str(out_path.parent), prefix='.openclaw_api_', suffix='.json')
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write('\n')
+    shutil.move(tmp, str(out_path))
+    print(f"✅ 已添加 provider [{provider_name}]，模型数: {len(models_array)}")
+    print(f"   agents.list 和 models.providers 其他条目完整保留")
+except Exception as e:
+    try: os.unlink(tmp)
+    except: pass
+    print(f"❌ 写入失败: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
   }
 
   # 核心函数：获取并添加所有模型
@@ -20612,8 +20661,13 @@ PY
 }
 
 openclaw_apply_and_restart() {
+    local skip_optimize="${1:-false}"
     echo "💾 正在保存配置并重启 OpenClaw..."
-    openclaw_optimize_memory_and_skills || echo "⚠️ 配置优化跳过（非致命）"
+    if [ "$skip_optimize" != "true" ]; then
+      openclaw_optimize_memory_and_skills || echo "⚠️ 配置优化跳过（非致命）"
+    else
+      echo "   ⏭️ 跳过配置优化（配置刚由多Agent架构写入，避免二次覆盖）"
+    fi
     # 写入完成后先做配置验证
     if command -v openclaw >/dev/null 2>&1; then
       local validate_out
@@ -20627,7 +20681,7 @@ openclaw_apply_and_restart() {
     fi
     # 先停掉可能处于崩溃循环的网关
     systemctl --user stop openclaw-gateway.service 2>/dev/null || true
-    sleep 2
+    sleep 3
     systemctl --user reset-failed openclaw-gateway.service 2>/dev/null || true
     start_gateway force 0 2>/dev/null || openclaw gateway restart 2>/dev/null || {
       echo "❌ 网关启动失败！请检查: systemctl --user status openclaw-gateway"
@@ -20693,7 +20747,7 @@ openclaw_memorysearch_loop_self_heal() {
 }
 
 openclaw_optimize_memory_and_skills() {
-    local config_file tmp_json bak_file original_bytes
+    local config_file bak_file original_bytes
     config_file=$(openclaw_get_config_file)
     mkdir -p "$HOME/.openclaw/workspace" "$HOME/.openclaw/workspace/skills" "$HOME/.openclaw/workspace/memory"
 
@@ -20712,28 +20766,30 @@ openclaw_optimize_memory_and_skills() {
     bak_file="${config_file}.bak.$(date +%Y%m%d_%H%M%S)"
     cp "$config_file" "$bak_file" 2>/dev/null || true
 
-    # JSON5 safe: pre-process config to temp JSON
-    tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-    if ! openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null; then
-      rm -f "$tmp_json"
-      echo "⚠️ JSON5 预处理失败，跳过配置优化"
-      return 0
-    fi
-
-    python3 - "$config_file" "$tmp_json" "$original_bytes" <<'PY'
-import json, sys, os
+    # 使用内联正则解析 JSON5（与 openclaw_write_multi_agent_config 一致），
+    # 避免 openclaw_json5_to_json 的缺陷
+    python3 - "$config_file" "$original_bytes" <<'PY'
+import json, re, sys, os, tempfile, shutil
 from pathlib import Path
 
-out_path = Path(sys.argv[1])   # original config file (write target)
-cfg_path = Path(sys.argv[2])   # JSON5-safe temp copy (read source)
-orig_bytes = int(sys.argv[3])  # original file size
+out_path = Path(sys.argv[1])
+orig_bytes = int(sys.argv[2])
 
+# 1. 安全读取原配置（正则修复JSON5）
 cfg = {}
 read_ok = False
-if cfg_path.exists() and cfg_path.stat().st_size > 0:
+if out_path.exists() and out_path.stat().st_size > 0:
+    raw = out_path.read_text(encoding='utf-8')
+    raw = re.sub(r',\s*([}\]])', r'\1', raw)
+    raw = re.sub(r'/\*.*?\*/', '', raw, flags=re.DOTALL)
+    lines = []
+    for line in raw.split('\n'):
+        if '//' in line and not ('http://' in line or 'https://' in line):
+            line = re.sub(r'//.*$', '', line)
+        lines.append(line)
+    raw = '\n'.join(lines)
     try:
-        raw = cfg_path.read_text(encoding='utf-8')
-        cfg = json.loads(raw)
+        cfg = json.loads(raw) if raw.strip() else {}
         if isinstance(cfg, dict):
             read_ok = True
     except Exception:
@@ -20748,6 +20804,7 @@ if not read_ok or len(cfg) == 0:
 agents_before = len(cfg.get('agents', {}).get('list', []))
 models_before = sum(1 for _ in cfg.get('models', {}).get('providers', {}).values() if isinstance(_, dict) and _.get('models'))
 
+# 2. 仅修改必要的字段
 gateway = cfg.setdefault('gateway', {})
 gateway.setdefault('mode', 'local')
 gateway['bind'] = 'loopback'
@@ -20757,7 +20814,6 @@ for legacy_key in ('host', 'hostname', 'url', 'baseUrl'):
 gateway.setdefault('auth', {})['mode'] = 'token'
 gateway.pop('controlUi', None)
 
-# OpenClaw 2026.6+: tools.profile 替代了不存在的 tools.global.enabled
 tools_cfg = cfg.setdefault('tools', {})
 tools_cfg.pop('global', None)
 tools_cfg.setdefault('profile', 'coding')
@@ -20784,10 +20840,20 @@ if agents_before > 0 and agents_after == 0:
     print(f"⚠️ agents.list 被意外清空 ({agents_before}→0)，放弃写入", file=sys.stderr)
     sys.exit(0)
 
+# 3. 原子写入
 out_path.parent.mkdir(parents=True, exist_ok=True)
-out_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+fd, tmp = tempfile.mkstemp(dir=str(out_path.parent), prefix='.openclaw_opt_', suffix='.json')
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write('\n')
+    shutil.move(tmp, str(out_path))
+except Exception as e:
+    try: os.unlink(tmp)
+    except: pass
+    print(f"⚠️ 配置优化写入失败: {e}", file=sys.stderr)
+    sys.exit(0)
 PY
-    rm -f "$tmp_json"
 
     # 清理旧备份（保留最近3个）
     ls -t "${config_file}.bak."* 2>/dev/null | tail -n +4 | xargs rm -f 2>/dev/null || true
@@ -21546,12 +21612,16 @@ for a in agent_list:
     all_models.add(a['model'])
 existing_ids = {m['id'] if isinstance(m, dict) else m for m in ollama_prov.get('models', [])}
 for m in all_models:
-    if '/' not in m:  # ollama local
+    if '/' not in m:  # ollama local (no prefix)
         if m not in existing_ids:
             ollama_prov.setdefault('models', []).append({'id': m, 'name': m, 'input': ['text']})
     else:
         p, mn = m.split('/', 1)
-        if p != 'ollama' and p in providers:
+        if p == 'ollama':
+            # ollama 模型带前缀，注册到 ollama provider（去掉前缀）
+            if mn not in existing_ids:
+                ollama_prov.setdefault('models', []).append({'id': mn, 'name': mn, 'input': ['text']})
+        elif p in providers:
             p_models = providers[p].setdefault('models', [])
             p_existing = {item['id'] if isinstance(item, dict) else item for item in p_models}
             if mn not in p_existing:
@@ -21795,8 +21865,8 @@ PY
   # 生成并写入多Agent配置
   openclaw_write_multi_agent_config "$tier" "$cloud_model" "$force_flag" || return 1
 
-  # 重启网关使配置生效
-  openclaw_apply_and_restart
+  # 重启网关使配置生效（跳过优化，避免二次写入覆盖Agent配置）
+  openclaw_apply_and_restart true
 }
 
 # ── 多Agent所需模型自动拉取 ──
@@ -23233,7 +23303,7 @@ PY
 
 openclaw_memory_apply_current_scheme() {
   local tier force="${1:-false}"
-  local config_file tmp_json
+  local config_file
   local want_local_models="true"
   local want_vision_models="false"
   config_file=$(openclaw_get_config_file)
@@ -23241,72 +23311,105 @@ openclaw_memory_apply_current_scheme() {
   openclaw_runtime_self_heal || return 1
   openclaw_memory_prepare_workspace_all >/dev/null 2>&1 || true
 
-  # ── 多Agent多模型架构 (OpenClaw 原生方式) ──
-  # 检测硬件分级，一次性生成所有Agent配置
+  # ── 仅应用记忆相关设置，不触发全量多Agent部署 ──
+  # 多Agent架构应在首次部署时一次性完成，记忆方案调整不应覆盖Agent配置
   tier=$(openclaw_detect_hardware_tier 2>/dev/null || echo "entry-cpu")
   echo "🔍 硬件分级检测: $tier"
-  echo "🚀 正在构建多Agent多模型智能调度..."
-  openclaw_apply_multi_agent_architecture "$force" || return 1
+  echo "🧠 正在应用记忆方案（保留现有Agent配置）..."
 
-  openclaw_optimize_memory_and_skills >/dev/null 2>&1 || true
   openclaw_inject_skills >/dev/null 2>&1 || true
   openclaw_safe_enable_global_tools >/dev/null 2>&1 || true
-  # JSON5 safe: pre-process config to temp JSON
-  tmp_json=$(mktemp /tmp/openclaw_cfg_XXXXXX.json)
-  openclaw_json5_to_json "$config_file" "$tmp_json" 2>/dev/null || echo '{}' > "$tmp_json"
-  python3 - "$config_file" "$tmp_json" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
-import json
-import sys
+
+  # 使用正则安全解析JSON5（与 openclaw_write_multi_agent_config 一致），
+  # 避免依赖 openclaw_json5_to_json 的缺陷
+  python3 - "$config_file" "$SKPL_MEMORY_EXTENSION_CONFIG" <<'PY'
+import json, re, sys, os, tempfile, shutil
 from pathlib import Path
 
-out_path = Path(sys.argv[1])      # original config file (write target)
-cfg_path = Path(sys.argv[2])      # JSON5-safe temp copy (read source)
-memory_cfg_path = Path(sys.argv[3])
+out_path = Path(sys.argv[1])
+memory_cfg_path = Path(sys.argv[2]) if len(sys.argv) > 2 else None
+
+# 1. 安全读取原配置（正则修复JSON5，与主函数保持一致）
 cfg = {}
-if cfg_path.exists():
+if out_path.exists():
+    raw = out_path.read_text(encoding='utf-8')
+    raw = re.sub(r',\s*([}\]])', r'\1', raw)
+    raw = re.sub(r'/\*.*?\*/', '', raw, flags=re.DOTALL)
+    lines = []
+    for line in raw.split('\n'):
+        if '//' in line and not ('http://' in line or 'https://' in line):
+            line = re.sub(r'//.*$', '', line)
+        lines.append(line)
+    raw = '\n'.join(lines)
     try:
-        cfg = json.loads(cfg_path.read_text(encoding='utf-8'))
-    except Exception:
-        cfg = {}
+        cfg = json.loads(raw) if raw.strip() else {}
+    except Exception as e:
+        print(f"⚠️ 配置解析失败，跳过记忆方案写入: {e}", file=sys.stderr)
+        sys.exit(0)
+
+if not isinstance(cfg, dict) or len(cfg) == 0:
+    print("⚠️ 配置为空，跳过记忆方案写入", file=sys.stderr)
+    sys.exit(0)
+
+# 2. 仅修改 memory 和 memorySearch 相关字段（不触碰 agents.list / models.providers）
 memory = cfg.setdefault('memory', {})
 memory.setdefault('backend', 'builtin')
 qmd = memory.setdefault('qmd', {})
 qmd['includeDefaultMemory'] = True
-# OpenClaw 2026.6+: memorySearch under agents.defaults, tools at root level
+
 agents = cfg.setdefault('agents', {}).setdefault('defaults', {})
 memory_search = agents.setdefault('memorySearch', {})
 memory_search['provider'] = 'ollama'
 memory_search['model'] = memory_search.get('model') or 'qwen2.5:7b'
 agents.setdefault('workspace', '~/.openclaw/workspace')
-out_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 
-memory_cfg = {}
-if memory_cfg_path.exists():
-    try:
-        memory_cfg = json.loads(memory_cfg_path.read_text(encoding='utf-8'))
-    except Exception:
-        memory_cfg = {}
-memory_cfg.setdefault('enabled', True)
-memory_cfg.setdefault('shortTerm', {}).setdefault('enabled', True)
-memory_cfg.setdefault('midTerm', {}).setdefault('enabled', True)
-memory_cfg.setdefault('longTerm', {}).setdefault('enabled', True)
-memory_cfg.setdefault('longTerm', {})['autoExtract'] = memory_cfg.get('longTerm', {}).get('autoExtract') or 'balanced'
-memory_cfg.setdefault('knowledgeBase', {}).setdefault('enabled', True)
-privacy = memory_cfg.setdefault('privacy', {})
-privacy.setdefault('localOnly', True)
-privacy.setdefault('maskSensitive', True)
-privacy.setdefault('blockedKeywords', [])
-privacy.setdefault('encryptAtRest', False)
-privacy.setdefault('cloudUploadMemory', False)
-injection = memory_cfg.setdefault('injection', {})
-injection.setdefault('maxContextPercent', 15)
-injection.setdefault('similarityThreshold', 0.58)
-maintenance = memory_cfg.setdefault('maintenance', {})
-maintenance['cleanupDays'] = int(maintenance.get('cleanupDays', 30) or 30)
-maintenance['autoUpdateMinutes'] = int(maintenance.get('autoUpdateMinutes', 30) or 30)
-memory_cfg_path.write_text(json.dumps(memory_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+# 3. 原子写入（先备份，再临时文件，再替换）
+if out_path.exists() and out_path.stat().st_size > 10:
+    bak_path = Path(str(out_path) + '.mem-scheme.bak')
+    shutil.copy2(out_path, bak_path)
+
+out_path.parent.mkdir(parents=True, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=str(out_path.parent), prefix='.openclaw_mem_', suffix='.json')
+try:
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write('\n')
+    shutil.move(tmp, str(out_path))
+    print(f"✅ 记忆方案已写入配置 (agents.list 和 models.providers 完整保留)")
+except Exception as e:
+    try: os.unlink(tmp)
+    except: pass
+    print(f"❌ 记忆方案写入失败: {e}", file=sys.stderr)
+    sys.exit(1)
+
+# 4. 写入独立的记忆扩展配置文件
+if memory_cfg_path:
+    memory_cfg = {}
+    if memory_cfg_path.exists():
+        try:
+            memory_cfg = json.loads(memory_cfg_path.read_text(encoding='utf-8'))
+        except Exception:
+            memory_cfg = {}
+    memory_cfg.setdefault('enabled', True)
+    memory_cfg.setdefault('shortTerm', {}).setdefault('enabled', True)
+    memory_cfg.setdefault('midTerm', {}).setdefault('enabled', True)
+    memory_cfg.setdefault('longTerm', {}).setdefault('enabled', True)
+    memory_cfg.setdefault('longTerm', {})['autoExtract'] = memory_cfg.get('longTerm', {}).get('autoExtract') or 'balanced'
+    memory_cfg.setdefault('knowledgeBase', {}).setdefault('enabled', True)
+    privacy = memory_cfg.setdefault('privacy', {})
+    privacy.setdefault('localOnly', True)
+    privacy.setdefault('maskSensitive', True)
+    privacy.setdefault('blockedKeywords', [])
+    privacy.setdefault('encryptAtRest', False)
+    privacy.setdefault('cloudUploadMemory', False)
+    injection = memory_cfg.setdefault('injection', {})
+    injection.setdefault('maxContextPercent', 15)
+    injection.setdefault('similarityThreshold', 0.58)
+    maintenance = memory_cfg.setdefault('maintenance', {})
+    maintenance['cleanupDays'] = int(maintenance.get('cleanupDays', 30) or 30)
+    maintenance['autoUpdateMinutes'] = int(maintenance.get('autoUpdateMinutes', 30) or 30)
+    memory_cfg_path.write_text(json.dumps(memory_cfg, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
 PY
-  rm -f "$tmp_json"
   want_local_models=$(python3 - "$SKPL_AI_STACK_ROOT/config.json" <<'PY'
 import json
 import sys
